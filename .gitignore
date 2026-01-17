@@ -8,3 +8,7 @@ node_modules
 !.env.example
 .vercel
 .output
+
+# SQLite database
+/data/*.db
+/data/*.db-journal

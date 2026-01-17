@@ -1,58 +1,24 @@
 <script>
-	import Header from '$lib/header/Header.svelte';
-  import { webVitals } from '$lib/vitals';
-  import { browser } from '$app/env';
-  import { page } from '$app/stores';
   import '../app.css';
 
-  let analyticsId = import.meta.env.VERCEL_ANALYTICS_ID;
-
-  $: if (browser && analyticsId) {
-    webVitals({
-      path: $page.url.pathname,
-      params: $page.params,
-      analyticsId
-    })
-  }
+  let { children } = $props();
 </script>
 
-<Header />
+<div class="min-h-screen flex flex-col">
+  <header class="border-b bg-background">
+    <div class="container mx-auto px-4 py-4 flex items-center justify-between">
+      <a href="/" class="text-xl font-bold">Appmixer Sanity Check</a>
+      <nav class="flex items-center gap-4">
+        <a href="/" class="text-sm text-muted-foreground hover:text-foreground">Dashboard</a>
+      </nav>
+    </div>
+  </header>
 
-<main>
-	<slot />
-</main>
+  <main class="flex-1 container mx-auto px-4 py-8">
+    {@render children?.()}
+  </main>
 
-<footer>
-	<p>visit <a href="https://kit.svelte.dev">kit.svelte.dev</a> to learn SvelteKit</p>
-</footer>
-
-<style>
-	main {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		padding: 1rem;
-		width: 100%;
-		max-width: 1024px;
-		margin: 0 auto;
-		box-sizing: border-box;
-	}
-
-	footer {
-		display: flex;
-		flex-direction: column;
-		justify-content: center;
-		align-items: center;
-		padding: 40px;
-	}
-
-	footer a {
-		font-weight: bold;
-	}
-
-	@media (min-width: 480px) {
-		footer {
-			padding: 40px 0;
-		}
-	}
-</style>
+  <footer class="border-t py-4 text-center text-sm text-muted-foreground">
+    Appmixer Sanity Check Tracker
+  </footer>
+</div>
