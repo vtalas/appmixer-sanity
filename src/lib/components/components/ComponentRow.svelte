@@ -5,7 +5,7 @@
   import StatusBadge from '$lib/components/shared/StatusBadge.svelte';
   import { ExternalLink, Plus, X } from 'lucide-svelte';
 
-  let { component, onStatusChange } = $props();
+  let { component, onStatusChange, onSaving, onSaved } = $props();
 
   let githubIssues = $state([]);
   let newIssueUrl = $state('');
@@ -26,8 +26,11 @@
     return match ? `#${match[1]}` : null;
   }
 
-  async function setStatus(/** @type {string} */ status, /** @type {string[] | undefined} */ issues = undefined) {
+  async function setStatus(/** @type {string} */ status, /** @type {string[] | undefined} */ issues = undefined, /** @type {string | undefined} */ savingMessage = undefined) {
     isUpdating = true;
+    const componentLabel = component.label || component.component_name.split('.').pop();
+    const defaultMessage = issues !== undefined ? 'Updating GitHub issues...' : `Setting ${componentLabel} to ${status}...`;
+    onSaving?.(savingMessage || defaultMessage);
     try {
       /** @type {{ status: string, githubIssues?: string[] }} */
       const body = { status };
@@ -42,13 +45,17 @@
       });
 
       if (response.ok) {
+        const savedMessage = issues !== undefined ? 'GitHub issues updated' : `${componentLabel} marked as ${status}`;
+        onSaved?.(savedMessage);
         onStatusChange?.();
       } else {
         const error = await response.json();
+        onSaved?.('');
         alert(error.error || 'Failed to update status');
       }
     } catch (error) {
       console.error('Error updating component:', error);
+      onSaved?.('');
       alert('Failed to update status');
     } finally {
       isUpdating = false;
@@ -58,14 +65,14 @@
   async function addIssue() {
     if (!newIssueUrl.trim()) return;
     const updatedIssues = [...githubIssues, newIssueUrl.trim()];
-    await setStatus(component.status || 'fail', updatedIssues);
+    await setStatus(component.status || 'fail', updatedIssues, 'Adding GitHub issue...');
     newIssueUrl = '';
     showAddInput = false;
   }
 
   async function removeIssue(/** @type {number} */ index) {
     const updatedIssues = githubIssues.filter((/** @type {string} */ _, /** @type {number} */ i) => i !== index);
-    await setStatus(component.status, updatedIssues);
+    await setStatus(component.status, updatedIssues, 'Removing GitHub issue...');
   }
 </script>
 

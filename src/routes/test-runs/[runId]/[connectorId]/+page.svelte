@@ -6,6 +6,7 @@
   import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '$lib/components/ui/dialog';
   import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '$lib/components/ui/table';
   import StatusBadge from '$lib/components/shared/StatusBadge.svelte';
+  import SaveStatus from '$lib/components/shared/SaveStatus.svelte';
   import ComponentRow from '$lib/components/components/ComponentRow.svelte';
   import { invalidateAll } from '$app/navigation';
 
@@ -16,6 +17,20 @@
   let notes = $state('');
   let isUpdating = $state(false);
   let isSavingNotes = $state(false);
+
+  // Save status tracking
+  let saveStatus = $state('idle');
+  let saveMessage = $state('');
+
+  function setSaving(/** @type {string} */ message) {
+    saveStatus = 'saving';
+    saveMessage = message;
+  }
+
+  function setSaved(/** @type {string} */ message) {
+    saveStatus = 'saved';
+    saveMessage = message;
+  }
 
   $effect(() => {
     blockedReason = data.connector.blocked_reason || '';
@@ -33,6 +48,8 @@
 
   async function updateConnectorStatus(status, reason = null) {
     isUpdating = true;
+    const statusLabel = status === 'blocked' ? 'Setting as blocked...' : status === 'pending' ? 'Unblocking...' : 'Updating status...';
+    setSaving(statusLabel);
     try {
       const body = { status };
       if (status === 'blocked' && reason) {
@@ -47,13 +64,16 @@
 
       if (response.ok) {
         showBlockedDialog = false;
+        setSaved(status === 'blocked' ? 'Connector blocked' : status === 'pending' ? 'Connector unblocked' : 'Status updated');
         await invalidateAll();
       } else {
         const error = await response.json();
+        saveStatus = 'idle';
         alert(error.error || 'Failed to update connector');
       }
     } catch (error) {
       console.error('Error updating connector:', error);
+      saveStatus = 'idle';
       alert('Failed to update connector');
     } finally {
       isUpdating = false;
@@ -70,6 +90,7 @@
 
   async function saveNotes() {
     isSavingNotes = true;
+    setSaving('Saving notes...');
     try {
       const response = await fetch(`/api/connectors/${data.connector.id}`, {
         method: 'PATCH',
@@ -77,12 +98,16 @@
         body: JSON.stringify({ notes })
       });
 
-      if (!response.ok) {
+      if (response.ok) {
+        setSaved('Notes saved');
+      } else {
         const error = await response.json();
+        saveStatus = 'idle';
         alert(error.error || 'Failed to save notes');
       }
     } catch (error) {
       console.error('Error saving notes:', error);
+      saveStatus = 'idle';
       alert('Failed to save notes');
     } finally {
       isSavingNotes = false;
@@ -191,12 +216,15 @@
       </TableHeader>
       <TableBody>
         {#each data.components as component (component.id)}
-          <ComponentRow {component} onStatusChange={invalidateAll} />
+          <ComponentRow {component} onStatusChange={invalidateAll} onSaving={setSaving} onSaved={setSaved} />
         {/each}
       </TableBody>
     </Table>
   {/if}
 </div>
+
+<!-- Save Status -->
+<SaveStatus bind:status={saveStatus} bind:message={saveMessage} />
 
 <!-- Blocked Dialog -->
 <Dialog bind:open={showBlockedDialog}>
