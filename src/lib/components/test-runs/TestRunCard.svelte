@@ -1,10 +1,14 @@
 <script>
+  import { goto } from '$app/navigation';
   import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '$lib/components/ui/card';
   import { Button } from '$lib/components/ui/button';
   import { Progress } from '$lib/components/ui/progress';
   import StatusBadge from '$lib/components/shared/StatusBadge.svelte';
+  import { Loader2 } from 'lucide-svelte';
 
   let { testRun, onDelete } = $props();
+
+  let isNavigating = $state(false);
 
   const testedCount = $derived(testRun.ok_count + testRun.fail_count + testRun.blocked_count);
   const progress = $derived(testRun.connector_count > 0 ? (testedCount / testRun.connector_count) * 100 : 0);
@@ -17,6 +21,11 @@
       hour: '2-digit',
       minute: '2-digit'
     });
+  }
+
+  async function handleViewDetails() {
+    isNavigating = true;
+    await goto(`/test-runs/${testRun.id}`);
   }
 
   async function handleDelete() {
@@ -69,10 +78,15 @@
   </CardContent>
 
   <CardFooter class="gap-2">
-    <Button variant="default" class="flex-1" onclick={() => window.location.href = `/test-runs/${testRun.id}`}>
-      View Details
+    <Button variant="default" class="flex-1" onclick={handleViewDetails} disabled={isNavigating}>
+      {#if isNavigating}
+        <Loader2 class="w-4 h-4 mr-2 animate-spin" />
+        Loading...
+      {:else}
+        View Details
+      {/if}
     </Button>
-    <Button variant="outline" onclick={handleDelete}>
+    <Button variant="outline" onclick={handleDelete} disabled={isNavigating}>
       Delete
     </Button>
   </CardFooter>
