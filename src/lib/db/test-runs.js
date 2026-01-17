@@ -66,3 +66,74 @@ export async function deleteTestRun(id) {
   await getDb().execute({ sql: `DELETE FROM connectors WHERE test_run_id = ?`, args: [id] });
   return getDb().execute({ sql: `DELETE FROM test_runs WHERE id = ?`, args: [id] });
 }
+
+/**
+ * Get daily testing report for a test run
+ */
+export async function getTestRunDailyReport(testRunId) {
+  // Get daily component stats
+  const componentStats = await getDb().execute({
+    sql: `
+      SELECT
+        DATE(comp.tested_at) as date,
+        COUNT(*) as components_tested,
+        SUM(CASE WHEN comp.status = 'ok' THEN 1 ELSE 0 END) as components_ok,
+        SUM(CASE WHEN comp.status = 'fail' THEN 1 ELSE 0 END) as components_fail
+      FROM components comp
+      JOIN connectors conn ON comp.connector_id = conn.id
+      WHERE conn.test_run_id = ? AND comp.tested_at IS NOT NULL
+      GROUP BY DATE(comp.tested_at)
+      ORDER BY date ASC
+    `,
+    args: [testRunId]
+  });
+
+  // Get daily connector completion stats (connector is "tested" when all its components are tested)
+  const connectorStats = await getDb().execute({
+    sql: `
+      SELECT
+        DATE(last_tested) as date,
+        COUNT(*) as connectors_completed,
+        SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END) as connectors_ok,
+        SUM(CASE WHEN status = 'fail' THEN 1 ELSE 0 END) as connectors_fail,
+        SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) as connectors_blocked
+      FROM (
+        SELECT
+          conn.id,
+          conn.status,
+          MAX(comp.tested_at) as last_tested
+        FROM connectors conn
+        JOIN components comp ON comp.connector_id = conn.id
+        WHERE conn.test_run_id = ?
+          AND conn.status != 'pending'
+          AND NOT EXISTS (
+            SELECT 1 FROM components c2
+            WHERE c2.connector_id = conn.id AND c2.status = 'pending'
+          )
+        GROUP BY conn.id, conn.status
+      )
+      WHERE last_tested IS NOT NULL
+      GROUP BY DATE(last_tested)
+      ORDER BY date ASC
+    `,
+    args: [testRunId]
+  });
+
+  // Get overall totals
+  const totals = await getDb().execute({
+    sql: `
+      SELECT
+        (SELECT COUNT(*) FROM connectors WHERE test_run_id = ?) as total_connectors,
+        (SELECT COUNT(*) FROM connectors WHERE test_run_id = ? AND status != 'pending') as tested_connectors,
+        (SELECT COUNT(*) FROM components WHERE connector_id IN (SELECT id FROM connectors WHERE test_run_id = ?)) as total_components,
+        (SELECT COUNT(*) FROM components WHERE connector_id IN (SELECT id FROM connectors WHERE test_run_id = ?) AND status != 'pending') as tested_components
+    `,
+    args: [testRunId, testRunId, testRunId, testRunId]
+  });
+
+  return {
+    dailyComponents: componentStats.rows,
+    dailyConnectors: connectorStats.rows,
+    totals: totals.rows[0]
+  };
+}
