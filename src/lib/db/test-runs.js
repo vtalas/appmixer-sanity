@@ -1,4 +1,5 @@
 import { getDb } from './index.js';
+import { cache, CACHE_KEYS } from '../cache.js';
 
 /**
  * Get all test runs ordered by creation date (newest first)
@@ -18,9 +19,13 @@ export async function getAllTestRuns() {
 }
 
 /**
- * Get a test run by ID
+ * Get a test run by ID (cached)
  */
 export async function getTestRunById(id) {
+  const cacheKey = CACHE_KEYS.testRun(id);
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
   const result = await getDb().execute({
     sql: `
       SELECT
@@ -34,7 +39,12 @@ export async function getTestRunById(id) {
     `,
     args: [id]
   });
-  return result.rows[0];
+
+  const testRun = result.rows[0];
+  if (testRun) {
+    cache.set(cacheKey, testRun);
+  }
+  return testRun;
 }
 
 /**
@@ -51,6 +61,7 @@ export async function createTestRun({ id, name }) {
  * Update test run status
  */
 export async function updateTestRunStatus(id, status) {
+  cache.invalidate(CACHE_KEYS.testRun(id));
   return getDb().execute({
     sql: `UPDATE test_runs SET status = ? WHERE id = ?`,
     args: [status, id]
@@ -61,6 +72,13 @@ export async function updateTestRunStatus(id, status) {
  * Delete a test run (cascades to connectors and components)
  */
 export async function deleteTestRun(id) {
+  // Invalidate all related caches
+  cache.invalidate(CACHE_KEYS.testRun(id));
+  cache.invalidate(CACHE_KEYS.connectors(id));
+  cache.invalidate(CACHE_KEYS.report(id));
+  cache.invalidatePrefix(`connector:`);
+  cache.invalidatePrefix(`components:`);
+
   // Delete in order due to foreign keys (Turso may not have cascade enabled by default)
   await getDb().execute({ sql: `DELETE FROM components WHERE connector_id IN (SELECT id FROM connectors WHERE test_run_id = ?)`, args: [id] });
   await getDb().execute({ sql: `DELETE FROM connectors WHERE test_run_id = ?`, args: [id] });
@@ -68,9 +86,13 @@ export async function deleteTestRun(id) {
 }
 
 /**
- * Get daily testing report for a test run
+ * Get daily testing report for a test run (cached)
  */
 export async function getTestRunDailyReport(testRunId) {
+  const cacheKey = CACHE_KEYS.report(testRunId);
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
   // Get daily component stats
   const componentStats = await getDb().execute({
     sql: `
@@ -131,9 +153,12 @@ export async function getTestRunDailyReport(testRunId) {
     args: [testRunId, testRunId, testRunId, testRunId]
   });
 
-  return {
+  const report = {
     dailyComponents: componentStats.rows,
     dailyConnectors: connectorStats.rows,
     totals: totals.rows[0]
   };
+
+  cache.set(cacheKey, report, 2 * 60 * 1000); // Cache for 2 minutes
+  return report;
 }
