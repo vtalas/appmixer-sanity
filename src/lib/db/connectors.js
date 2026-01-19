@@ -1,9 +1,14 @@
 import { getDb } from './index.js';
+import { cache, CACHE_KEYS } from '../cache.js';
 
 /**
- * Get all connectors for a test run
+ * Get all connectors for a test run (cached)
  */
 export async function getConnectorsByTestRun(testRunId) {
+  const cacheKey = CACHE_KEYS.connectors(testRunId);
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
   const result = await getDb().execute({
     sql: `
       SELECT
@@ -17,13 +22,19 @@ export async function getConnectorsByTestRun(testRunId) {
     `,
     args: [testRunId]
   });
+
+  cache.set(cacheKey, result.rows);
   return result.rows;
 }
 
 /**
- * Get a connector by ID
+ * Get a connector by ID (cached)
  */
 export async function getConnectorById(id) {
+  const cacheKey = CACHE_KEYS.connector(id);
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
   const result = await getDb().execute({
     sql: `
       SELECT
@@ -36,7 +47,12 @@ export async function getConnectorById(id) {
     `,
     args: [id]
   });
-  return result.rows[0];
+
+  const connector = result.rows[0];
+  if (connector) {
+    cache.set(cacheKey, connector);
+  }
+  return connector;
 }
 
 /**
@@ -64,6 +80,15 @@ export async function addConnectorToRun({
  * Update connector status
  */
 export async function updateConnectorStatus(id, status, blockedReason = null) {
+  // Get test_run_id for cache invalidation
+  const connector = await getConnectorById(id);
+  if (connector) {
+    cache.invalidate(CACHE_KEYS.connector(id));
+    cache.invalidate(CACHE_KEYS.connectors(connector.test_run_id));
+    cache.invalidate(CACHE_KEYS.testRun(connector.test_run_id));
+    cache.invalidate(CACHE_KEYS.report(connector.test_run_id));
+  }
+
   return getDb().execute({
     sql: `UPDATE connectors SET status = ?, blocked_reason = ? WHERE id = ?`,
     args: [status, blockedReason, id]
@@ -74,6 +99,8 @@ export async function updateConnectorStatus(id, status, blockedReason = null) {
  * Update connector notes
  */
 export async function updateConnectorNotes(id, notes) {
+  cache.invalidate(CACHE_KEYS.connector(id));
+
   return getDb().execute({
     sql: `UPDATE connectors SET notes = ? WHERE id = ?`,
     args: [notes, id]
@@ -106,7 +133,7 @@ export async function recalculateConnectorStatus(connectorId) {
 
   // Only update if not blocked (blocked is manual)
   const connectorResult = await getDb().execute({
-    sql: 'SELECT status FROM connectors WHERE id = ?',
+    sql: 'SELECT status, test_run_id FROM connectors WHERE id = ?',
     args: [connectorId]
   });
   const connector = connectorResult.rows[0];
@@ -116,6 +143,12 @@ export async function recalculateConnectorStatus(connectorId) {
       sql: 'UPDATE connectors SET status = ? WHERE id = ?',
       args: [newStatus, connectorId]
     });
+
+    // Invalidate caches
+    cache.invalidate(CACHE_KEYS.connector(connectorId));
+    cache.invalidate(CACHE_KEYS.connectors(connector.test_run_id));
+    cache.invalidate(CACHE_KEYS.testRun(connector.test_run_id));
+    cache.invalidate(CACHE_KEYS.report(connector.test_run_id));
   }
 
   return newStatus;

@@ -5,13 +5,17 @@
   import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '$lib/components/ui/dialog';
   import TestRunCard from '$lib/components/test-runs/TestRunCard.svelte';
   import { invalidateAll } from '$app/navigation';
+  import { marked } from 'marked';
 
   let { data } = $props();
 
   let showCreateDialog = $state(false);
+  let showInstructionsDialog = $state(false);
   let newRunName = $state('');
   let isCreating = $state(false);
   let createError = $state('');
+
+  const instructionsHtml = $derived(marked(data.testingInstructions));
 
   // Progress state
   let progressStep = $state('');
@@ -158,9 +162,14 @@
       <h1 class="text-3xl font-bold">Test Runs</h1>
       <p class="text-muted-foreground mt-1">Manage and track connector sanity checks</p>
     </div>
-    <Button onclick={() => (showCreateDialog = true)}>
-      Create Test Run
-    </Button>
+    <div class="flex gap-2">
+      <Button variant="outline" onclick={() => (showInstructionsDialog = true)}>
+        Testing Instructions
+      </Button>
+      <Button onclick={() => (showCreateDialog = true)}>
+        Create Test Run
+      </Button>
+    </div>
   </div>
 
   {#if data.testRuns.length === 0}
@@ -238,6 +247,29 @@
       </Button>
       <Button onclick={createTestRun} disabled={isCreating}>
         {isCreating ? 'Creating...' : 'Create'}
+      </Button>
+    </DialogFooter>
+  </DialogContent>
+</Dialog>
+
+<Dialog bind:open={showInstructionsDialog}>
+  <DialogContent class="max-w-3xl max-h-[80vh] overflow-hidden flex flex-col">
+    <DialogHeader>
+      <DialogTitle>Testing Instructions</DialogTitle>
+      <DialogDescription>
+        Guidelines for testing connectors and components
+      </DialogDescription>
+    </DialogHeader>
+
+    <div class="flex-1 overflow-y-auto py-4">
+      <div class="prose prose-sm dark:prose-invert max-w-none">
+        {@html instructionsHtml}
+      </div>
+    </div>
+
+    <DialogFooter>
+      <Button onclick={() => (showInstructionsDialog = false)}>
+        Close
       </Button>
     </DialogFooter>
   </DialogContent>

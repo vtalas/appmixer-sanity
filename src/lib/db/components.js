@@ -1,10 +1,15 @@
 import { getDb } from './index.js';
 import { recalculateConnectorStatus } from './connectors.js';
+import { cache, CACHE_KEYS } from '../cache.js';
 
 /**
- * Get all components for a connector
+ * Get all components for a connector (cached)
  */
 export async function getComponentsByConnector(connectorId) {
+  const cacheKey = CACHE_KEYS.components(connectorId);
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
   const result = await getDb().execute({
     sql: `
       SELECT * FROM components
@@ -13,6 +18,8 @@ export async function getComponentsByConnector(connectorId) {
     `,
     args: [connectorId]
   });
+
+  cache.set(cacheKey, result.rows);
   return result.rows;
 }
 
@@ -72,6 +79,8 @@ export async function updateComponentStatus(id, status, githubIssues = []) {
   });
   const component = result.rows[0];
   if (component) {
+    // Invalidate components cache
+    cache.invalidate(CACHE_KEYS.components(component.connector_id));
     await recalculateConnectorStatus(component.connector_id);
   }
 }
