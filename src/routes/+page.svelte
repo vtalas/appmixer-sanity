@@ -253,7 +253,7 @@
 </Dialog>
 
 <Dialog bind:open={showInstructionsDialog}>
-  <DialogContent class="max-w-3xl max-h-[80vh] overflow-hidden flex flex-col">
+  <DialogContent class="w-[90%] max-w-[1200px] max-h-[80vh] overflow-hidden flex flex-col">
     <DialogHeader>
       <DialogTitle>Testing Instructions</DialogTitle>
       <DialogDescription>

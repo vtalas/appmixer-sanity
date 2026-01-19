@@ -4,12 +4,12 @@
 
 This document provides guidance on how to test Appmixer connectors and their components during sanity checks.
 
-Instance for sanity check testing: https://my.clientio.appmixer.cloud/
-username: test@appmixer.ai 
-Test flow naming convention: `Sanity check - {connector name}`
-Github repository for issues: https://github.com/appmixer/appmixer-components
+Instance for sanity check testing: https://my.clientio.appmixer.cloud/  
+username: test@appmixer.ai   
+Test flow naming convention: `Sanity check - {connector name}`  
+Github repository for issues: https://github.com/appmixer/appmixer-components  
 Github issue conventions:
- - title: {connector.name}.{component.name}: brief description of the issue, for example `airtable.NewRecord: trigger is not firing`
+ - title: `{connector.name}.{component.name}: brief description of the issue`, for example `airtable.NewRecord: trigger is not firing`
  - label: `sanity-check #{sanity check number}`, for example `sanity-check #1`
 
 ## Testing Connectors
