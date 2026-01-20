@@ -1,7 +1,9 @@
 <script>
   import '../app.css';
+  import { signOut } from '@auth/sveltekit/client';
+  import { Button } from '$lib/components/ui/button';
 
-  let { children } = $props();
+  let { children, data } = $props();
 </script>
 
 <div class="min-h-screen flex flex-col">
@@ -10,6 +12,10 @@
       <a href="/" class="text-xl font-bold">Appmixer Sanity Check</a>
       <nav class="flex items-center gap-4">
         <a href="/" class="text-sm text-muted-foreground hover:text-foreground">Dashboard</a>
+        {#if data.session?.user}
+          <span class="text-sm text-muted-foreground">{data.session.user.email}</span>
+          <Button variant="outline" size="sm" onclick={() => signOut()}>Sign out</Button>
+        {/if}
       </nav>
     </div>
   </header>
