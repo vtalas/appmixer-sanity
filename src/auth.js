@@ -10,6 +10,7 @@ export const { handle, signIn, signOut } = SvelteKitAuth({
 		})
 	],
 	secret: env.AUTH_SECRET,
+	basePath: '/auth',
 	trustHost: true,
 	callbacks: {
 		async signIn({ user, account, profile }) {
