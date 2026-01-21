@@ -12,6 +12,7 @@
       <a href="/" class="text-xl font-bold">Appmixer Sanity Check</a>
       <nav class="flex items-center gap-4">
         <a href="/" class="text-sm text-muted-foreground hover:text-foreground">Dashboard</a>
+        <a href="/e2e-flows" class="text-sm text-muted-foreground hover:text-foreground">E2E Flows</a>
         {#if data.session?.user}
           <span class="text-sm text-muted-foreground">{data.session.user.email}</span>
           <Button variant="outline" size="sm" onclick={() => signOut()}>Sign out</Button>

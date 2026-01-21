@@ -184,6 +184,29 @@
     <p class="text-xs text-muted-foreground">Notes are saved automatically when you click outside the textarea.</p>
   </div>
 
+  <!-- E2E Test Flows -->
+  <div class="border rounded-lg p-4 space-y-2">
+    <h3 class="text-sm font-medium">E2E Test Flows</h3>
+    {#if data.e2eFlows?.length > 0}
+      <ul class="space-y-1">
+        {#each data.e2eFlows as flow}
+          <li>
+            <a
+              href={flow.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              class="text-blue-600 hover:underline text-sm"
+            >
+              {flow.name}
+            </a>
+          </li>
+        {/each}
+      </ul>
+    {:else}
+      <p class="text-sm text-muted-foreground">No E2E flows found for this connector</p>
+    {/if}
+  </div>
+
   <!-- Progress -->
   <div class="border rounded-lg p-4 space-y-3">
     <div class="flex justify-between text-sm">
