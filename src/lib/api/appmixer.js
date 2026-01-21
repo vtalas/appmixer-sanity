@@ -148,3 +148,14 @@ export function cleanFlowForComparison(flow) {
 export function getDesignerBaseUrl() {
     return APPMIXER_BASE_URL.replace('api.', 'my.');
 }
+
+/**
+ * Get Appmixer instance info (safe for client exposure)
+ * @returns {{baseUrl: string, username: string}}
+ */
+export function getAppmixerInfo() {
+    return {
+        baseUrl: APPMIXER_BASE_URL || '',
+        username: APPMIXER_USERNAME || ''
+    };
+}

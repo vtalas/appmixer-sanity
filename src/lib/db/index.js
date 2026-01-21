@@ -85,4 +85,13 @@ export async function initializeDatabase() {
   await client.execute(`CREATE INDEX IF NOT EXISTS idx_connectors_test_run ON connectors(test_run_id)`);
   await client.execute(`CREATE INDEX IF NOT EXISTS idx_components_connector ON components(connector_id)`);
   await client.execute(`CREATE INDEX IF NOT EXISTS idx_test_runs_created ON test_runs(created_at DESC)`);
+
+  // Settings table for app configuration
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
 }

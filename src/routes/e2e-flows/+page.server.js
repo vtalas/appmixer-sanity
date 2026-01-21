@@ -1,6 +1,6 @@
-import { fetchE2EFlows, fetchFlowById, cleanFlowForComparison, isAppmixerConfigured } from '$lib/api/appmixer.js';
-import { buildFlowNameToGitHubMap } from '$lib/api/github.js';
-import { APPMIXER_BASE_URL } from '$env/static/private';
+import { fetchE2EFlows, fetchFlowById, cleanFlowForComparison, isAppmixerConfigured, getAppmixerInfo } from '$lib/api/appmixer.js';
+import { buildFlowNameToGitHubMap, getGitHubRepoInfo, getGitHubConfig } from '$lib/api/github.js';
+import { APPMIXER_BASE_URL, GITHUB_TOKEN } from '$env/static/private';
 import crypto from 'crypto';
 
 /**
@@ -61,11 +61,21 @@ function compareFlows(serverFlow, githubFlow) {
 
 /** @type {import('./$types').PageServerLoad} */
 export async function load() {
+    const appmixerInfo = getAppmixerInfo();
+    const githubInfo = await getGitHubRepoInfo();
+    const githubConfig = await getGitHubConfig();
+
+    // Add token status info (don't expose actual token)
+    githubInfo.hasEnvToken = !!GITHUB_TOKEN;
+    githubInfo.hasCustomToken = !!githubConfig.token && githubConfig.token !== GITHUB_TOKEN;
+
     if (!isAppmixerConfigured()) {
         return {
             flows: [],
             error: 'Appmixer is not configured. Please set APPMIXER_USERNAME, APPMIXER_PASSWORD, and APPMIXER_BASE_URL environment variables.',
-            designerBaseUrl: null
+            designerBaseUrl: null,
+            appmixerInfo,
+            githubInfo
         };
     }
 
@@ -135,7 +145,9 @@ export async function load() {
             flows: enrichedFlows,
             stats,
             error: null,
-            designerBaseUrl
+            designerBaseUrl,
+            appmixerInfo,
+            githubInfo
         };
     } catch (e) {
         console.error('Failed to fetch E2E flows:', e);
@@ -143,7 +155,9 @@ export async function load() {
             flows: [],
             stats: { total: 0, match: 0, modified: 0, serverOnly: 0, error: 0 },
             error: `Failed to fetch E2E flows: ${e.message}`,
-            designerBaseUrl: null
+            designerBaseUrl: null,
+            appmixerInfo,
+            githubInfo
         };
     }
 }

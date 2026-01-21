@@ -2,9 +2,24 @@
   import '../app.css';
   import { signOut } from '@auth/sveltekit/client';
   import { Button } from '$lib/components/ui/button';
+  import { navigating } from '$app/stores';
 
   let { children, data } = $props();
 </script>
+
+<style>
+  @keyframes indeterminate {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(400%);
+    }
+  }
+  .animate-indeterminate {
+    animation: indeterminate 1.5s ease-in-out infinite;
+  }
+</style>
 
 <div class="min-h-screen flex flex-col">
   <header class="border-b bg-background">
@@ -22,7 +37,16 @@
   </header>
 
   <main class="flex-1 container mx-auto px-4 py-8">
-    {@render children?.()}
+    {#if $navigating}
+      <div class="flex flex-col items-center justify-center py-12 gap-4">
+        <div class="w-64 h-2 bg-secondary rounded-full overflow-hidden">
+          <div class="h-full w-1/4 bg-primary rounded-full animate-indeterminate"></div>
+        </div>
+        <span class="text-sm text-muted-foreground">Loading...</span>
+      </div>
+    {:else}
+      {@render children?.()}
+    {/if}
   </main>
 
   <footer class="border-t py-4 text-center text-sm text-muted-foreground">
