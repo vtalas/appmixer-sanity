@@ -67,5 +67,8 @@ export const SETTING_KEYS = {
     GITHUB_REPO_OWNER: 'github_repo_owner',
     GITHUB_REPO_NAME: 'github_repo_name',
     GITHUB_REPO_BRANCH: 'github_repo_branch',
-    GITHUB_TOKEN: 'github_token'
+    GITHUB_TOKEN: 'github_token',
+    APPMIXER_BASE_URL: 'appmixer_base_url',
+    APPMIXER_USERNAME: 'appmixer_username',
+    APPMIXER_PASSWORD: 'appmixer_password'
 };

@@ -1,6 +1,6 @@
-import { fetchE2EFlows, fetchFlowById, cleanFlowForComparison, isAppmixerConfigured, getAppmixerInfo } from '$lib/api/appmixer.js';
+import { fetchE2EFlows, fetchFlowById, cleanFlowForComparison, isAppmixerConfigured, getAppmixerInfo, getAppmixerConfig } from '$lib/api/appmixer.js';
 import { buildFlowNameToGitHubMap, getGitHubRepoInfo, getGitHubConfig } from '$lib/api/github.js';
-import { APPMIXER_BASE_URL, GITHUB_TOKEN } from '$env/static/private';
+import { GITHUB_TOKEN } from '$env/static/private';
 import crypto from 'crypto';
 
 /**
@@ -61,7 +61,7 @@ function compareFlows(serverFlow, githubFlow) {
 
 /** @type {import('./$types').PageServerLoad} */
 export async function load() {
-    const appmixerInfo = getAppmixerInfo();
+    const appmixerInfo = await getAppmixerInfo();
     const githubInfo = await getGitHubRepoInfo();
     const githubConfig = await getGitHubConfig();
 
@@ -69,10 +69,11 @@ export async function load() {
     githubInfo.hasEnvToken = !!GITHUB_TOKEN;
     githubInfo.hasCustomToken = !!githubConfig.token && githubConfig.token !== GITHUB_TOKEN;
 
-    if (!isAppmixerConfigured()) {
+    const appmixerConfigured = await isAppmixerConfigured();
+    if (!appmixerConfigured) {
         return {
             flows: [],
-            error: 'Appmixer is not configured. Please set APPMIXER_USERNAME, APPMIXER_PASSWORD, and APPMIXER_BASE_URL environment variables.',
+            error: 'Appmixer is not configured. Please set APPMIXER_USERNAME, APPMIXER_PASSWORD, and APPMIXER_BASE_URL environment variables or configure them in settings.',
             designerBaseUrl: null,
             appmixerInfo,
             githubInfo
@@ -89,7 +90,8 @@ export async function load() {
             })
         ]);
 
-        const designerBaseUrl = APPMIXER_BASE_URL.replace('api.', 'my.');
+        const appmixerConfig = await getAppmixerConfig();
+        const designerBaseUrl = appmixerConfig.baseUrl.replace('api.', 'my.');
 
         // Process each flow and compare with GitHub
         const enrichedFlows = await Promise.all(
