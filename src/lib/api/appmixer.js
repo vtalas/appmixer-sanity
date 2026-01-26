@@ -114,7 +114,7 @@ export async function getE2EFlowsForConnector(userId, connectorName) {
     const flows = await fetchE2EFlows(userId);
 
     // Build designer URL by replacing api. with my.
-    const designerUrl = config.baseUrl.replace('api.', 'my.');
+    const designerUrl = config.baseUrl.replace('api', 'my');
 
     return flows
         .filter(flow => flow.name?.toLowerCase().includes(shortName))

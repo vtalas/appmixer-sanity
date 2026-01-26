@@ -183,10 +183,10 @@
 
   // Sync status configuration
   const syncStatusConfig = {
-    match: { label: 'In Sync', class: 'bg-green-100 text-green-800 border-green-200' },
-    modified: { label: 'Modified', class: 'bg-yellow-100 text-yellow-800 border-yellow-200' },
-    server_only: { label: 'Server Only', class: 'bg-blue-100 text-blue-800 border-blue-200' },
-    error: { label: 'Error', class: 'bg-red-100 text-red-800 border-red-200' }
+    match: { label: 'In Sync', class: 'bg-green-100 text-green-800 border-green-200', description: 'Flow matches the GitHub repository' },
+    modified: { label: 'Modified', class: 'bg-yellow-100 text-yellow-800 border-yellow-200', description: 'Changes on instance, needs to be pushed to git' },
+    server_only: { label: 'Server Only', class: 'bg-blue-100 text-blue-800 border-blue-200', description: 'Flow is not in the GitHub repository' },
+    error: { label: 'Error', class: 'bg-red-100 text-red-800 border-red-200', description: 'Failed to compare flow' }
   };
 </script>
 
@@ -287,7 +287,8 @@
         class="border rounded-lg p-4 bg-green-50 text-left hover:bg-green-100 transition-colors cursor-pointer {syncFilter === 'match' ? 'ring-2 ring-green-500' : ''}"
       >
         <div class="text-2xl font-bold text-green-700">{data.stats.match}</div>
-        <div class="text-sm text-green-600">In Sync</div>
+        <div class="text-sm font-medium text-green-600">In Sync</div>
+        <div class="text-xs text-green-600/80 mt-1">{syncStatusConfig.match.description}</div>
       </button>
       <button
         type="button"
@@ -295,7 +296,8 @@
         class="border rounded-lg p-4 bg-yellow-50 text-left hover:bg-yellow-100 transition-colors cursor-pointer {syncFilter === 'modified' ? 'ring-2 ring-yellow-500' : ''}"
       >
         <div class="text-2xl font-bold text-yellow-700">{data.stats.modified}</div>
-        <div class="text-sm text-yellow-600">Modified</div>
+        <div class="text-sm font-medium text-yellow-600">Modified</div>
+        <div class="text-xs text-yellow-600/80 mt-1">{syncStatusConfig.modified.description}</div>
       </button>
       <button
         type="button"
@@ -303,7 +305,8 @@
         class="border rounded-lg p-4 bg-blue-50 text-left hover:bg-blue-100 transition-colors cursor-pointer {syncFilter === 'server_only' ? 'ring-2 ring-blue-500' : ''}"
       >
         <div class="text-2xl font-bold text-blue-700">{data.stats.serverOnly}</div>
-        <div class="text-sm text-blue-600">Server Only</div>
+        <div class="text-sm font-medium text-blue-600">Server Only</div>
+        <div class="text-xs text-blue-600/80 mt-1">{syncStatusConfig.server_only.description}</div>
       </button>
       <button
         type="button"
@@ -311,7 +314,8 @@
         class="border rounded-lg p-4 bg-red-50 text-left hover:bg-red-100 transition-colors cursor-pointer {syncFilter === 'error' ? 'ring-2 ring-red-500' : ''}"
       >
         <div class="text-2xl font-bold text-red-700">{data.stats.error}</div>
-        <div class="text-sm text-red-600">Errors</div>
+        <div class="text-sm font-medium text-red-600">Errors</div>
+        <div class="text-xs text-red-600/80 mt-1">{syncStatusConfig.error.description}</div>
       </button>
     </div>
 

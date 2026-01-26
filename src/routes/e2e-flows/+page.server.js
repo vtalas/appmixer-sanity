@@ -94,7 +94,7 @@ export async function load({ locals }) {
         ]);
 
         const appmixerConfig = await getAppmixerConfig(userId);
-        const designerBaseUrl = appmixerConfig.baseUrl.replace('api.', 'my.');
+        const designerBaseUrl = appmixerConfig.baseUrl.replace('api', 'my');
 
         // Process each flow and compare with GitHub
         const enrichedFlows = await Promise.all(
