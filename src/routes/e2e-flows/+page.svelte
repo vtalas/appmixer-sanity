@@ -4,6 +4,7 @@
   import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '$lib/components/ui/table';
   import { Badge } from '$lib/components/ui/badge';
   import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '$lib/components/ui/dialog';
+  import { Checkbox } from '$lib/components/ui/checkbox';
   import { invalidateAll } from '$app/navigation';
 
   let { data } = $props();
@@ -11,6 +12,139 @@
   let searchQuery = $state('');
   let connectorFilter = $state('');
   let syncFilter = $state('');
+
+  // Flow selection state
+  let selectedFlowIds = $state(new Set());
+
+  // Sync dialog state
+  let showSyncDialog = $state(false);
+  let syncPrTitle = $state('');
+  let syncPrDescription = $state('');
+  let syncTargetBranch = $state('');
+  let isSyncing = $state(false);
+  let syncError = $state('');
+  let syncResult = $state(null);
+
+  // Check if a flow can be selected (only modified and server_only)
+  function isSelectable(flow) {
+    return flow.syncStatus === 'modified' || flow.syncStatus === 'server_only';
+  }
+
+  // Selected flows data (for sync dialog)
+  const selectedFlows = $derived(
+    data.flows.filter(f => selectedFlowIds.has(f.flowId))
+  );
+
+  // Toggle selection of a single flow
+  function toggleFlowSelection(flowId) {
+    const newSet = new Set(selectedFlowIds);
+    if (newSet.has(flowId)) {
+      newSet.delete(flowId);
+    } else {
+      newSet.add(flowId);
+    }
+    selectedFlowIds = newSet;
+  }
+
+  // Toggle selection of all selectable flows
+  function toggleSelectAll() {
+    if (allSelectableSelected) {
+      // Deselect all selectable flows
+      const newSet = new Set(selectedFlowIds);
+      selectableFlows.forEach(f => newSet.delete(f.flowId));
+      selectedFlowIds = newSet;
+    } else {
+      // Select all selectable flows
+      const newSet = new Set(selectedFlowIds);
+      selectableFlows.forEach(f => newSet.add(f.flowId));
+      selectedFlowIds = newSet;
+    }
+  }
+
+  // Clear all selections
+  function clearSelection() {
+    selectedFlowIds = new Set();
+  }
+
+  // Generate file path for server_only flows
+  function generateFlowPath(connector, flowName) {
+    const safeName = flowName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+    return `src/appmixer/${connector || 'unknown'}/test-flow-${safeName}.json`;
+  }
+
+  // Open sync dialog
+  function openSyncDialog() {
+    const count = selectedFlowIds.size;
+    syncPrTitle = `Sync ${count} E2E flow${count > 1 ? 's' : ''} from Appmixer`;
+    syncPrDescription = '';
+    syncTargetBranch = data.githubInfo?.branch || 'dev';
+    syncError = '';
+    syncResult = null;
+    showSyncDialog = true;
+  }
+
+  // Perform the sync
+  async function performSync() {
+    if (!syncPrTitle.trim()) {
+      syncError = 'PR title is required';
+      return;
+    }
+
+    isSyncing = true;
+    syncError = '';
+
+    try {
+      const flowsToSync = selectedFlows.map(f => ({
+        flowId: f.flowId,
+        name: f.name,
+        connector: f.connector,
+        githubPath: f.githubPath || null
+      }));
+
+      const response = await fetch('/api/e2e-flows/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          flows: flowsToSync,
+          prTitle: syncPrTitle.trim(),
+          prDescription: syncPrDescription.trim(),
+          targetBranch: syncTargetBranch.trim()
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || `Failed to sync: ${response.status}`);
+      }
+
+      const result = await response.json();
+      syncResult = result;
+
+      // Clear selection after successful sync
+      clearSelection();
+
+    } catch (e) {
+      syncError = e.message || 'Failed to sync flows';
+    } finally {
+      isSyncing = false;
+    }
+  }
+
+  // Close sync dialog and refresh if successful
+  async function closeSyncDialog() {
+    const hadSuccess = syncResult?.success;
+    showSyncDialog = false;
+    syncResult = null;
+
+    if (hadSuccess) {
+      isRefreshing = true;
+      await invalidateAll();
+      isRefreshing = false;
+    }
+  }
 
   // GitHub settings dialog
   let showGitHubSettingsDialog = $state(false);
@@ -179,6 +313,17 @@
 
       return matchesSearch && matchesConnector && matchesSync;
     })
+  );
+
+  // Selectable flows from filtered list (must be after filteredFlows)
+  const selectableFlows = $derived(
+    filteredFlows.filter(isSelectable)
+  );
+
+  // Check if all selectable flows are selected
+  const allSelectableSelected = $derived(
+    selectableFlows.length > 0 &&
+    selectableFlows.every(f => selectedFlowIds.has(f.flowId))
   );
 
   // Sync status configuration
@@ -362,6 +507,15 @@
       <Table>
         <TableHeader>
           <TableRow>
+            <TableHead class="w-12">
+              {#if selectableFlows.length > 0}
+                <Checkbox
+                  checked={allSelectableSelected}
+                  onCheckedChange={toggleSelectAll}
+                  aria-label="Select all syncable flows"
+                />
+              {/if}
+            </TableHead>
             <TableHead>Connector</TableHead>
             <TableHead>Flow Name</TableHead>
             <TableHead>Sync Status</TableHead>
@@ -370,7 +524,17 @@
         </TableHeader>
         <TableBody>
           {#each filteredFlows as flow (flow.flowId)}
-            <TableRow>
+            {@const selectable = isSelectable(flow)}
+            <TableRow class={selectedFlowIds.has(flow.flowId) ? 'bg-muted/50' : ''}>
+              <TableCell>
+                {#if selectable}
+                  <Checkbox
+                    checked={selectedFlowIds.has(flow.flowId)}
+                    onCheckedChange={() => toggleFlowSelection(flow.flowId)}
+                    aria-label="Select {flow.name}"
+                  />
+                {/if}
+              </TableCell>
               <TableCell>
                 {#if flow.connector}
                   <Badge variant="outline">{flow.connector}</Badge>
@@ -413,6 +577,22 @@
           {/each}
         </TableBody>
       </Table>
+    {/if}
+
+    <!-- Floating Action Bar -->
+    {#if selectedFlowIds.size > 0}
+      <div class="fixed bottom-6 left-1/2 -translate-x-1/2 bg-background border shadow-lg rounded-lg px-4 py-3 flex items-center gap-4 z-50">
+        <span class="text-sm font-medium">
+          {selectedFlowIds.size} flow{selectedFlowIds.size > 1 ? 's' : ''} selected
+        </span>
+        <div class="h-4 w-px bg-border"></div>
+        <Button variant="outline" size="sm" onclick={clearSelection}>
+          Clear
+        </Button>
+        <Button size="sm" onclick={openSyncDialog}>
+          Sync to GitHub
+        </Button>
+      </div>
     {/if}
   {/if}
 </div>
@@ -603,5 +783,148 @@
         {isSavingAppmixerSettings ? 'Saving...' : 'Save'}
       </Button>
     </DialogFooter>
+  </DialogContent>
+</Dialog>
+
+<!-- Sync to GitHub Dialog -->
+<Dialog bind:open={showSyncDialog}>
+  <DialogContent class="max-w-2xl">
+    <DialogHeader>
+      <DialogTitle>Sync Flows to GitHub</DialogTitle>
+      <DialogDescription>
+        Create a pull request with the selected E2E flows.
+      </DialogDescription>
+    </DialogHeader>
+
+    {#if syncResult?.success}
+      <!-- Success state -->
+      <div class="py-6 text-center space-y-4">
+        <div class="w-16 h-16 mx-auto bg-green-100 rounded-full flex items-center justify-center">
+          <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-green-600">
+            <polyline points="20 6 9 17 4 12"></polyline>
+          </svg>
+        </div>
+        <div>
+          <h3 class="text-lg font-semibold">Pull Request Created</h3>
+          <p class="text-muted-foreground mt-1">
+            {syncResult.synced?.length || 0} flow{(syncResult.synced?.length || 0) > 1 ? 's' : ''} synced successfully
+          </p>
+        </div>
+        <a
+          href={syncResult.prUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          class="inline-flex items-center gap-2 text-blue-600 hover:underline font-medium"
+        >
+          View Pull Request #{syncResult.prNumber}
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+            <polyline points="15 3 21 3 21 9"/>
+            <line x1="10" y1="14" x2="21" y2="3"/>
+          </svg>
+        </a>
+        {#if syncResult.errors?.length > 0}
+          <div class="mt-4 text-left bg-amber-50 border border-amber-200 rounded-lg p-3">
+            <p class="text-sm font-medium text-amber-800">Some flows failed to sync:</p>
+            <ul class="mt-2 text-sm text-amber-700">
+              {#each syncResult.errors as error}
+                <li>- {error.name}: {error.error}</li>
+              {/each}
+            </ul>
+          </div>
+        {/if}
+      </div>
+      <DialogFooter>
+        <Button onclick={closeSyncDialog}>Close</Button>
+      </DialogFooter>
+    {:else}
+      <!-- Form state -->
+      <div class="py-4 space-y-4">
+        <div class="space-y-2">
+          <label for="pr-title" class="text-sm font-medium">PR Title</label>
+          <Input
+            id="pr-title"
+            placeholder="Enter PR title..."
+            bind:value={syncPrTitle}
+            disabled={isSyncing}
+          />
+        </div>
+
+        <div class="space-y-2">
+          <label for="pr-description" class="text-sm font-medium">
+            Description
+            <span class="text-muted-foreground font-normal ml-1">(optional)</span>
+          </label>
+          <textarea
+            id="pr-description"
+            placeholder="Enter PR description..."
+            bind:value={syncPrDescription}
+            disabled={isSyncing}
+            rows="3"
+            class="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+          ></textarea>
+        </div>
+
+        <div class="space-y-2">
+          <label for="target-branch" class="text-sm font-medium">Target Branch</label>
+          <Input
+            id="target-branch"
+            placeholder="e.g., dev"
+            bind:value={syncTargetBranch}
+            disabled={isSyncing}
+          />
+        </div>
+
+        <div class="space-y-2">
+          <p class="text-sm font-medium">Flows to sync ({selectedFlows.length})</p>
+          <div class="max-h-48 overflow-y-auto border rounded-lg">
+            <table class="w-full text-sm">
+              <thead class="bg-muted/50 sticky top-0">
+                <tr>
+                  <th class="text-left px-3 py-2 font-medium">Flow</th>
+                  <th class="text-left px-3 py-2 font-medium">Path</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y">
+                {#each selectedFlows as flow}
+                  <tr>
+                    <td class="px-3 py-2">
+                      <span class="font-medium">{flow.name}</span>
+                      <Badge variant="outline" class="ml-2 text-xs">{flow.syncStatus === 'modified' ? 'Modified' : 'New'}</Badge>
+                    </td>
+                    <td class="px-3 py-2 text-muted-foreground font-mono text-xs">
+                      {flow.githubPath || generateFlowPath(flow.connector, flow.name)}
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {#if syncError}
+          <div class="bg-red-50 border border-red-200 rounded-lg p-3">
+            <p class="text-sm text-red-700">{syncError}</p>
+          </div>
+        {/if}
+      </div>
+
+      <DialogFooter>
+        <Button variant="outline" onclick={() => showSyncDialog = false} disabled={isSyncing}>
+          Cancel
+        </Button>
+        <Button onclick={performSync} disabled={isSyncing}>
+          {#if isSyncing}
+            <svg class="animate-spin -ml-1 mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Creating PR...
+          {:else}
+            Create Pull Request
+          {/if}
+        </Button>
+      </DialogFooter>
+    {/if}
   </DialogContent>
 </Dialog>

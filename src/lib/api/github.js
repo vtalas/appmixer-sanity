@@ -224,3 +224,226 @@ export async function buildFlowNameToGitHubMap(userId) {
 
     return flowMap;
 }
+
+/**
+ * Generate a file path for a new flow in GitHub
+ * @param {string} connector - Connector name (e.g., "box")
+ * @param {string} flowName - Flow name (e.g., "E2E box - Upload File")
+ * @returns {string} - Generated file path
+ */
+export function generateFlowPath(connector, flowName) {
+    // Sanitize flow name for file system
+    const safeName = flowName
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '');
+
+    return `src/appmixer/${connector}/test-flow-${safeName}.json`;
+}
+
+/**
+ * Get the SHA of a branch reference
+ * @param {string} userId - User ID (email)
+ * @param {string} branch - Branch name
+ * @returns {Promise<string>} - SHA of the branch
+ */
+export async function getBranchSha(userId, branch) {
+    const config = await getGitHubConfig(userId);
+    const response = await fetch(
+        `${GITHUB_API_BASE}/repos/${config.owner}/${config.repo}/git/ref/heads/${branch}`,
+        {
+            headers: getGitHubHeaders(config.token)
+        }
+    );
+
+    if (!response.ok) {
+        throw new Error(`Failed to get branch SHA: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data.object.sha;
+}
+
+/**
+ * Create a new branch from a base branch
+ * @param {string} userId - User ID (email)
+ * @param {string} branchName - New branch name
+ * @param {string} baseBranch - Base branch to create from
+ * @returns {Promise<{ref: string, sha: string}>}
+ */
+export async function createBranch(userId, branchName, baseBranch) {
+    const config = await getGitHubConfig(userId);
+    const baseSha = await getBranchSha(userId, baseBranch);
+
+    const response = await fetch(
+        `${GITHUB_API_BASE}/repos/${config.owner}/${config.repo}/git/refs`,
+        {
+            method: 'POST',
+            headers: {
+                ...getGitHubHeaders(config.token),
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                ref: `refs/heads/${branchName}`,
+                sha: baseSha
+            })
+        }
+    );
+
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(`Failed to create branch: ${error.message || response.status}`);
+    }
+
+    const data = await response.json();
+    return {
+        ref: data.ref,
+        sha: data.object.sha
+    };
+}
+
+/**
+ * Get file info (including SHA) from GitHub
+ * @param {string} userId - User ID (email)
+ * @param {string} path - File path
+ * @param {string} branch - Branch name
+ * @returns {Promise<{sha: string, content: string} | null>}
+ */
+async function getFileInfo(userId, path, branch) {
+    const config = await getGitHubConfig(userId);
+    const response = await fetch(
+        `${GITHUB_API_BASE}/repos/${config.owner}/${config.repo}/contents/${path}?ref=${branch}`,
+        {
+            headers: getGitHubHeaders(config.token)
+        }
+    );
+
+    if (response.status === 404) {
+        return null;
+    }
+
+    if (!response.ok) {
+        throw new Error(`Failed to get file info: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return {
+        sha: data.sha,
+        content: Buffer.from(data.content, 'base64').toString('utf-8')
+    };
+}
+
+/**
+ * Create or update a file in GitHub
+ * @param {string} userId - User ID (email)
+ * @param {string} path - File path
+ * @param {string} content - File content (will be base64 encoded)
+ * @param {string} message - Commit message
+ * @param {string} branch - Branch name
+ * @returns {Promise<{sha: string, commit: {sha: string}}>}
+ */
+export async function createOrUpdateFile(userId, path, content, message, branch) {
+    const config = await getGitHubConfig(userId);
+
+    // Check if file exists to get its SHA (required for updates)
+    const existingFile = await getFileInfo(userId, path, branch);
+
+    const body = {
+        message,
+        content: Buffer.from(content).toString('base64'),
+        branch
+    };
+
+    if (existingFile) {
+        body.sha = existingFile.sha;
+    }
+
+    const response = await fetch(
+        `${GITHUB_API_BASE}/repos/${config.owner}/${config.repo}/contents/${path}`,
+        {
+            method: 'PUT',
+            headers: {
+                ...getGitHubHeaders(config.token),
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(body)
+        }
+    );
+
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(`Failed to create/update file: ${error.message || response.status}`);
+    }
+
+    return response.json();
+}
+
+/**
+ * Create a pull request
+ * @param {string} userId - User ID (email)
+ * @param {string} title - PR title
+ * @param {string} body - PR description
+ * @param {string} head - Head branch (source)
+ * @param {string} base - Base branch (target)
+ * @returns {Promise<{number: number, html_url: string}>}
+ */
+export async function createPullRequest(userId, title, body, head, base) {
+    const config = await getGitHubConfig(userId);
+
+    const response = await fetch(
+        `${GITHUB_API_BASE}/repos/${config.owner}/${config.repo}/pulls`,
+        {
+            method: 'POST',
+            headers: {
+                ...getGitHubHeaders(config.token),
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                title,
+                body,
+                head,
+                base
+            })
+        }
+    );
+
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(`Failed to create PR: ${error.message || response.status}`);
+    }
+
+    return response.json();
+}
+
+/**
+ * Verify GitHub token has write access to the repository
+ * @param {string} userId - User ID (email)
+ * @returns {Promise<{hasWriteAccess: boolean, error?: string}>}
+ */
+export async function verifyWriteAccess(userId) {
+    const config = await getGitHubConfig(userId);
+
+    if (!config.token) {
+        return { hasWriteAccess: false, error: 'No GitHub token configured' };
+    }
+
+    const response = await fetch(
+        `${GITHUB_API_BASE}/repos/${config.owner}/${config.repo}`,
+        {
+            headers: getGitHubHeaders(config.token)
+        }
+    );
+
+    if (!response.ok) {
+        return { hasWriteAccess: false, error: `Cannot access repository: ${response.status}` };
+    }
+
+    const data = await response.json();
+
+    // Check if user has push permission
+    if (!data.permissions?.push) {
+        return { hasWriteAccess: false, error: 'Token does not have write access to this repository' };
+    }
+
+    return { hasWriteAccess: true };
+}
