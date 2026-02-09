@@ -120,6 +120,7 @@ export async function load({ locals }) {
                     url: `${designerBaseUrl}/designer/${flow.flowId}`,
                     createdAt: flow.btime,
                     updatedAt: flow.mtime,
+                    running: flow.stage === 'running',
                     syncStatus,
                     githubUrl: githubInfo?.url || null,
                     githubPath: githubInfo?.path || null
@@ -140,6 +141,8 @@ export async function load({ locals }) {
         // Count stats
         const stats = {
             total: enrichedFlows.length,
+            running: enrichedFlows.filter(f => f.running).length,
+            stopped: enrichedFlows.filter(f => !f.running).length,
             match: enrichedFlows.filter(f => f.syncStatus === 'match').length,
             modified: enrichedFlows.filter(f => f.syncStatus === 'modified').length,
             serverOnly: enrichedFlows.filter(f => f.syncStatus === 'server_only').length,
@@ -158,7 +161,7 @@ export async function load({ locals }) {
         console.error('Failed to fetch E2E flows:', e);
         return {
             flows: [],
-            stats: { total: 0, match: 0, modified: 0, serverOnly: 0, error: 0 },
+            stats: { total: 0, running: 0, stopped: 0, match: 0, modified: 0, serverOnly: 0, error: 0 },
             error: `Failed to fetch E2E flows: ${e.message}`,
             designerBaseUrl: null,
             appmixerInfo,
