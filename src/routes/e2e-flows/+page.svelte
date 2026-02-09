@@ -25,6 +25,12 @@
   let syncError = $state('');
   let syncResult = $state(null);
 
+  // Delete dialog state
+  let showDeleteDialog = $state(false);
+  let flowToDelete = $state(null);
+  let isDeleting = $state(false);
+  let deleteError = $state('');
+
   // Check if a flow can be selected (only modified and server_only)
   function isSelectable(flow) {
     return flow.syncStatus === 'modified' || flow.syncStatus === 'server_only';
@@ -143,6 +149,61 @@
       isRefreshing = true;
       await invalidateAll();
       isRefreshing = false;
+    }
+  }
+
+  // Open delete confirmation dialog
+  function confirmDelete(flow) {
+    flowToDelete = flow;
+    deleteError = '';
+    showDeleteDialog = true;
+  }
+
+  // Perform the delete
+  async function performDelete() {
+    if (!flowToDelete) return;
+
+    isDeleting = true;
+    deleteError = '';
+
+    try {
+      const response = await fetch('/api/e2e-flows/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          flowIds: [flowToDelete.flowId]
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || `Failed to delete: ${response.status}`);
+      }
+
+      const result = await response.json();
+      if (result.errors?.length > 0) {
+        throw new Error(result.errors[0].error);
+      }
+
+      // Close dialog and refresh
+      showDeleteDialog = false;
+      flowToDelete = null;
+
+      // Remove from selection if selected
+      if (selectedFlowIds.has(flowToDelete?.flowId)) {
+        const newSet = new Set(selectedFlowIds);
+        newSet.delete(flowToDelete.flowId);
+        selectedFlowIds = newSet;
+      }
+
+      isRefreshing = true;
+      await invalidateAll();
+      isRefreshing = false;
+
+    } catch (e) {
+      deleteError = e.message || 'Failed to delete flow';
+    } finally {
+      isDeleting = false;
     }
   }
 
@@ -571,6 +632,13 @@
                       GitHub
                     </a>
                   {/if}
+                  <button
+                    type="button"
+                    onclick={() => confirmDelete(flow)}
+                    class="text-red-600 hover:underline text-sm"
+                  >
+                    Remove
+                  </button>
                 </div>
               </TableCell>
             </TableRow>
@@ -704,11 +772,11 @@
         <div class="flex flex-wrap gap-2 mb-2">
           <button
             type="button"
-            class="px-3 py-1 text-xs rounded-full border transition-colors {appmixerBaseUrl === 'https://api-appmixer-dev-dev-automated-00001.tenants.infra.appmixer.ai' ? 'bg-primary text-primary-foreground border-primary' : 'bg-muted hover:bg-muted/80 border-border'}"
-            onclick={() => appmixerBaseUrl = 'https://api-appmixer-dev-dev-automated-00001.tenants.infra.appmixer.ai'}
+            class="px-3 py-1 text-xs rounded-full border transition-colors {appmixerBaseUrl === 'https://api-dev-automated-00001.dev.appmixer.ai' ? 'bg-primary text-primary-foreground border-primary' : 'bg-muted hover:bg-muted/80 border-border'}"
+            onclick={() => appmixerBaseUrl = 'https://api-dev-automated-00001.dev.appmixer.ai'}
             disabled={isSavingAppmixerSettings || clearAppmixerCredentials}
           >
-            Dev Automated
+            QA
           </button>
           <button
             type="button"
@@ -926,5 +994,54 @@
         </Button>
       </DialogFooter>
     {/if}
+  </DialogContent>
+</Dialog>
+
+<!-- Delete Confirmation Dialog -->
+<Dialog bind:open={showDeleteDialog}>
+  <DialogContent>
+    <DialogHeader>
+      <DialogTitle>Remove Flow from Appmixer</DialogTitle>
+      <DialogDescription>
+        Are you sure you want to remove this flow from the Appmixer instance?
+      </DialogDescription>
+    </DialogHeader>
+
+    <div class="py-4">
+      {#if flowToDelete}
+        <div class="bg-muted rounded-lg p-4">
+          <p class="font-medium">{flowToDelete.name}</p>
+          {#if flowToDelete.connector}
+            <p class="text-sm text-muted-foreground mt-1">Connector: {flowToDelete.connector}</p>
+          {/if}
+        </div>
+        <p class="text-sm text-muted-foreground mt-4">
+          This action cannot be undone. The flow will be permanently deleted from the Appmixer instance.
+        </p>
+      {/if}
+
+      {#if deleteError}
+        <div class="bg-red-50 border border-red-200 rounded-lg p-3 mt-4">
+          <p class="text-sm text-red-700">{deleteError}</p>
+        </div>
+      {/if}
+    </div>
+
+    <DialogFooter>
+      <Button variant="outline" onclick={() => showDeleteDialog = false} disabled={isDeleting}>
+        Cancel
+      </Button>
+      <Button variant="destructive" onclick={performDelete} disabled={isDeleting}>
+        {#if isDeleting}
+          <svg class="animate-spin -ml-1 mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          Removing...
+        {:else}
+          Remove Flow
+        {/if}
+      </Button>
+    </DialogFooter>
   </DialogContent>
 </Dialog>

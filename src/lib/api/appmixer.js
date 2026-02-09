@@ -202,6 +202,28 @@ export async function getDesignerBaseUrl(userId) {
 }
 
 /**
+ * Delete a flow from Appmixer
+ * @param {string} userId - User ID (email)
+ * @param {string} flowId - Flow ID to delete
+ * @returns {Promise<void>}
+ */
+export async function deleteFlow(userId, flowId) {
+    const config = await getAppmixerConfig(userId);
+    const token = await getAccessToken(userId);
+    const response = await fetch(
+        `${config.baseUrl}/flows/${flowId}`,
+        {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${token}` }
+        }
+    );
+
+    if (!response.ok) {
+        throw new Error(`Failed to delete flow ${flowId}: ${response.status}`);
+    }
+}
+
+/**
  * Get Appmixer instance info (safe for client exposure)
  * @param {string} userId - User ID (email)
  * @returns {Promise<{baseUrl: string, username: string, hasEnvCredentials: boolean, hasCustomCredentials: boolean}>}
