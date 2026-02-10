@@ -84,8 +84,9 @@
 
   // Open sync dialog
   function openSyncDialog() {
-    const count = selectedFlowIds.size;
-    syncPrTitle = `Sync ${count} E2E flow${count > 1 ? 's' : ''} from Appmixer`;
+    const connectorNames = [...new Set(selectedFlows.map(f => f.connector).filter(Boolean))].sort();
+    const instanceUrl = data.appmixerInfo?.baseUrl || 'Appmixer';
+    syncPrTitle = `${connectorNames.join(', ')}: sync E2E flows from ${instanceUrl}`;
     syncPrDescription = '';
     syncTargetBranch = data.githubInfo?.branch || 'dev';
     syncError = '';
