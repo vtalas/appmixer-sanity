@@ -6,13 +6,28 @@
   import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '$lib/components/ui/dialog';
   import { Checkbox } from '$lib/components/ui/checkbox';
   import { invalidateAll } from '$app/navigation';
+  import { page } from '$app/stores';
+  import { replaceState } from '$app/navigation';
 
   let { data } = $props();
 
-  let searchQuery = $state('');
-  let connectorFilter = $state('');
-  let syncFilter = $state('');
-  let runningFilter = $state('');
+  // Initialize filters from URL search params
+  let searchQuery = $state($page.url.searchParams.get('search') || '');
+  let connectorFilter = $state($page.url.searchParams.get('connector') || '');
+  let syncFilter = $state($page.url.searchParams.get('sync') || '');
+  let runningFilter = $state($page.url.searchParams.get('status') || '');
+
+  // Sync filter state to URL
+  $effect(() => {
+    const params = new URLSearchParams();
+    if (searchQuery) params.set('search', searchQuery);
+    if (connectorFilter) params.set('connector', connectorFilter);
+    if (syncFilter) params.set('sync', syncFilter);
+    if (runningFilter) params.set('status', runningFilter);
+    const qs = params.toString();
+    const newUrl = `${$page.url.pathname}${qs ? `?${qs}` : ''}`;
+    replaceState(newUrl, {});
+  });
 
   // Flow selection state
   let selectedFlowIds = $state(new Set());
