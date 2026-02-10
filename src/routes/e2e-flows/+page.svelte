@@ -32,6 +32,26 @@
   let isDeleting = $state(false);
   let deleteError = $state('');
 
+  // Start/Stop flow state
+  let togglingFlowIds = $state(new Set());
+
+  // Copy to clipboard state
+  let copiedFlowId = $state(null);
+
+  // Copy flow name to clipboard
+  async function copyFlowNameToClipboard(flowId, flowName) {
+    try {
+      await navigator.clipboard.writeText(flowName);
+      copiedFlowId = flowId;
+      // Reset after 2 seconds
+      setTimeout(() => {
+        copiedFlowId = null;
+      }, 2000);
+    } catch (e) {
+      console.error('Failed to copy to clipboard:', e);
+    }
+  }
+
   // Check if a flow can be selected (only modified and server_only)
   function isSelectable(flow) {
     return flow.syncStatus === 'modified' || flow.syncStatus === 'server_only';
@@ -205,6 +225,64 @@
       deleteError = e.message || 'Failed to delete flow';
     } finally {
       isDeleting = false;
+    }
+  }
+
+  // Start a flow
+  async function startFlow(flowId) {
+    const newSet = new Set(togglingFlowIds);
+    newSet.add(flowId);
+    togglingFlowIds = newSet;
+
+    try {
+      const response = await fetch('/api/e2e-flows/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ flowId })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `Failed to start flow: ${response.status}`);
+      }
+
+      // Refresh flow list to get updated status
+      await invalidateAll();
+    } catch (e) {
+      alert(`Failed to start flow: ${e.message}`);
+    } finally {
+      const newSet = new Set(togglingFlowIds);
+      newSet.delete(flowId);
+      togglingFlowIds = newSet;
+    }
+  }
+
+  // Stop a flow
+  async function stopFlow(flowId) {
+    const newSet = new Set(togglingFlowIds);
+    newSet.add(flowId);
+    togglingFlowIds = newSet;
+
+    try {
+      const response = await fetch('/api/e2e-flows/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ flowId })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `Failed to stop flow: ${response.status}`);
+      }
+
+      // Refresh flow list to get updated status
+      await invalidateAll();
+    } catch (e) {
+      alert(`Failed to stop flow: ${e.message}`);
+    } finally {
+      const newSet = new Set(togglingFlowIds);
+      newSet.delete(flowId);
+      togglingFlowIds = newSet;
     }
   }
 
@@ -636,7 +714,17 @@
                 {/if}
               </TableCell>
               <TableCell>
-                <span class="font-medium">{flow.name}</span>
+                <button
+                  type="button"
+                  onclick={() => copyFlowNameToClipboard(flow.flowId, flow.name)}
+                  class="font-medium hover:text-blue-600 hover:underline cursor-pointer transition-colors"
+                  title="Click to copy flow name"
+                >
+                  {flow.name}
+                  {#if copiedFlowId === flow.flowId}
+                    <span class="ml-2 text-xs text-green-600">✓ Copied</span>
+                  {/if}
+                </button>
               </TableCell>
               <TableCell>
                 {#if flow.running}
@@ -657,6 +745,25 @@
               </TableCell>
               <TableCell>
                 <div class="flex gap-3">
+                  {#if flow.running}
+                    <button
+                      type="button"
+                      onclick={() => stopFlow(flow.flowId)}
+                      disabled={togglingFlowIds.has(flow.flowId)}
+                      class="text-orange-600 hover:underline text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {togglingFlowIds.has(flow.flowId) ? 'Stopping...' : 'Stop'}
+                    </button>
+                  {:else}
+                    <button
+                      type="button"
+                      onclick={() => startFlow(flow.flowId)}
+                      disabled={togglingFlowIds.has(flow.flowId)}
+                      class="text-green-600 hover:underline text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {togglingFlowIds.has(flow.flowId) ? 'Starting...' : 'Start'}
+                    </button>
+                  {/if}
                   <a
                     href={flow.url}
                     target="_blank"
