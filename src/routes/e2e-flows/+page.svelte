@@ -884,9 +884,8 @@
               </TableCell>
               <TableCell>
                 {#if flow.syncStatus === null}
-                  <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border bg-muted text-muted-foreground border-border animate-pulse">
-                    Loading...
-                  </span>
+                  <div class="inline-flex items-center px-2.5 py-0.5 rounded-full h-5 min-w-20 bg-gradient-to-r from-muted via-muted/50 to-muted animate-pulse">
+                  </div>
                 {:else}
                   {@const config = syncStatusConfig[flow.syncStatus] || syncStatusConfig.error}
                   <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border {config.class}">
@@ -915,6 +914,9 @@
                     >
                       <Github size={15} />
                     </a>
+                  {:else if flow.syncStatus === null}
+                    <div class="inline-flex items-center justify-center rounded-md p-1.5 w-6 h-6 bg-gradient-to-r from-muted via-muted/50 to-muted animate-pulse">
+                    </div>
                   {/if}
                   {#if flow.syncStatus === 'modified'}
                     <button
@@ -925,6 +927,9 @@
                     >
                       <FileDiff size={15} />
                     </button>
+                  {:else if flow.syncStatus === null}
+                    <div class="inline-flex items-center justify-center rounded-md p-1.5 w-6 h-6 bg-gradient-to-r from-muted via-muted/50 to-muted animate-pulse">
+                    </div>
                   {/if}
                   <button
                     type="button"
