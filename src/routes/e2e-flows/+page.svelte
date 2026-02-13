@@ -6,7 +6,7 @@
   import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '$lib/components/ui/dialog';
   import { Checkbox } from '$lib/components/ui/checkbox';
   import { invalidateAll } from '$app/navigation';
-  import { ExternalLink, Github, Trash2, FileDiff, Play, Square } from 'lucide-svelte';
+  import { ExternalLink, Github, Trash2, FileDiff, FileText, Play, Square } from 'lucide-svelte';
 
   let { data } = $props();
 
@@ -136,6 +136,13 @@
   let diffError = $state('');
   let diffData = $state(null);
 
+  // E2E results dialog state
+  let showResultsDialog = $state(false);
+  let resultsFlow = $state(null);
+  let isResultsLoading = $state(false);
+  let resultsError = $state('');
+  let resultsData = $state(null);
+
   async function openDiff(flow) {
     diffFlow = flow;
     diffError = '';
@@ -161,6 +168,41 @@
     } finally {
       isDiffLoading = false;
     }
+  }
+
+  async function openResults(flow) {
+    resultsFlow = flow;
+    resultsError = '';
+    resultsData = null;
+    showResultsDialog = true;
+    isResultsLoading = true;
+
+    try {
+      const response = await fetch('/api/e2e-flows/results', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ flowId: flow.flowId, flowName: flow.name })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || `Failed to load results: ${response.status}`);
+      }
+
+      resultsData = await response.json();
+    } catch (e) {
+      resultsError = e.message || 'Failed to load E2E results';
+    } finally {
+      isResultsLoading = false;
+    }
+  }
+
+  function getComponentLink(componentId) {
+    if (!resultsFlow?.url || !componentId) {
+      return resultsFlow?.url || '#';
+    }
+
+    return `${resultsFlow.url}?componentId=${encodeURIComponent(componentId)}`;
   }
 
   /**
@@ -613,7 +655,21 @@
     server_only: { label: 'Server Only', class: 'bg-blue-100 text-blue-800 border-blue-200', description: 'Flow is not in the GitHub repository' },
     error: { label: 'Error', class: 'bg-red-100 text-red-800 border-red-200', description: 'Failed to compare flow' }
   };
+
+  // Handle Escape key to close dialogs
+  function handleKeydown(event) {
+    if (event.key === 'Escape') {
+      if (showDiffDialog) showDiffDialog = false;
+      else if (showResultsDialog) showResultsDialog = false;
+      else if (showDeleteDialog) showDeleteDialog = false;
+      else if (showSyncDialog) showSyncDialog = false;
+      else if (showAppmixerSettingsDialog) showAppmixerSettingsDialog = false;
+      else if (showGitHubSettingsDialog) showGitHubSettingsDialog = false;
+    }
+  }
 </script>
+
+<svelte:window onkeydown={handleKeydown} />
 
 <svelte:head>
   <title>E2E Test Flows - Appmixer Sanity Check</title>
@@ -884,9 +940,8 @@
               </TableCell>
               <TableCell>
                 {#if flow.syncStatus === null}
-                  <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border bg-muted text-muted-foreground border-border animate-pulse">
-                    Loading...
-                  </span>
+                  <div class="inline-flex items-center px-2.5 py-0.5 rounded-full h-5 min-w-20 bg-gradient-to-r from-muted via-muted/50 to-muted animate-pulse">
+                  </div>
                 {:else}
                   {@const config = syncStatusConfig[flow.syncStatus] || syncStatusConfig.error}
                   <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border {config.class}">
@@ -915,6 +970,9 @@
                     >
                       <Github size={15} />
                     </a>
+                  {:else if flow.syncStatus === null}
+                    <div class="inline-flex items-center justify-center rounded-md p-1.5 w-6 h-6 bg-gradient-to-r from-muted via-muted/50 to-muted animate-pulse">
+                    </div>
                   {/if}
                   {#if flow.syncStatus === 'modified'}
                     <button
@@ -925,7 +983,18 @@
                     >
                       <FileDiff size={15} />
                     </button>
+                  {:else if flow.syncStatus === null}
+                    <div class="inline-flex items-center justify-center rounded-md p-1.5 w-6 h-6 bg-gradient-to-r from-muted via-muted/50 to-muted animate-pulse">
+                    </div>
                   {/if}
+                  <button
+                    type="button"
+                    onclick={() => openResults(flow)}
+                    class="inline-flex items-center justify-center rounded-md p-1.5 text-gray-600 hover:bg-gray-100 transition-colors"
+                    title="View E2E results"
+                  >
+                    <FileText size={15} />
+                  </button>
                   <button
                     type="button"
                     onclick={() => toggleFlow(flow)}
@@ -1465,6 +1534,127 @@
 
     <DialogFooter>
       <Button variant="outline" onclick={() => showDiffDialog = false}>Close</Button>
+    </DialogFooter>
+  </DialogContent>
+</Dialog>
+
+<!-- E2E Results Dialog -->
+<Dialog bind:open={showResultsDialog}>
+  <DialogContent class="max-w-6xl max-h-[85vh] flex flex-col">
+    <DialogHeader>
+      <DialogTitle>E2E Test Run Details</DialogTitle>
+      <DialogDescription>
+        {#if resultsFlow}
+          Latest run for <span class="font-medium">{resultsFlow.name}</span>
+        {/if}
+      </DialogDescription>
+    </DialogHeader>
+
+    {#if isResultsLoading}
+      <div class="flex items-center justify-center py-12">
+        <svg class="animate-spin h-6 w-6 text-muted-foreground" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+        <span class="ml-2 text-sm text-muted-foreground">Loading E2E results...</span>
+      </div>
+    {:else if resultsError}
+      <div class="bg-red-50 border border-red-200 rounded-lg p-4">
+        <p class="text-red-700 text-sm">{resultsError}</p>
+      </div>
+    {:else if resultsData}
+      <div class="space-y-6 overflow-auto flex-1 pr-1">
+        <div class="border rounded-lg overflow-hidden">
+          <table class="w-full text-sm">
+            <tbody class="divide-y">
+              <tr>
+                <td class="w-44 font-medium bg-muted/30 px-3 py-2">Name</td>
+                <td class="px-3 py-2">{resultsData.name}</td>
+              </tr>
+              <tr>
+                <td class="font-medium bg-muted/30 px-3 py-2">URL</td>
+                <td class="px-3 py-2">
+                  {#if resultsFlow?.url}
+                    <a href={resultsFlow.url} target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline break-all">{resultsFlow.url}</a>
+                  {:else}
+                    <span class="text-muted-foreground">N/A</span>
+                  {/if}
+                </td>
+              </tr>
+              <tr>
+                <td class="font-medium bg-muted/30 px-3 py-2">Status</td>
+                <td class="px-3 py-2">{resultsData.status}</td>
+              </tr>
+              <tr>
+                <td class="font-medium bg-muted/30 px-3 py-2">Failed asserts</td>
+                <td class="px-3 py-2">{resultsData.failedAsserts}</td>
+              </tr>
+              <tr>
+                <td class="font-medium bg-muted/30 px-3 py-2">Total asserts</td>
+                <td class="px-3 py-2">{resultsData.totalAsserts}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="border rounded-lg overflow-hidden">
+          <table class="w-full text-sm">
+            <thead class="bg-muted/40">
+              <tr>
+                <th class="text-left px-3 py-2 font-medium">Component</th>
+                <th class="text-left px-3 py-2 font-medium w-20">Status</th>
+                <th class="text-left px-3 py-2 font-medium w-20">Asserts</th>
+                <th class="text-left px-3 py-2 font-medium">Errors</th>
+                <th class="text-left px-3 py-2 font-medium">ComponentId</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y">
+              {#if resultsData.details?.length > 0}
+                {#each resultsData.details as detail}
+                  <tr>
+                    <td class="px-3 py-2">{detail.componentName}</td>
+                    <td class="px-3 py-2 text-lg leading-none">{detail.status === 'failed' ? '❌' : '✅'}</td>
+                    <td class="px-3 py-2">{detail.asserts}</td>
+                    <td class="px-3 py-2">
+                      {#if detail.errors?.length > 0}
+                        <div class="space-y-1">
+                          {#each detail.errors as item}
+                            <div class="text-red-700">{item}</div>
+                          {/each}
+                        </div>
+                      {:else}
+                        <span class="text-muted-foreground">—</span>
+                      {/if}
+                    </td>
+                    <td class="px-3 py-2">
+                      {#if detail.componentId}
+                        <a
+                          href={getComponentLink(detail.componentId)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          class="text-blue-600 hover:underline break-all"
+                        >
+                          {detail.componentId}
+                        </a>
+                      {:else}
+                        <span class="text-muted-foreground">—</span>
+                      {/if}
+                    </td>
+                  </tr>
+                {/each}
+              {:else}
+                <tr>
+                  <td colspan="5" class="px-3 py-6 text-center text-muted-foreground">No component-level details found</td>
+                </tr>
+              {/if}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    {/if}
+
+    <DialogFooter>
+      <Button variant="outline" onclick={() => showResultsDialog = false}>Close</Button>
     </DialogFooter>
   </DialogContent>
 </Dialog>
