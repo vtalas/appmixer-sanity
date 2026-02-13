@@ -613,7 +613,20 @@
     server_only: { label: 'Server Only', class: 'bg-blue-100 text-blue-800 border-blue-200', description: 'Flow is not in the GitHub repository' },
     error: { label: 'Error', class: 'bg-red-100 text-red-800 border-red-200', description: 'Failed to compare flow' }
   };
+
+  // Handle Escape key to close dialogs
+  function handleKeydown(event) {
+    if (event.key === 'Escape') {
+      if (showDiffDialog) showDiffDialog = false;
+      else if (showDeleteDialog) showDeleteDialog = false;
+      else if (showSyncDialog) showSyncDialog = false;
+      else if (showAppmixerSettingsDialog) showAppmixerSettingsDialog = false;
+      else if (showGitHubSettingsDialog) showGitHubSettingsDialog = false;
+    }
+  }
 </script>
+
+<svelte:window onkeydown={handleKeydown} />
 
 <svelte:head>
   <title>E2E Test Flows - Appmixer Sanity Check</title>
