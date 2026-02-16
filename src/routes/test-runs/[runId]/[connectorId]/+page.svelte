@@ -113,7 +113,16 @@
       isSavingNotes = false;
     }
   }
+
+  // Handle Escape key to close dialogs
+  function handleKeydown(event) {
+    if (event.key === 'Escape') {
+      if (showBlockedDialog) showBlockedDialog = false;
+    }
+  }
 </script>
+
+<svelte:window onkeydown={handleKeydown} />
 
 <svelte:head>
   <title>{data.connector.label || data.connector.connector_name} - Appmixer Sanity Check</title>

@@ -150,7 +150,17 @@
       alert('Failed to delete test run');
     }
   }
+
+  // Handle Escape key to close dialogs
+  function handleKeydown(event) {
+    if (event.key === 'Escape') {
+      if (showInstructionsDialog) showInstructionsDialog = false;
+      else if (showCreateDialog) showCreateDialog = false;
+    }
+  }
 </script>
+
+<svelte:window onkeydown={handleKeydown} />
 
 <svelte:head>
   <title>Dashboard - Appmixer Sanity Check</title>

@@ -10,7 +10,7 @@ _Live Example: https://sveltekit-template.vercel.app_
 
 ## Developing
 
-Once you've installed dependencies with `pnpm install`, start a development server:
+Once you've installed dependencies with `pnpm install`, add your environment variables as needed (see `.env.example`), and then you can start a development server:
 
 ```bash
 pnpm run dev

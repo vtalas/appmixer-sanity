@@ -58,7 +58,9 @@ export async function load({ locals }) {
             getAppmixerConfig(userId)
         ]);
 
-        const designerBaseUrl = appmixerConfig.baseUrl.replace('api-', '');
+        const designerBaseUrl = appmixerConfig.baseUrl.replace('api-', '')
+            // hard-coded exceptions
+            .replace('api.clientio.', 'my.clientio.');
 
         // Return basic flow data immediately - sync status loaded lazily on client
         const flows = appmixerFlows.map((flow) => ({

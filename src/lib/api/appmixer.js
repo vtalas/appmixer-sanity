@@ -160,6 +160,64 @@ export async function fetchFlowById(userId, flowId) {
 }
 
 /**
+ * Extract E2E result store IDs from flow definition
+ * @param {Object} flow
+ * @returns {{failedStoreId: string|null, successStoreId: string|null}}
+ */
+export function getE2EResultStoreIds(flow) {
+    if (!flow?.flow) {
+        return { failedStoreId: null, successStoreId: null };
+    }
+
+    const processE2EComponent = Object.values(flow.flow)
+        .find(item => item.type === 'appmixer.utils.test.ProcessE2EResults');
+
+    const properties = processE2EComponent?.config?.properties;
+
+    return {
+        failedStoreId: properties?.failedStoreId || null,
+        successStoreId: properties?.successStoreId || null
+    };
+}
+
+/**
+ * Fetch records from Appmixer data store
+ * @param {string} userId - User ID (email)
+ * @param {string} storeId
+ * @param {{offset?: number, limit?: number, sort?: string}} options
+ * @returns {Promise<Array<{key: string, value: string, updatedAt: string}>>}
+ */
+export async function fetchStoreRecords(userId, storeId, options = {}) {
+    if (!storeId) {
+        return [];
+    }
+
+    const config = await getAppmixerConfig(userId);
+    const token = await getAccessToken(userId);
+
+    const params = new URLSearchParams({
+        storeId,
+        offset: String(options.offset ?? 0),
+        limit: String(options.limit ?? 200),
+        sort: options.sort ?? 'updatedAt:-1'
+    });
+
+    const response = await fetch(
+        `${config.baseUrl}/store?${params.toString()}`,
+        {
+            headers: { 'Authorization': `Bearer ${token}` }
+        }
+    );
+
+    if (!response.ok) {
+        throw new Error(`Failed to fetch store records for ${storeId}: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return Array.isArray(data) ? data : [];
+}
+
+/**
  * Clean flow for comparison - removes server-specific fields
  * This matches the logic from download-E2E-flows.js
  * @param {Object} flow
