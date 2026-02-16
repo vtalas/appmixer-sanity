@@ -5,18 +5,54 @@
   import { Badge } from '$lib/components/ui/badge';
   import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '$lib/components/ui/dialog';
   import { Checkbox } from '$lib/components/ui/checkbox';
-  import { invalidateAll } from '$app/navigation';
+  import { invalidateAll, goto } from '$app/navigation';
+  import { page } from '$app/stores';
   import { ExternalLink, Github, Trash2, FileDiff, FileText, Play, Square } from 'lucide-svelte';
 
   let { data } = $props();
 
   const PAGE_SIZE = 16;
 
-  let searchQuery = $state('');
-  let connectorFilter = $state('');
-  let syncFilter = $state('');
-  let runningFilter = $state('');
-  let currentPage = $state(1);
+  // Initialize filters from URL params
+  const params = $page.url.searchParams;
+  let searchQuery = $state(params.get('q') || '');
+  let connectorFilter = $state(params.get('connector') || '');
+  let syncFilter = $state(params.get('sync') || '');
+  let runningFilter = $state(params.get('status') || '');
+  let currentPage = $state(parseInt(params.get('page') || '1', 10) || 1);
+
+  // Sync filter state to URL
+  let initialized = false;
+  $effect(() => {
+    // Read all filter values to track them
+    const q = searchQuery;
+    const connector = connectorFilter;
+    const sync = syncFilter;
+    const status = runningFilter;
+    const pg = currentPage;
+
+    // Skip the first run to avoid replacing the URL on mount
+    if (!initialized) {
+      initialized = true;
+      return;
+    }
+
+    const url = new URL($page.url);
+    const sp = url.searchParams;
+
+    // Set or delete each param
+    q ? sp.set('q', q) : sp.delete('q');
+    connector ? sp.set('connector', connector) : sp.delete('connector');
+    sync ? sp.set('sync', sync) : sp.delete('sync');
+    status ? sp.set('status', status) : sp.delete('status');
+    pg > 1 ? sp.set('page', String(pg)) : sp.delete('page');
+
+    goto(url.pathname + (sp.toString() ? '?' + sp.toString() : ''), {
+      replaceState: true,
+      keepFocus: true,
+      noScroll: true
+    });
+  });
 
   // Flow selection state
   let selectedFlowIds = $state(new Set());
@@ -647,10 +683,15 @@
     })
   );
 
-  // Reset to page 1 when filters change
+  // Reset to page 1 when filters change (skip initial run to preserve URL page)
+  let filtersInitialized = false;
   $effect(() => {
     // Track all filter dependencies
     searchQuery; connectorFilter; syncFilter; runningFilter;
+    if (!filtersInitialized) {
+      filtersInitialized = true;
+      return;
+    }
     currentPage = 1;
   });
 
