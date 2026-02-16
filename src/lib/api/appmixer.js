@@ -87,7 +87,7 @@ export async function fetchE2EFlows(userId) {
     const config = await getAppmixerConfig(userId);
     const token = await getAccessToken(userId);
     const response = await fetch(
-        `${config.baseUrl}/flows?filter=customFields.category:E2E_test_flow&projection=-thumbnail`,
+        `${config.baseUrl}/flows?filter=customFields.category:E2E_test_flow&projection=name,flowId&limit=1000`,
         {
             headers: { 'Authorization': `Bearer ${token}` }
         }
