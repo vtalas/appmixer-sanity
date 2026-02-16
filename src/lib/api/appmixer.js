@@ -25,18 +25,6 @@ export async function getAppmixerConfig(userId) {
 }
 
 /**
- * Clear cached token for a user (call when config changes)
- * @param {string} userId - User ID (email)
- */
-export function clearAppmixerTokenCache(userId) {
-    if (userId) {
-        tokenCache.delete(userId);
-    } else {
-        tokenCache.clear();
-    }
-}
-
-/**
  * Authenticate with Appmixer and get access token
  * Token is cached for 55 minutes per user
  * @param {string} userId - User ID (email)
@@ -248,16 +236,6 @@ export function cleanFlowForComparison(flow) {
     }
 
     return cleaned;
-}
-
-/**
- * Get the designer base URL
- * @param {string} userId - User ID (email)
- * @returns {Promise<string>}
- */
-export async function getDesignerBaseUrl(userId) {
-    const config = await getAppmixerConfig(userId);
-    return config.baseUrl.replace('api.', 'my.');
 }
 
 /**

@@ -35,28 +35,6 @@ export async function getComponentById(id) {
 }
 
 /**
- * Add a component to a connector
- */
-export async function addComponentToConnector({
-  id,
-  connectorId,
-  componentName,
-  label,
-  description,
-  icon,
-  version,
-  isPrivate
-}) {
-  return getDb().execute({
-    sql: `
-      INSERT INTO components (id, connector_id, component_name, label, description, icon, version, is_private)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `,
-    args: [id, connectorId, componentName, label, description, icon, version, isPrivate ? 1 : 0]
-  });
-}
-
-/**
  * Update component status
  */
 export async function updateComponentStatus(id, status, githubIssues = []) {

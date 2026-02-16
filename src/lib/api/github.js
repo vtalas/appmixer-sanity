@@ -64,15 +64,6 @@ let treeCacheExpiry = null;
 const TREE_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 /**
- * Clear the GitHub tree cache (call when settings change)
- */
-export function clearGitHubCache() {
-    cachedTree = null;
-    cachedTreeKey = null;
-    treeCacheExpiry = null;
-}
-
-/**
  * Fetch the repository tree recursively
  * @param {{owner: string, repo: string, branch: string, token: string}} config
  * @returns {Promise<Array<{path: string, sha: string, url: string}>>}
@@ -106,7 +97,7 @@ async function getRepoTree(config) {
  * @param {string} userId - User ID (email)
  * @returns {Promise<Array<{path: string, sha: string, connector: string, name: string}>>}
  */
-export async function findTestFlowFiles(userId) {
+async function findTestFlowFiles(userId) {
     const config = await getGitHubConfig(userId);
     const tree = await getRepoTree(config);
 
@@ -138,7 +129,7 @@ export async function findTestFlowFiles(userId) {
  * @param {string} path - File path in repository
  * @returns {Promise<string>}
  */
-export async function fetchFileContent(userId, path) {
+async function fetchFileContent(userId, path) {
     const config = await getGitHubConfig(userId);
     const response = await fetch(
         `${GITHUB_API_BASE}/repos/${config.owner}/${config.repo}/contents/${path}?ref=${config.branch}`,
@@ -164,7 +155,7 @@ export async function fetchFileContent(userId, path) {
  * @param {string} path - File path in repository
  * @returns {Promise<{name: string, flow: Object}>}
  */
-export async function fetchTestFlowJson(userId, path) {
+async function fetchTestFlowJson(userId, path) {
     const content = await fetchFileContent(userId, path);
     return JSON.parse(content);
 }
@@ -247,7 +238,7 @@ export function generateFlowPath(connector, flowName) {
  * @param {string} branch - Branch name
  * @returns {Promise<string>} - SHA of the branch
  */
-export async function getBranchSha(userId, branch) {
+async function getBranchSha(userId, branch) {
     const config = await getGitHubConfig(userId);
     const response = await fetch(
         `${GITHUB_API_BASE}/repos/${config.owner}/${config.repo}/git/ref/heads/${branch}`,
