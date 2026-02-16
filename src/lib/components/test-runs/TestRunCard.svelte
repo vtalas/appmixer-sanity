@@ -4,7 +4,7 @@
   import { Button } from '$lib/components/ui/button';
   import { Progress } from '$lib/components/ui/progress';
   import StatusBadge from '$lib/components/shared/StatusBadge.svelte';
-  import { Loader2 } from 'lucide-svelte';
+  import { Loader2, BarChart3 } from 'lucide-svelte';
 
   let { testRun, onDelete } = $props();
 
@@ -85,6 +85,10 @@
       {:else}
         View Details
       {/if}
+    </Button>
+    <Button variant="outline" onclick={() => goto(`/test-runs/${testRun.id}/report`)} disabled={isNavigating}>
+      <BarChart3 class="w-4 h-4 mr-1" />
+      Report
     </Button>
     <Button variant="outline" onclick={handleDelete} disabled={isNavigating}>
       Delete

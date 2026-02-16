@@ -136,6 +136,48 @@
   let diffError = $state('');
   let diffData = $state(null);
 
+  // Revert state (inside diff dialog)
+  let isReverting = $state(false);
+  let revertError = $state('');
+  let revertSuccess = $state(false);
+
+  async function revertFlow() {
+    if (!diffFlow) return;
+
+    isReverting = true;
+    revertError = '';
+
+    try {
+      const response = await fetch('/api/e2e-flows/revert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ flowId: diffFlow.flowId, flowName: diffFlow.name })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || `Failed to revert: ${response.status}`);
+      }
+
+      revertSuccess = true;
+    } catch (e) {
+      revertError = e.message || 'Failed to revert flow';
+    } finally {
+      isReverting = false;
+    }
+  }
+
+  async function closeDiffDialog() {
+    const hadRevert = revertSuccess;
+    showDiffDialog = false;
+    revertSuccess = false;
+    revertError = '';
+
+    if (hadRevert) {
+      await invalidateAll();
+    }
+  }
+
   async function openDiff(flow) {
     diffFlow = flow;
     diffError = '';
@@ -1441,30 +1483,54 @@
         <p class="text-red-700 text-sm">{diffError}</p>
       </div>
     {:else if diffData}
-      {@const lines = computeDiff(diffData.github, diffData.server)}
-      {@const added = lines.filter(l => l.type === 'added').length}
-      {@const removed = lines.filter(l => l.type === 'removed').length}
-      <div class="flex items-center gap-3 text-xs text-muted-foreground pb-2 border-b">
-        <span class="text-green-700 font-medium">+{added} added</span>
-        <span class="text-red-700 font-medium">-{removed} removed</span>
-        <span>{lines.filter(l => l.type === 'context').length} unchanged</span>
-      </div>
-      <div class="overflow-auto flex-1 min-h-0 border rounded-md bg-muted/30">
-        <table class="w-full text-xs font-mono leading-5">
-          {#each lines as line}
-            <tr class={line.type === 'added' ? 'bg-green-50' : line.type === 'removed' ? 'bg-red-50' : 'hover:bg-muted/50'}>
-              <td class="w-6 text-center select-none {line.type === 'added' ? 'text-green-600 bg-green-100' : line.type === 'removed' ? 'text-red-600 bg-red-100' : 'text-muted-foreground'}">
-                {line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ''}
-              </td>
-              <td class="px-3 whitespace-pre {line.type === 'added' ? 'text-green-900' : line.type === 'removed' ? 'text-red-900' : ''}">{line.line}</td>
-            </tr>
-          {/each}
-        </table>
-      </div>
+      {#if revertSuccess}
+        <div class="bg-green-50 border border-green-200 rounded-lg p-4 text-center">
+          <p class="text-green-700 font-medium">Flow reverted to GitHub version successfully.</p>
+        </div>
+      {:else}
+        {@const lines = computeDiff(diffData.github, diffData.server)}
+        {@const added = lines.filter(l => l.type === 'added').length}
+        {@const removed = lines.filter(l => l.type === 'removed').length}
+        <div class="flex items-center gap-3 text-xs text-muted-foreground pb-2 border-b">
+          <span class="text-green-700 font-medium">+{added} added</span>
+          <span class="text-red-700 font-medium">-{removed} removed</span>
+          <span>{lines.filter(l => l.type === 'context').length} unchanged</span>
+        </div>
+        <div class="overflow-auto flex-1 min-h-0 border rounded-md bg-muted/30">
+          <table class="w-full text-xs font-mono leading-5">
+            {#each lines as line}
+              <tr class={line.type === 'added' ? 'bg-green-50' : line.type === 'removed' ? 'bg-red-50' : 'hover:bg-muted/50'}>
+                <td class="w-6 text-center select-none {line.type === 'added' ? 'text-green-600 bg-green-100' : line.type === 'removed' ? 'text-red-600 bg-red-100' : 'text-muted-foreground'}">
+                  {line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ''}
+                </td>
+                <td class="px-3 whitespace-pre {line.type === 'added' ? 'text-green-900' : line.type === 'removed' ? 'text-red-900' : ''}">{line.line}</td>
+              </tr>
+            {/each}
+          </table>
+        </div>
+        {#if revertError}
+          <div class="bg-red-50 border border-red-200 rounded-lg p-3">
+            <p class="text-sm text-red-700">{revertError}</p>
+          </div>
+        {/if}
+      {/if}
     {/if}
 
     <DialogFooter>
-      <Button variant="outline" onclick={() => showDiffDialog = false}>Close</Button>
+      {#if diffData && !revertSuccess}
+        <Button variant="destructive" onclick={revertFlow} disabled={isReverting}>
+          {#if isReverting}
+            <svg class="animate-spin -ml-1 mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Reverting...
+          {:else}
+            Revert
+          {/if}
+        </Button>
+      {/if}
+      <Button variant="outline" onclick={closeDiffDialog}>Close</Button>
     </DialogFooter>
   </DialogContent>
 </Dialog>

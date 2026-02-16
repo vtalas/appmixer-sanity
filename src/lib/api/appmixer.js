@@ -203,6 +203,33 @@ export async function getDesignerBaseUrl(userId) {
 }
 
 /**
+ * Update a flow on Appmixer (replace its content)
+ * @param {string} userId - User ID (email)
+ * @param {string} flowId - Flow ID to update
+ * @param {Object} flowData - Flow content to set
+ * @returns {Promise<void>}
+ */
+export async function updateFlow(userId, flowId, flowData) {
+    const config = await getAppmixerConfig(userId);
+    const token = await getAccessToken(userId);
+    const response = await fetch(
+        `${config.baseUrl}/flows/${flowId}`,
+        {
+            method: 'PUT',
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(flowData)
+        }
+    );
+
+    if (!response.ok) {
+        throw new Error(`Failed to update flow ${flowId}: ${response.status}`);
+    }
+}
+
+/**
  * Delete a flow from Appmixer
  * @param {string} userId - User ID (email)
  * @param {string} flowId - Flow ID to delete
