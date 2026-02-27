@@ -1009,6 +1009,9 @@
               </TableCell>
               <TableCell>
                 <span class="font-medium">{flow.name}</span>
+                {#if flow.flowId}
+                  <div class="text-xs text-muted-foreground font-mono">{flow.flowId}</div>
+                {/if}
               </TableCell>
               <TableCell>
                 {#if flow.running}
