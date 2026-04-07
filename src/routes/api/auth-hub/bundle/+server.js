@@ -4,7 +4,7 @@ import { writeFile, mkdir, readFile, readdir, rm, access } from 'fs/promises';
 import { join, resolve } from 'path';
 import { execSync } from 'child_process';
 
-const CACHE_BASE = resolve('cache/authhub');
+const CACHE_BASE = join(process.env.VERCEL ? '/tmp' : resolve('cache'), 'authhub');
 
 /**
  * Find a file by name recursively in a directory.
