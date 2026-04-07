@@ -9,6 +9,9 @@ node_modules
 .vercel
 .output
 
+# Auth Hub bundle cache
+/cache
+
 # SQLite database
 /data/*.db
 /data/*.db-journal

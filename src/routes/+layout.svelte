@@ -28,6 +28,7 @@
       <nav class="flex items-center gap-4">
         <a href="/" class="text-sm text-muted-foreground hover:text-foreground">Dashboard</a>
         <a href="/e2e-flows" class="text-sm text-muted-foreground hover:text-foreground">E2E Flows</a>
+        <a href="/authub" class="text-sm text-muted-foreground hover:text-foreground">Auth Hub</a>
         {#if data.session?.user}
           <span class="text-sm text-muted-foreground">{data.session.user.email}</span>
           <Button variant="outline" size="sm" onclick={() => signOut()}>Sign out</Button>
