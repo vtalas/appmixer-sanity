@@ -107,4 +107,13 @@ export async function initializeDatabase() {
   `);
 
   await client.execute(`CREATE INDEX IF NOT EXISTS idx_user_settings_user ON user_settings(user_id)`);
+
+  // Auth Hub verification status
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS authhub_status (
+      service_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'not_verified',
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
 }
