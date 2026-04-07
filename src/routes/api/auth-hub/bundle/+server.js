@@ -10,22 +10,40 @@ console.log('[auth-hub/bundle] CACHE_BASE:', CACHE_BASE, 'VERCEL:', process.env.
 
 /**
  * Extract a ZIP buffer to a directory using pure Node.js (no external unzip).
+ * Reads from the central directory to get accurate sizes (handles data descriptors).
  * @param {Buffer} buf
  * @param {string} destDir
  */
 async function extractZip(buf, destDir) {
-    let offset = 0;
-    while (offset < buf.length - 4) {
-        const sig = buf.readUInt32LE(offset);
-        if (sig !== 0x04034b50) break; // not a local file header
+    // Find End of Central Directory record (search from end)
+    let eocdOffset = -1;
+    for (let i = buf.length - 22; i >= 0; i--) {
+        if (buf.readUInt32LE(i) === 0x06054b50) {
+            eocdOffset = i;
+            break;
+        }
+    }
+    if (eocdOffset === -1) throw new Error('Invalid ZIP: EOCD not found');
 
-        const compressionMethod = buf.readUInt16LE(offset + 8);
-        const compressedSize = buf.readUInt32LE(offset + 18);
-        const uncompressedSize = buf.readUInt32LE(offset + 22);
-        const fileNameLen = buf.readUInt16LE(offset + 26);
-        const extraLen = buf.readUInt16LE(offset + 28);
-        const fileName = buf.toString('utf-8', offset + 30, offset + 30 + fileNameLen);
-        const dataStart = offset + 30 + fileNameLen + extraLen;
+    const cdOffset = buf.readUInt32LE(eocdOffset + 16);
+    const cdEntries = buf.readUInt16LE(eocdOffset + 10);
+
+    let offset = cdOffset;
+    for (let i = 0; i < cdEntries; i++) {
+        if (buf.readUInt32LE(offset) !== 0x02014b50) break;
+
+        const compressionMethod = buf.readUInt16LE(offset + 10);
+        const compressedSize = buf.readUInt32LE(offset + 20);
+        const fileNameLen = buf.readUInt16LE(offset + 28);
+        const extraLen = buf.readUInt16LE(offset + 30);
+        const commentLen = buf.readUInt16LE(offset + 32);
+        const localHeaderOffset = buf.readUInt32LE(offset + 42);
+        const fileName = buf.toString('utf-8', offset + 46, offset + 46 + fileNameLen);
+
+        // Read local header to find where data actually starts
+        const localFileNameLen = buf.readUInt16LE(localHeaderOffset + 26);
+        const localExtraLen = buf.readUInt16LE(localHeaderOffset + 28);
+        const dataStart = localHeaderOffset + 30 + localFileNameLen + localExtraLen;
 
         const filePath = join(destDir, fileName);
 
@@ -43,7 +61,7 @@ async function extractZip(buf, destDir) {
             await writeFile(filePath, fileData);
         }
 
-        offset = dataStart + compressedSize;
+        offset += 46 + fileNameLen + extraLen + commentLen;
     }
 }
 
