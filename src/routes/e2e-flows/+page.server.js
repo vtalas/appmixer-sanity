@@ -1,6 +1,6 @@
 import { fetchE2EFlows, isAppmixerConfigured, getAppmixerInfo, getAppmixerConfig } from '$lib/api/appmixer.js';
 import { getGitHubRepoInfo, getGitHubConfig } from '$lib/api/github.js';
-import { GITHUB_TOKEN } from '$env/static/private';
+import { SANITY_GITHUB_TOKEN } from '$env/static/private';
 
 /**
  * Extract connector name from flow name
@@ -38,8 +38,8 @@ export async function load({ locals }) {
     const githubConfig = await getGitHubConfig(userId);
 
     // Add token status info (don't expose actual token)
-    githubInfo.hasEnvToken = !!GITHUB_TOKEN;
-    githubInfo.hasCustomToken = !!githubConfig.token && githubConfig.token !== GITHUB_TOKEN;
+    githubInfo.hasEnvToken = !!SANITY_GITHUB_TOKEN;
+    githubInfo.hasCustomToken = !!githubConfig.token && githubConfig.token !== SANITY_GITHUB_TOKEN;
 
     const appmixerConfigured = await isAppmixerConfigured(userId);
     if (!appmixerConfigured) {

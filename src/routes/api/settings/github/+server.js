@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
 import { getUserSettings, setUserSettings, setUserSetting, SETTING_KEYS } from '$lib/db/settings.js';
-import { GITHUB_REPO_OWNER, GITHUB_REPO_NAME, GITHUB_REPO_BRANCH, GITHUB_TOKEN } from '$env/static/private';
+import { GITHUB_REPO_OWNER, GITHUB_REPO_NAME, GITHUB_REPO_BRANCH, SANITY_GITHUB_TOKEN } from '$env/static/private';
 
 // Default values from environment
 const DEFAULTS = {
@@ -25,7 +25,7 @@ export async function GET({ locals }) {
     ]);
 
     // Check if a custom token is set (don't return the actual token value)
-    const hasEnvToken = !!GITHUB_TOKEN;
+    const hasEnvToken = !!SANITY_GITHUB_TOKEN;
     const hasCustomToken = !!settings[SETTING_KEYS.GITHUB_TOKEN];
 
     return json({

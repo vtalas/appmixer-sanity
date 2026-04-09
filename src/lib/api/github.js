@@ -2,7 +2,7 @@
  * GitHub API client for fetching test-flow files from appmixer-connectors repository
  */
 
-import { GITHUB_TOKEN, GITHUB_REPO_OWNER, GITHUB_REPO_NAME, GITHUB_REPO_BRANCH } from '$env/static/private';
+import { SANITY_GITHUB_TOKEN, GITHUB_REPO_OWNER, GITHUB_REPO_NAME, GITHUB_REPO_BRANCH } from '$env/static/private';
 import { getUserSettings, SETTING_KEYS } from '$lib/db/settings.js';
 
 const GITHUB_API_BASE = 'https://api.github.com';
@@ -28,7 +28,7 @@ export async function getGitHubConfig(userId) {
     ]) : {};
 
     // Custom token from DB overrides env token
-    const token = settings[SETTING_KEYS.GITHUB_TOKEN] || GITHUB_TOKEN || '';
+    const token = settings[SETTING_KEYS.GITHUB_TOKEN] || SANITY_GITHUB_TOKEN || '';
 
     return {
         owner: settings[SETTING_KEYS.GITHUB_REPO_OWNER] || ENV_DEFAULTS.owner,

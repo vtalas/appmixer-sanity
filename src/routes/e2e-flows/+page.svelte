@@ -519,146 +519,6 @@
     }
   }
 
-  // GitHub settings dialog
-  let showGitHubSettingsDialog = $state(false);
-  let settingsOwner = $state('');
-  let settingsRepo = $state('');
-  let settingsBranch = $state('');
-  let settingsToken = $state('');
-  let clearCustomToken = $state(false);
-  let isSavingGitHubSettings = $state(false);
-  let gitHubSettingsError = $state('');
-
-  // Appmixer settings dialog
-  let showAppmixerSettingsDialog = $state(false);
-  let appmixerBaseUrl = $state('');
-  let appmixerUsername = $state('');
-  let appmixerPassword = $state('');
-  let clearAppmixerCredentials = $state(false);
-  let isSavingAppmixerSettings = $state(false);
-  let appmixerSettingsError = $state('');
-
-  // Initialize GitHub settings form when dialog opens
-  $effect(() => {
-    if (showGitHubSettingsDialog && data.githubInfo) {
-      settingsOwner = data.githubInfo.owner;
-      settingsRepo = data.githubInfo.repo;
-      settingsBranch = data.githubInfo.branch;
-      settingsToken = '';
-      clearCustomToken = false;
-      gitHubSettingsError = '';
-    }
-  });
-
-  // Initialize Appmixer settings form when dialog opens
-  $effect(() => {
-    if (showAppmixerSettingsDialog && data.appmixerInfo) {
-      appmixerBaseUrl = data.appmixerInfo.baseUrl;
-      appmixerUsername = data.appmixerInfo.username;
-      appmixerPassword = '';
-      clearAppmixerCredentials = false;
-      appmixerSettingsError = '';
-    }
-  });
-
-  async function saveGitHubSettings() {
-    if (!settingsOwner.trim() || !settingsRepo.trim() || !settingsBranch.trim()) {
-      gitHubSettingsError = 'All fields are required';
-      return;
-    }
-
-    isSavingGitHubSettings = true;
-    gitHubSettingsError = '';
-
-    try {
-      const response = await fetch('/api/settings/github', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          owner: settingsOwner.trim(),
-          repo: settingsRepo.trim(),
-          branch: settingsBranch.trim(),
-          token: settingsToken.trim(),
-          clearToken: clearCustomToken
-        })
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        gitHubSettingsError = error.error || 'Failed to save settings';
-        return;
-      }
-
-      showGitHubSettingsDialog = false;
-      await invalidateAll();
-    } catch (e) {
-      gitHubSettingsError = 'Failed to save settings';
-    } finally {
-      isSavingGitHubSettings = false;
-    }
-  }
-
-  async function saveAppmixerSettings() {
-    if (clearAppmixerCredentials) {
-      isSavingAppmixerSettings = true;
-      appmixerSettingsError = '';
-
-      try {
-        const response = await fetch('/api/settings/appmixer', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ clearCredentials: true })
-        });
-
-        if (!response.ok) {
-          const error = await response.json();
-          appmixerSettingsError = error.error || 'Failed to clear credentials';
-          return;
-        }
-
-        showAppmixerSettingsDialog = false;
-        await invalidateAll();
-      } catch (e) {
-        appmixerSettingsError = 'Failed to clear credentials';
-      } finally {
-        isSavingAppmixerSettings = false;
-      }
-      return;
-    }
-
-    if (!appmixerBaseUrl.trim() || !appmixerUsername.trim()) {
-      appmixerSettingsError = 'Base URL and username are required';
-      return;
-    }
-
-    isSavingAppmixerSettings = true;
-    appmixerSettingsError = '';
-
-    try {
-      const response = await fetch('/api/settings/appmixer', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          baseUrl: appmixerBaseUrl.trim(),
-          username: appmixerUsername.trim(),
-          password: appmixerPassword.trim()
-        })
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        appmixerSettingsError = error.error || 'Failed to save settings';
-        return;
-      }
-
-      showAppmixerSettingsDialog = false;
-      await invalidateAll();
-    } catch (e) {
-      appmixerSettingsError = 'Failed to save settings';
-    } finally {
-      isSavingAppmixerSettings = false;
-    }
-  }
 
   // Get unique connectors for filter dropdown
   const connectors = $derived(
@@ -746,8 +606,6 @@
       else if (showResultsDialog) showResultsDialog = false;
       else if (showDeleteDialog) showDeleteDialog = false;
       else if (showSyncDialog) showSyncDialog = false;
-      else if (showAppmixerSettingsDialog) showAppmixerSettingsDialog = false;
-      else if (showGitHubSettingsDialog) showGitHubSettingsDialog = false;
     }
   }
 </script>
@@ -769,11 +627,7 @@
 
   <!-- Source Info -->
   <div class="flex flex-wrap gap-4 text-sm">
-    <button
-      type="button"
-      onclick={() => showAppmixerSettingsDialog = true}
-      class="flex items-center gap-2 px-3 py-1.5 bg-muted rounded-md hover:bg-muted/80 transition-colors cursor-pointer"
-    >
+    <div class="flex items-center gap-2 px-3 py-1.5 bg-muted rounded-md">
       <span class="text-muted-foreground">Appmixer:</span>
       {#if data.appmixerInfo?.baseUrl}
         <span class="text-blue-600">{data.appmixerInfo.baseUrl}</span>
@@ -783,28 +637,23 @@
       {:else}
         <span class="text-muted-foreground">Not configured</span>
       {/if}
-      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-muted-foreground">
-        <path d="M12 20h9"/>
-        <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
-      </svg>
-    </button>
+    </div>
     {#if data.githubInfo}
-      <button
-        type="button"
-        onclick={() => showGitHubSettingsDialog = true}
-        class="flex items-center gap-2 px-3 py-1.5 bg-muted rounded-md hover:bg-muted/80 transition-colors cursor-pointer"
-      >
+      <div class="flex items-center gap-2 px-3 py-1.5 bg-muted rounded-md">
         <span class="text-muted-foreground">GitHub:</span>
         <span class="text-blue-600">
           {data.githubInfo.owner}/{data.githubInfo.repo}
         </span>
         <Badge variant="outline">{data.githubInfo.branch}</Badge>
-        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-muted-foreground">
-          <path d="M12 20h9"/>
-          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
-        </svg>
-      </button>
+      </div>
     {/if}
+    <a href="/settings" class="flex items-center gap-1 px-3 py-1.5 text-muted-foreground hover:text-foreground transition-colors">
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 20h9"/>
+        <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+      </svg>
+      Settings
+    </a>
   </div>
 
   {#if data.error}
@@ -1187,194 +1036,6 @@
     {/if}
   {/if}
 </div>
-
-<!-- GitHub Settings Dialog -->
-<Dialog bind:open={showGitHubSettingsDialog}>
-  <DialogContent>
-    <DialogHeader>
-      <DialogTitle>GitHub Repository Settings</DialogTitle>
-      <DialogDescription>
-        Configure which GitHub repository and branch to compare E2E flows with.
-      </DialogDescription>
-    </DialogHeader>
-
-    <div class="py-4 space-y-4">
-      <div class="space-y-2">
-        <label for="owner" class="text-sm font-medium">Owner</label>
-        <Input
-          id="owner"
-          placeholder="e.g., clientIO"
-          bind:value={settingsOwner}
-          disabled={isSavingGitHubSettings}
-        />
-      </div>
-
-      <div class="space-y-2">
-        <label for="repo" class="text-sm font-medium">Repository</label>
-        <Input
-          id="repo"
-          placeholder="e.g., appmixer-connectors"
-          bind:value={settingsRepo}
-          disabled={isSavingGitHubSettings}
-        />
-      </div>
-
-      <div class="space-y-2">
-        <label for="branch" class="text-sm font-medium">Branch</label>
-        <Input
-          id="branch"
-          placeholder="e.g., dev"
-          bind:value={settingsBranch}
-          disabled={isSavingGitHubSettings}
-        />
-      </div>
-
-      <div class="space-y-2">
-        <label for="token" class="text-sm font-medium">
-          Personal Access Token
-          <span class="text-muted-foreground font-normal ml-1">(optional)</span>
-        </label>
-        <Input
-          id="token"
-          type="password"
-          placeholder={data.githubInfo?.hasCustomToken ? '••••••••••••••••' : (data.githubInfo?.hasEnvToken ? 'Using token from environment' : 'Enter token for private repos')}
-          bind:value={settingsToken}
-          disabled={isSavingGitHubSettings || clearCustomToken}
-        />
-        <p class="text-xs text-muted-foreground">
-          {#if data.githubInfo?.hasCustomToken}
-            Custom token is set.
-            <button
-              type="button"
-              class="text-blue-600 hover:underline"
-              onclick={() => clearCustomToken = !clearCustomToken}
-            >
-              {clearCustomToken ? 'Keep custom token' : 'Clear and use env token'}
-            </button>
-          {:else if data.githubInfo?.hasEnvToken}
-            Using token from GITHUB_TOKEN environment variable. Enter a new token to override.
-          {:else}
-            No token configured. Create one at <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">github.com/settings/tokens</a>
-          {/if}
-        </p>
-        {#if clearCustomToken}
-          <p class="text-xs text-amber-600">Custom token will be cleared on save.</p>
-        {/if}
-      </div>
-
-      {#if gitHubSettingsError}
-        <p class="text-sm text-destructive">{gitHubSettingsError}</p>
-      {/if}
-    </div>
-
-    <DialogFooter>
-      <Button variant="outline" onclick={() => showGitHubSettingsDialog = false} disabled={isSavingGitHubSettings}>
-        Cancel
-      </Button>
-      <Button onclick={saveGitHubSettings} disabled={isSavingGitHubSettings}>
-        {isSavingGitHubSettings ? 'Saving...' : 'Save'}
-      </Button>
-    </DialogFooter>
-  </DialogContent>
-</Dialog>
-
-<!-- Appmixer Settings Dialog -->
-<Dialog bind:open={showAppmixerSettingsDialog}>
-  <DialogContent class="max-w-2xl">
-    <DialogHeader>
-      <DialogTitle>Appmixer Instance Settings</DialogTitle>
-      <DialogDescription>
-        Configure the Appmixer instance to fetch E2E test flows from.
-      </DialogDescription>
-    </DialogHeader>
-
-    <div class="py-4 space-y-4">
-      <div class="space-y-2">
-        <label for="appmixer-url" class="text-sm font-medium">Base URL</label>
-        <div class="flex flex-wrap gap-2 mb-2">
-          <button
-            type="button"
-            class="px-3 py-1 text-xs rounded-full border transition-colors {appmixerBaseUrl === 'https://api-dev-automated-00001.dev.appmixer.ai' ? 'bg-primary text-primary-foreground border-primary' : 'bg-muted hover:bg-muted/80 border-border'}"
-            onclick={() => appmixerBaseUrl = 'https://api-dev-automated-00001.dev.appmixer.ai'}
-            disabled={isSavingAppmixerSettings || clearAppmixerCredentials}
-          >
-            QA
-          </button>
-          <button
-            type="button"
-            class="px-3 py-1 text-xs rounded-full border transition-colors {appmixerBaseUrl === 'https://api.clientio.appmixer.cloud' ? 'bg-primary text-primary-foreground border-primary' : 'bg-muted hover:bg-muted/80 border-border'}"
-            onclick={() => appmixerBaseUrl = 'https://api.clientio.appmixer.cloud'}
-            disabled={isSavingAppmixerSettings || clearAppmixerCredentials}
-          >
-            ClientIO Cloud
-          </button>
-        </div>
-        <Input
-          id="appmixer-url"
-          placeholder="Or enter custom URL..."
-          bind:value={appmixerBaseUrl}
-          disabled={isSavingAppmixerSettings || clearAppmixerCredentials}
-        />
-      </div>
-
-      <div class="space-y-2">
-        <label for="appmixer-username" class="text-sm font-medium">Username</label>
-        <Input
-          id="appmixer-username"
-          placeholder="e.g., user@example.com"
-          bind:value={appmixerUsername}
-          disabled={isSavingAppmixerSettings || clearAppmixerCredentials}
-        />
-      </div>
-
-      <div class="space-y-2">
-        <label for="appmixer-password" class="text-sm font-medium">
-          Password
-          <span class="text-muted-foreground font-normal ml-1">(leave empty to keep current)</span>
-        </label>
-        <Input
-          id="appmixer-password"
-          type="password"
-          placeholder={data.appmixerInfo?.hasCustomCredentials ? '••••••••••••••••' : (data.appmixerInfo?.hasEnvCredentials ? 'Using password from environment' : 'Enter password')}
-          bind:value={appmixerPassword}
-          disabled={isSavingAppmixerSettings || clearAppmixerCredentials}
-        />
-        <p class="text-xs text-muted-foreground">
-          {#if data.appmixerInfo?.hasCustomCredentials}
-            Custom credentials are set.
-            <button
-              type="button"
-              class="text-blue-600 hover:underline"
-              onclick={() => clearAppmixerCredentials = !clearAppmixerCredentials}
-            >
-              {clearAppmixerCredentials ? 'Keep custom credentials' : 'Clear and use env credentials'}
-            </button>
-          {:else if data.appmixerInfo?.hasEnvCredentials}
-            Using credentials from environment variables. Enter new values to override.
-          {:else}
-            No credentials configured. Set APPMIXER_BASE_URL, APPMIXER_USERNAME, and APPMIXER_PASSWORD environment variables or enter them here.
-          {/if}
-        </p>
-        {#if clearAppmixerCredentials}
-          <p class="text-xs text-amber-600">Custom credentials will be cleared on save.</p>
-        {/if}
-      </div>
-
-      {#if appmixerSettingsError}
-        <p class="text-sm text-destructive">{appmixerSettingsError}</p>
-      {/if}
-    </div>
-
-    <DialogFooter>
-      <Button variant="outline" onclick={() => showAppmixerSettingsDialog = false} disabled={isSavingAppmixerSettings}>
-        Cancel
-      </Button>
-      <Button onclick={saveAppmixerSettings} disabled={isSavingAppmixerSettings}>
-        {isSavingAppmixerSettings ? 'Saving...' : 'Save'}
-      </Button>
-    </DialogFooter>
-  </DialogContent>
-</Dialog>
 
 <!-- Sync to GitHub Dialog -->
 <Dialog bind:open={showSyncDialog}>
