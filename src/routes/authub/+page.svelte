@@ -118,6 +118,133 @@
     uploadDragOver = false;
   }
 
+  // Upload New (admin only) — service name + config + bundle
+  let uploadNewDialogOpen = $state(false);
+  let uploadNewServiceId = $state('');
+  /** @type {Record<string, string>} */
+  let uploadNewConfig = $state({});
+  let uploadNewConfigKey = $state('');
+  let uploadNewConfigValue = $state('');
+  /** @type {File|null} */
+  let uploadNewFile = $state(null);
+  let uploadNewDragOver = $state(false);
+  /** @type {'form'|'checking'|'confirm'|'saving'|'uploading'|'polling'|'done'|'error'} */
+  let uploadNewStep = $state('form');
+  let uploadNewMessage = $state('');
+
+  function resetUploadNew() {
+    uploadNewServiceId = '';
+    uploadNewConfig = {};
+    uploadNewConfigKey = '';
+    uploadNewConfigValue = '';
+    uploadNewFile = null;
+    uploadNewDragOver = false;
+    uploadNewStep = 'form';
+    uploadNewMessage = '';
+  }
+
+  /** @param {File} file */
+  function setUploadNewFile(file) {
+    if (!file.name.endsWith('.zip')) { uploadNewMessage = 'Only .zip files are supported'; return; }
+    uploadNewFile = file;
+    uploadNewMessage = '';
+  }
+
+  async function doUploadNew(force = false) {
+    const sid = uploadNewServiceId.trim();
+    if (!sid) { uploadNewMessage = 'Service name is required'; return; }
+
+    if (!force) {
+      // Check if config already exists
+      uploadNewStep = 'checking';
+      uploadNewMessage = '';
+      try {
+        const res = await fetch(`/api/auth-hub/service-config?serviceId=${encodeURIComponent(sid)}`);
+        if (res.ok) {
+          // Exists — ask to confirm
+          uploadNewStep = 'confirm';
+          return;
+        }
+      } catch { /* treat as not found */ }
+    }
+
+    // Save config first (if any keys)
+    if (Object.keys(uploadNewConfig).length > 0) {
+      uploadNewStep = 'saving';
+      uploadNewMessage = 'Saving service config...';
+      const body = Object.fromEntries(
+        Object.entries(uploadNewConfig).map(([k, v]) => { try { return [k, JSON.parse(v)]; } catch { return [k, v]; } })
+      );
+      // Always include serviceId in config
+      if (!body.serviceId) body.serviceId = sid;
+      const res = await fetch('/api/auth-hub/service-config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ serviceId: sid, config: body })
+      });
+      if (!res.ok) {
+        const r = await res.json();
+        uploadNewStep = 'error';
+        uploadNewMessage = r.error || 'Failed to save config';
+        return;
+      }
+    }
+
+    // Upload bundle (if file selected)
+    if (uploadNewFile) {
+      uploadNewStep = 'uploading';
+      uploadNewMessage = `Uploading ${uploadNewFile.name}...`;
+      try {
+        const res = await fetch('/api/auth-hub/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: uploadNewFile
+        });
+        const result = await res.json();
+        if (!res.ok) { uploadNewStep = 'error'; uploadNewMessage = result.error || 'Upload failed'; return; }
+
+        const { ticket } = result;
+        uploadNewStep = 'polling';
+        uploadNewMessage = 'Processing...';
+        for (let i = 0; i < 60; i++) {
+          await new Promise(r => setTimeout(r, 2000));
+          const pollRes = await fetch(`/api/auth-hub/upload?ticket=${encodeURIComponent(ticket)}`);
+          if (!pollRes.ok) continue;
+          const status = await pollRes.json();
+          console.log(`[upload-new poll ${i + 1}]`, status);
+          if (status.finished || status.status === 'finished' || status.status === 'done' || status.completed) break;
+          if (status.status === 'error' || status.error) {
+            uploadNewStep = 'error';
+            uploadNewMessage = status.error || status.message || 'Upload processing failed';
+            return;
+          }
+          if (status.progress !== undefined) uploadNewMessage = `Processing... ${status.progress || ''}`;
+        }
+      } catch (err) {
+        uploadNewStep = 'error';
+        uploadNewMessage = /** @type {Error} */ (err).message;
+        return;
+      }
+    }
+
+    uploadNewStep = 'done';
+    uploadNewMessage = 'Done!';
+    // Add to connector list if not already there
+    if (!data.connectors.find(c => c.serviceId === sid)) {
+      data.connectors = [...data.connectors, { serviceId: sid }];
+    }
+    // Refresh bundle info
+    try {
+      const r = await fetch('/api/auth-hub/bundle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ serviceId: sid })
+      });
+      const result = await r.json();
+      if (r.ok && result.version) cachedInfo = { ...cachedInfo, [sid]: { ...cachedInfo[sid], version: result.version } };
+    } catch { /* ignore */ }
+  }
+
   // View connector details popup
   const WHITELIST_EXCLUDED = new Set(['serviceId', 'clientId', 'clientSecret']);
 
@@ -159,9 +286,14 @@
   /** @param {string} serviceId */
   async function refreshView(serviceId) {
     try {
-      const [configRes, whitelistRes] = await Promise.all([
+      const [configRes, whitelistRes, bundleRes] = await Promise.all([
         fetch(`/api/auth-hub/service-config?serviceId=${encodeURIComponent(serviceId)}`),
-        fetch(`/api/auth-hub/service-config?serviceId=${encodeURIComponent(serviceId)}&whitelist=1`)
+        fetch(`/api/auth-hub/service-config?serviceId=${encodeURIComponent(serviceId)}&whitelist=1`),
+        fetch('/api/auth-hub/bundle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ serviceId })
+        })
       ]);
       const configResult = await configRes.json();
       if (!configRes.ok) {
@@ -171,8 +303,13 @@
       }
       if (whitelistRes.ok) {
         const wl = await whitelistRes.json();
-        // whitelist is an object whose keys are the whitelisted property names
         viewWhitelistKeys = new Set(Array.isArray(wl) ? wl : Object.keys(wl));
+      }
+      if (bundleRes.ok) {
+        const bundleResult = await bundleRes.json();
+        if (bundleResult.version) {
+          cachedInfo = { ...cachedInfo, [serviceId]: { ...cachedInfo[serviceId], ...bundleResult } };
+        }
       }
     } catch (err) {
       viewError = /** @type {Error} */ (err).message;
@@ -439,6 +576,13 @@
               Compare with GitHub
             {/if}
           </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onclick={() => { resetUploadNew(); uploadNewDialogOpen = true; }}
+          >
+            Upload New
+          </Button>
         {/if}
       {/if}
     </div>
@@ -565,6 +709,127 @@
     {/if}
   {/if}
 </div>
+
+<!-- Upload New Dialog -->
+<Dialog bind:open={uploadNewDialogOpen}>
+  <DialogContent class="max-w-xl">
+    <DialogHeader>
+      <DialogTitle>Upload New Connector</DialogTitle>
+      <DialogDescription>Define service name, config properties, and optionally upload a bundle.</DialogDescription>
+    </DialogHeader>
+
+    {#if uploadNewStep === 'confirm'}
+      <p class="text-sm">Service config for <strong>{uploadNewServiceId}</strong> already exists. Do you want to overwrite it?</p>
+      <DialogFooter>
+        <Button variant="outline" onclick={() => { uploadNewStep = 'form'; }}>Cancel</Button>
+        <Button variant="destructive" onclick={() => doUploadNew(true)}>Overwrite</Button>
+      </DialogFooter>
+    {:else if uploadNewStep === 'done'}
+      <div class="flex flex-col items-center gap-3 py-6">
+        <span class="text-3xl">✅</span>
+        <p class="text-sm font-medium text-green-600">{uploadNewMessage}</p>
+      </div>
+      <DialogFooter>
+        <Button variant="outline" onclick={() => { uploadNewDialogOpen = false; }}>Close</Button>
+      </DialogFooter>
+    {:else if uploadNewStep === 'error'}
+      <p class="text-sm text-destructive">{uploadNewMessage}</p>
+      <DialogFooter>
+        <Button variant="outline" onclick={() => { uploadNewStep = 'form'; uploadNewMessage = ''; }}>Back</Button>
+      </DialogFooter>
+    {:else if uploadNewStep !== 'form'}
+      <!-- checking / saving / uploading / polling -->
+      <div class="flex flex-col items-center gap-3 py-6">
+        <div class="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent"></div>
+        <p class="text-sm text-muted-foreground">{uploadNewMessage}</p>
+      </div>
+    {:else}
+      <!-- Form -->
+      <div class="space-y-4">
+        <!-- Service name -->
+        <div>
+          <label class="mb-1 block text-xs font-medium text-muted-foreground">Service name</label>
+          <input
+            class="h-9 w-full rounded-md border border-input bg-background px-3 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+            placeholder="e.g. appmixer:box"
+            bind:value={uploadNewServiceId}
+          />
+        </div>
+
+        <!-- Config properties -->
+        <div>
+          <label class="mb-1 block text-xs font-medium text-muted-foreground">Config properties</label>
+          <div class="space-y-1 rounded-md border p-3">
+            {#each Object.keys(uploadNewConfig) as key (key)}
+              <div class="flex items-center gap-2">
+                <span class="w-32 shrink-0 text-xs text-muted-foreground truncate font-mono" title={key}>{key}</span>
+                <input
+                  class="h-7 flex-1 rounded border border-input bg-background px-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+                  value={uploadNewConfig[key]}
+                  oninput={(e) => { uploadNewConfig = { ...uploadNewConfig, [key]: /** @type {HTMLInputElement} */ (e.target).value }; }}
+                />
+                <button
+                  class="shrink-0 text-muted-foreground hover:text-destructive px-1 text-xs"
+                  onclick={() => { const c = { ...uploadNewConfig }; delete c[key]; uploadNewConfig = c; }}
+                >✕</button>
+              </div>
+            {/each}
+            <div class="flex items-center gap-2 {Object.keys(uploadNewConfig).length > 0 ? 'pt-2 border-t mt-1' : ''}">
+              <input
+                class="h-7 w-32 shrink-0 rounded border border-input bg-background px-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+                placeholder="key"
+                bind:value={uploadNewConfigKey}
+              />
+              <input
+                class="h-7 flex-1 rounded border border-input bg-background px-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+                placeholder="value"
+                bind:value={uploadNewConfigValue}
+              />
+              <button
+                class="shrink-0 rounded border border-input px-2 py-0.5 text-xs hover:bg-muted disabled:opacity-40"
+                disabled={!uploadNewConfigKey}
+                onclick={() => { if (uploadNewConfigKey) { uploadNewConfig = { ...uploadNewConfig, [uploadNewConfigKey]: uploadNewConfigValue }; uploadNewConfigKey = ''; uploadNewConfigValue = ''; } }}
+              >+ Add</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Bundle drop zone -->
+        <div>
+          <label class="mb-1 block text-xs font-medium text-muted-foreground">Bundle (.zip) — optional</label>
+          <div
+            class="flex flex-col items-center justify-center rounded-lg border-2 border-dashed p-6 transition-colors {uploadNewDragOver ? 'border-primary bg-primary/5' : 'border-input bg-muted/30'}"
+            role="region"
+            aria-label="File drop zone"
+            ondragover={(e) => { e.preventDefault(); uploadNewDragOver = true; }}
+            ondragleave={() => { uploadNewDragOver = false; }}
+            ondrop={(e) => { e.preventDefault(); uploadNewDragOver = false; const f = e.dataTransfer?.files?.[0]; if (f) setUploadNewFile(f); }}
+          >
+            {#if uploadNewFile}
+              <p class="text-sm font-medium">{uploadNewFile.name}</p>
+              <p class="text-xs text-muted-foreground mt-1">{(uploadNewFile.size / 1024).toFixed(1)} KB</p>
+              <button class="mt-1 text-xs text-muted-foreground underline hover:text-foreground" onclick={() => { uploadNewFile = null; }}>Remove</button>
+            {:else}
+              <p class="text-sm text-muted-foreground">Drop .zip here or</p>
+              <label class="mt-1 cursor-pointer text-sm text-primary underline hover:text-primary/80">
+                browse
+                <input type="file" accept=".zip" class="sr-only" onchange={(e) => { const f = /** @type {HTMLInputElement} */ (e.target).files?.[0]; if (f) setUploadNewFile(f); }} />
+              </label>
+            {/if}
+          </div>
+          {#if uploadNewMessage}
+            <p class="mt-1 text-xs text-destructive">{uploadNewMessage}</p>
+          {/if}
+        </div>
+      </div>
+
+      <DialogFooter>
+        <Button variant="outline" onclick={() => { uploadNewDialogOpen = false; }}>Cancel</Button>
+        <Button onclick={() => doUploadNew(false)} disabled={!uploadNewServiceId.trim()}>Upload</Button>
+      </DialogFooter>
+    {/if}
+  </DialogContent>
+</Dialog>
 
 <!-- View Connector Dialog -->
 <Dialog bind:open={viewDialogOpen}>
