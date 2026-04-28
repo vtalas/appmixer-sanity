@@ -1,5 +1,5 @@
 import { env } from '$env/dynamic/private';
-import { getAuthHubStatuses } from '$lib/db/authhub.js';
+import { getAuthHubStatuses, getAuthHubNotes } from '$lib/db/authhub.js';
 import { isAdmin } from '$lib/admin.js';
 import { getGitHubRepoInfo } from '$lib/api/github.js';
 
@@ -25,10 +25,12 @@ export async function load({ fetch, locals }) {
     }
 
     try {
-        const [listRes, cacheRes, statuses] = await Promise.all([
+        const [listRes, cacheRes, statuses, notes, githubOAuthRes] = await Promise.all([
             fetch('/api/auth-hub'),
             fetch('/api/auth-hub/bundle?env=prod'),
-            getAuthHubStatuses()
+            getAuthHubStatuses(),
+            getAuthHubNotes(),
+            fetch('/api/auth-hub/github-oauth').catch(() => null)
         ]);
 
         if (!listRes.ok) {
@@ -37,16 +39,50 @@ export async function load({ fetch, locals }) {
         }
 
         const data = await listRes.json();
-        let connectors = [];
+        /** @type {Array<{serviceId: string, source: string}>} */
+        let authhubConnectors = [];
         if (Array.isArray(data)) {
-            connectors = data;
+            authhubConnectors = data;
         } else if (data && typeof data === 'object') {
-            connectors = Object.entries(data).map(([key, value]) => ({
+            authhubConnectors = Object.entries(data).map(([key, value]) => ({
                 service: key,
-                ...value
+                .../** @type {any} */ (value)
             }));
         }
-        connectors.sort((a, b) => (a.serviceId || '').localeCompare(b.serviceId || ''));
+
+        // GitHub oauth2 connectors + cached versions
+        /** @type {Array<{serviceId: string, path: string}>} */
+        let githubOAuth = [];
+        /** @type {Record<string, string>} */
+        let githubVersions = {};
+        if (githubOAuthRes?.ok) {
+            const ghData = await githubOAuthRes.json();
+            githubOAuth = ghData.oauth2 || [];
+            githubVersions = ghData.versions || {};
+        }
+
+        // Build merged connector list
+        const authhubIds = new Set(authhubConnectors.map(c => c.serviceId));
+        const githubIds = new Set(githubOAuth.map(c => c.serviceId));
+
+        // Tag auth hub connectors with source
+        const connectorMap = new Map();
+        for (const c of authhubConnectors) {
+            connectorMap.set(c.serviceId, {
+                ...c,
+                source: githubIds.has(c.serviceId) ? 'both' : 'authhub'
+            });
+        }
+
+        // Add GitHub-only oauth2 connectors
+        for (const c of githubOAuth) {
+            if (!authhubIds.has(c.serviceId)) {
+                connectorMap.set(c.serviceId, { serviceId: c.serviceId, source: 'github' });
+            }
+        }
+
+        const connectors = [...connectorMap.values()]
+            .sort((a, b) => (a.serviceId || '').localeCompare(b.serviceId || ''));
 
         const cachedInfo = cacheRes.ok ? await cacheRes.json() : {};
 
@@ -54,6 +90,8 @@ export async function load({ fetch, locals }) {
             connectors,
             cachedInfo,
             statuses,
+            notes,
+            githubVersions,
             isAdmin: admin,
             githubInfo,
             error: null
@@ -63,6 +101,8 @@ export async function load({ fetch, locals }) {
             connectors: [],
             cachedInfo: {},
             statuses: {},
+            notes: {},
+            githubVersions: {},
             isAdmin: admin,
             githubInfo,
             error: `Failed to load Auth Hub connectors: ${/** @type {Error} */ (err).message}`

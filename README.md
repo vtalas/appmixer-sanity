@@ -1,12 +1,16 @@
-# SvelteKit
+# Appmixer Sanity Check
 
-Everything you need to build a Svelte project, powered by [`create-svelte`](https://github.com/sveltejs/kit/tree/master/packages/create-svelte), deployed to [Vercel](https://vercel.com).
+A SvelteKit application for tracking sanity checks of Appmixer connectors. It creates snapshots of connector versions, allows testing and documenting component status, and tracks progress with visual dashboards.
 
-## Deploy Your Own
+**Pages:**
+- `/` — Dashboard: list test runs, create new ones
+- `/test-runs/[runId]` — Test run detail: connectors with status badges
+- `/test-runs/[runId]/[connectorId]` — Connector detail: components, update test results
+- `/authub` — Auth Hub: browse and manage OAuth connector configs/bundles registered in Auth Hub
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fvercel%2Fvercel%2Ftree%2Fmain%2Fexamples%2Fsveltekit&project-name=sveltekit-vercel&repository-name=sveltekit-vercel&demo-title=SvelteKit%20%2B%20Vercel&demo-description=A%20SvelteKit%20app%20optimized%20Edge-first.&demo-url=https%3A%2F%2Fsveltekit-template.vercel.app%2F)
+**Stack:** SvelteKit 2, Svelte 5, Turso (libSQL), Tailwind CSS, Bits UI, deployed on Vercel.
 
-_Live Example: https://sveltekit-template.vercel.app_
+See `CLAUDE.md` for full architecture documentation.
 
 ## Developing
 

@@ -14,10 +14,41 @@
   let cachedInfo = $state(data.cachedInfo || {});
   /** @type {Record<string, string>} */
   let statuses = $state(data.statuses || {});
+  /** @type {Record<string, string>} */
+  let notes = $state(data.notes || {});
+  /** @type {string|null} */
+  let notesServiceId = $state(null);
+  let notesDialogOpen = $state(false);
+  let notesDraft = $state('');
+  let notesSaving = $state(false);
+
+  /** @param {string} serviceId */
+  function openNotes(serviceId) {
+    notesServiceId = serviceId;
+    notesDraft = notes[serviceId] || '';
+    notesDialogOpen = true;
+  }
+
+  async function saveNotes() {
+    if (!notesServiceId) return;
+    notesSaving = true;
+    try {
+      await fetch('/api/auth-hub/notes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ serviceId: notesServiceId, notes: notesDraft })
+      });
+      notes = { ...notes, [notesServiceId]: notesDraft };
+      notesDialogOpen = false;
+    } catch { /* ignore */ } finally {
+      notesSaving = false;
+    }
+  }
   /** @type {Record<string, boolean>} */
   let bundleLoading = $state({});
   let fetchAllRunning = $state(false);
   let fetchAllProgress = $state({ done: 0, total: 0 });
+  let fetchAllPhase = $state('');
 
   // Upload (admin only)
   let uploadDialogOpen = $state(false);
@@ -391,7 +422,6 @@
 
   /** @param {string} serviceId */
   function downloadBundle(serviceId) {
-    const selector = serviceId.replaceAll(':', '.');
     window.open(`/api/auth-hub/bundle-download?serviceId=${encodeURIComponent(serviceId)}`, '_blank');
   }
 
@@ -404,12 +434,13 @@
 
   // GitHub versions (admin only)
   /** @type {Record<string, {version: string, path: string}>} */
-  let githubVersions = $state({});
-  let githubLoading = $state(false);
-  let githubLoaded = $state(false);
+  let githubVersions = $state(
+    Object.fromEntries(Object.entries(data.githubVersions || {}).map(([k, v]) => [k, { version: v, path: '' }]))
+  );
+  let showNotInAuthHub = $state(false);
 
   let filteredConnectors = $derived(
-    data.connectors.filter(c => {
+    data.connectors.filter((c) => {
       if (search) {
         const q = search.toLowerCase();
         if (!(c.serviceId || '').toLowerCase().includes(q)) return false;
@@ -418,9 +449,12 @@
         const s = statuses[c.serviceId] || 'not_verified';
         if (!statusFilter.has(s)) return false;
       }
+      if (showNotInAuthHub && c.source !== 'github') return false;
       return true;
     })
   );
+
+  let githubOnlyCount = $derived(filteredConnectors.filter(c => c.source === 'github').length);
 
   /** @param {string} serviceId */
   function shortName(serviceId) {
@@ -431,7 +465,8 @@
 
   async function fetchAll() {
     fetchAllRunning = true;
-    const ids = data.connectors.map(c => c.serviceId).filter(Boolean);
+    fetchAllPhase = 'bundles';
+    const ids = data.connectors.filter(c => c.source !== 'github').map(c => c.serviceId).filter(Boolean);
     fetchAllProgress = { done: 0, total: ids.length };
 
     for (const serviceId of ids) {
@@ -458,19 +493,41 @@
       }
     } catch { /* ignore */ }
 
-    fetchAllRunning = false;
-  }
-
-  async function fetchGitHubVersions() {
-    githubLoading = true;
+    // Refresh GitHub oauth2 connector cache + versions in DB
+    fetchAllPhase = 'github';
     try {
-      const res = await fetch('/api/auth-hub/github-versions');
-      if (res.ok) {
-        githubVersions = await res.json();
-        githubLoaded = true;
+      const ghRes = await fetch('/api/auth-hub/github-oauth', { method: 'POST' });
+      if (ghRes.ok) {
+        const ghData = await ghRes.json();
+        /** @type {Array<{serviceId: string, path: string}>} */
+        const githubOAuth = ghData.oauth2 || [];
+        /** @type {Record<string, string>} */
+        const rawVersions = ghData.versions || {};
+
+        // Update github versions map
+        githubVersions = Object.fromEntries(
+          Object.entries(rawVersions).map(([k, v]) => [k, { version: v, path: '' }])
+        );
+
+        const authhubIds = new Set(data.connectors.filter(c => c.source !== 'github').map(c => c.serviceId));
+        const githubIds = new Set(githubOAuth.map(c => c.serviceId));
+
+        data.connectors = data.connectors
+          .filter(c => c.source !== 'github' || githubIds.has(c.serviceId))
+          .map(c => ({ ...c, source: githubIds.has(c.serviceId) ? (c.source === 'github' ? 'github' : 'both') : c.source }));
+
+        for (const c of githubOAuth) {
+          if (!authhubIds.has(c.serviceId) && !data.connectors.find(x => x.serviceId === c.serviceId)) {
+            data.connectors = [...data.connectors, { serviceId: c.serviceId, source: 'github' }];
+          }
+        }
+
+        data.connectors = [...data.connectors].sort((a, b) => (a.serviceId || '').localeCompare(b.serviceId || ''));
       }
     } catch { /* ignore */ }
-    githubLoading = false;
+
+    fetchAllRunning = false;
+    fetchAllPhase = '';
   }
 
   /**
@@ -548,6 +605,9 @@
     </div>
     <div class="flex items-center gap-3">
       <Badge variant="secondary">{filteredConnectors.length} connectors</Badge>
+      {#if githubOnlyCount > 0}
+        <Badge variant="outline" class="text-orange-600 border-orange-300">{githubOnlyCount} not in Auth Hub</Badge>
+      {/if}
       {#if !data.error}
         <Button
           variant="outline"
@@ -556,26 +616,16 @@
           disabled={fetchAllRunning}
         >
           {#if fetchAllRunning}
-            Fetching {fetchAllProgress.done}/{fetchAllProgress.total}...
+            {#if fetchAllPhase === 'github'}
+              GitHub versions...
+            {:else}
+              Bundles {fetchAllProgress.done}/{fetchAllProgress.total}...
+            {/if}
           {:else}
             Refresh
           {/if}
         </Button>
         {#if data.isAdmin}
-          <Button
-            variant="outline"
-            size="sm"
-            onclick={fetchGitHubVersions}
-            disabled={githubLoading}
-          >
-            {#if githubLoading}
-              Loading GitHub...
-            {:else if githubLoaded}
-              Reload GitHub
-            {:else}
-              Compare with GitHub
-            {/if}
-          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -601,6 +651,12 @@
         />
       </div>
       <div class="flex items-center gap-1">
+        <button
+          class="h-8 px-3 rounded-md border text-xs transition-colors {showNotInAuthHub ? 'bg-orange-500 text-white border-orange-500' : 'bg-background border-input text-muted-foreground hover:bg-muted'}"
+          onclick={() => { showNotInAuthHub = !showNotInAuthHub; }}
+        >
+          Not in Auth Hub
+        </button>
         {#each [{ value: 'not_verified', label: '\u274c Not Verified' }, { value: 'in_progress', label: '\u23f3 In Progress' }, { value: 'verified', label: '\u2705 Verified' }] as opt}
           <button
             class="h-8 px-3 rounded-md border text-xs transition-colors {statusFilter.has(opt.value) ? 'bg-primary text-primary-foreground border-primary' : 'bg-background border-input text-muted-foreground hover:bg-muted'}"
@@ -628,10 +684,8 @@
               <TableHead class="w-10"><span></span></TableHead>
               <TableHead>Connector</TableHead>
               <TableHead class="w-28">Auth Hub</TableHead>
-              {#if githubLoaded}
-                <TableHead class="w-28">GitHub</TableHead>
-              {/if}
               <TableHead class="w-40">Status</TableHead>
+              <TableHead>Notes</TableHead>
               <TableHead class="w-20"><span></span></TableHead>
             </TableRow>
           </TableHeader>
@@ -641,7 +695,8 @@
               {@const currentStatus = statuses[connector.serviceId] || 'not_verified'}
               {@const ghInfo = githubVersions[connector.serviceId]}
               {@const cmp = compareVersions(info?.version, ghInfo?.version)}
-              <TableRow>
+              {@const githubOnly = connector.source === 'github'}
+              <TableRow class={githubOnly ? 'opacity-60' : ''}>
                 <TableCell>
                   {#if info?.icon}
                     <img src={info.icon} alt="" class="w-5 h-5 object-contain" />
@@ -655,44 +710,61 @@
                   <div class="flex items-baseline gap-2">
                     <span class="font-medium">{info?.label || shortName(connector.serviceId)}</span>
                     <span class="text-xs text-muted-foreground">{connector.serviceId}</span>
+                    {#if githubOnly}
+                      <span class="rounded bg-orange-100 px-1.5 py-0.5 text-xs text-orange-700 dark:bg-orange-900/30 dark:text-orange-400">not in Auth Hub</span>
+                    {/if}
                   </div>
                 </TableCell>
                 <TableCell>
-                  {#if bundleLoading[connector.serviceId]}
+                  {#if githubOnly}
+                    <span class="text-muted-foreground">—</span>
+                  {:else if bundleLoading[connector.serviceId]}
                     <span class="text-xs text-muted-foreground">loading...</span>
                   {:else if info?.version}
-                    <span class="tabular-nums {cmp === 'outdated' ? 'text-red-600 font-semibold' : ''}">v{info.version}</span>
+                    <span class="inline-flex items-center gap-1">
+                      <span class="tabular-nums {cmp === 'outdated' ? 'text-red-600 font-semibold' : ''}">v{info.version}</span>
+                      {#if cmp === 'outdated'}
+                        <span title="GitHub: v{ghInfo?.version} (outdated)">⚠️</span>
+                      {:else if cmp === 'match'}
+                        <span class="text-green-600" title="Matches GitHub v{ghInfo?.version}">✓</span>
+                      {:else if cmp === 'newer'}
+                        <span class="text-blue-500" title="Newer than GitHub v{ghInfo?.version}">↑</span>
+                      {/if}
+                    </span>
                   {:else}
                     <span class="text-muted-foreground">—</span>
                   {/if}
                 </TableCell>
-                {#if githubLoaded}
-                  <TableCell>
-                    {#if ghInfo?.version}
-                      <span class="tabular-nums {cmp === 'outdated' ? 'text-green-600 font-semibold' : ''}">v{ghInfo.version}</span>
-                      {#if cmp === 'outdated'}
-                        <span class="ml-1 text-xs text-red-600" title="Auth Hub version is outdated">⚠️</span>
-                      {:else if cmp === 'match'}
-                        <span class="ml-1 text-xs text-green-600">✓</span>
-                      {/if}
-                    {:else}
-                      <span class="text-muted-foreground text-xs">not in repo</span>
-                    {/if}
-                  </TableCell>
-                {/if}
                 <TableCell>
-                  <select
-                    class="h-8 rounded-md border border-input bg-background px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
-                    value={currentStatus}
-                    onchange={(/** @type {Event} */ e) => updateStatus(connector.serviceId, /** @type {HTMLSelectElement} */ (e.target).value)}
-                  >
-                    <option value="not_verified">{'\u274c'} Not Verified</option>
-                    <option value="in_progress">{'\u23f3'} In Progress</option>
-                    <option value="verified">{'\u2705'} Verified</option>
-                  </select>
+                  {#if githubOnly}
+                    <span class="text-muted-foreground">—</span>
+                  {:else}
+                    <select
+                      class="h-8 rounded-md border border-input bg-background px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+                      value={currentStatus}
+                      onchange={(/** @type {Event} */ e) => updateStatus(connector.serviceId, /** @type {HTMLSelectElement} */ (e.target).value)}
+                    >
+                      <option value="not_verified">{'\u274c'} Not Verified</option>
+                      <option value="in_progress">{'\u23f3'} In Progress</option>
+                      <option value="verified">{'\u2705'} Verified</option>
+                    </select>
+                  {/if}
                 </TableCell>
                 <TableCell>
-                  {#if data.isAdmin}
+                  {@const note = notes[connector.serviceId]}
+                  <button
+                    class="group flex items-center gap-1 text-left w-full"
+                    onclick={() => openNotes(connector.serviceId)}
+                  >
+                    {#if note}
+                      <span class="text-xs text-foreground line-clamp-2 max-w-xs">{note}</span>
+                    {:else}
+                      <span class="text-xs text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity">+ Add note</span>
+                    {/if}
+                  </button>
+                </TableCell>
+                <TableCell>
+                  {#if data.isAdmin && !githubOnly}
                     <button
                       class="text-xs text-muted-foreground hover:text-foreground transition-colors underline"
                       onclick={() => openView(connector.serviceId)}
@@ -828,6 +900,26 @@
         <Button onclick={() => doUploadNew(false)} disabled={!uploadNewServiceId.trim()}>Upload</Button>
       </DialogFooter>
     {/if}
+  </DialogContent>
+</Dialog>
+
+<!-- Notes Dialog -->
+<Dialog bind:open={notesDialogOpen}>
+  <DialogContent class="max-w-lg">
+    <DialogHeader>
+      <DialogTitle>Notes</DialogTitle>
+      <DialogDescription>{notesServiceId}</DialogDescription>
+    </DialogHeader>
+    <textarea
+      class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-none"
+      rows="6"
+      placeholder="Add notes about this connector..."
+      bind:value={notesDraft}
+    ></textarea>
+    <DialogFooter>
+      <Button variant="outline" onclick={() => { notesDialogOpen = false; }} disabled={notesSaving}>Cancel</Button>
+      <Button onclick={saveNotes} disabled={notesSaving}>{notesSaving ? 'Saving...' : 'Save'}</Button>
+    </DialogFooter>
   </DialogContent>
 </Dialog>
 

@@ -116,4 +116,17 @@ export async function initializeDatabase() {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // GitHub oauth2 connector cache
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS github_oauth_connectors (
+      service_id TEXT PRIMARY KEY,
+      path TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  // Migrations
+  try { await client.execute(`ALTER TABLE github_oauth_connectors ADD COLUMN github_version TEXT`); } catch {}
+  try { await client.execute(`ALTER TABLE github_oauth_connectors ADD COLUMN is_oauth2 INTEGER NOT NULL DEFAULT 0`); } catch {}
+  try { await client.execute(`ALTER TABLE authhub_status ADD COLUMN notes TEXT`); } catch {}
 }
