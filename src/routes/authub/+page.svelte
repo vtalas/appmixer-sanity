@@ -290,6 +290,9 @@
   let viewError = $state('');
 
   let viewEditMode = $state(false);
+  let configJsonMode = $state(false);
+  let configJsonDraft = $state('');
+  let configJsonError = $state('');
   /** @type {Record<string, string>} */
   let viewEditConfig = $state({});
   let configSaving = $state(false);
@@ -352,23 +355,58 @@
       viewEditConfig = Object.fromEntries(
         Object.entries(viewServiceConfig).map(([k, v]) => [k, typeof v === 'object' ? JSON.stringify(v) : String(v ?? '')])
       );
+      configJsonDraft = JSON.stringify(viewServiceConfig, null, 2);
     }
     configSaveError = '';
+    configJsonError = '';
+    configJsonMode = false;
     newConfigKey = '';
     newConfigValue = '';
     viewEditMode = true;
+  }
+
+  function switchToJsonMode() {
+    // Sync current key-value state into JSON draft
+    const obj = Object.fromEntries(Object.entries(viewEditConfig).map(([k, v]) => [k, v]));
+    configJsonDraft = JSON.stringify(obj, null, 2);
+    configJsonError = '';
+    configJsonMode = true;
+  }
+
+  function switchToFieldMode() {
+    try {
+      const parsed = JSON.parse(configJsonDraft);
+      viewEditConfig = Object.fromEntries(
+        Object.entries(parsed).map(([k, v]) => [k, typeof v === 'object' ? JSON.stringify(v) : String(v ?? '')])
+      );
+      configJsonError = '';
+      configJsonMode = false;
+    } catch (e) {
+      configJsonError = 'Invalid JSON — fix before switching';
+    }
   }
 
   async function saveServiceConfig() {
     if (!viewServiceId) return;
     configSaving = true;
     configSaveError = '';
+    configJsonError = '';
     try {
-      const body = Object.fromEntries(
-        Object.entries(viewEditConfig).map(([k, v]) => {
-          try { return [k, JSON.parse(v)]; } catch { return [k, v]; }
-        })
-      );
+      let body;
+      if (configJsonMode) {
+        try {
+          body = JSON.parse(configJsonDraft);
+        } catch {
+          configJsonError = 'Invalid JSON';
+          configSaving = false;
+          return;
+        }
+        // Ensure all values are strings
+        body = Object.fromEntries(Object.entries(body).map(([k, v]) => [k, String(v ?? '')]));
+      } else {
+        // Key-value mode — values are already strings
+        body = Object.fromEntries(Object.entries(viewEditConfig));
+      }
       const res = await fetch(`/api/auth-hub/service-config`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -943,41 +981,64 @@
         <div>
           <p class="mb-1 text-xs font-medium text-muted-foreground uppercase tracking-wide">Service Config</p>
           {#if viewEditMode}
-            <div class="space-y-1 rounded-md border p-3">
-              {#each Object.keys(viewEditConfig) as key (key)}
-                <div class="flex items-center gap-2">
-                  <span class="w-36 shrink-0 text-xs text-muted-foreground truncate" title={key}>{key}</span>
+            <!-- Mode toggle -->
+            <div class="mb-2 flex gap-1">
+              <button
+                class="rounded px-2 py-0.5 text-xs border transition-colors {!configJsonMode ? 'bg-primary text-primary-foreground border-primary' : 'border-input text-muted-foreground hover:bg-muted'}"
+                onclick={configJsonMode ? switchToFieldMode : undefined}
+              >Fields</button>
+              <button
+                class="rounded px-2 py-0.5 text-xs border transition-colors {configJsonMode ? 'bg-primary text-primary-foreground border-primary' : 'border-input text-muted-foreground hover:bg-muted'}"
+                onclick={!configJsonMode ? switchToJsonMode : undefined}
+              >JSON</button>
+            </div>
+
+            {#if configJsonMode}
+              <textarea
+                class="w-full rounded-md border border-input bg-background px-3 py-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-ring resize-none"
+                rows="12"
+                bind:value={configJsonDraft}
+              ></textarea>
+              {#if configJsonError}
+                <p class="mt-1 text-xs text-destructive">{configJsonError}</p>
+              {/if}
+            {:else}
+              <div class="space-y-1 rounded-md border p-3">
+                {#each Object.keys(viewEditConfig) as key (key)}
+                  <div class="flex items-center gap-2">
+                    <span class="w-36 shrink-0 text-xs text-muted-foreground truncate" title={key}>{key}</span>
+                    <input
+                      class="h-7 flex-1 rounded border border-input bg-background px-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+                      value={viewEditConfig[key]}
+                      oninput={(e) => { viewEditConfig = { ...viewEditConfig, [key]: /** @type {HTMLInputElement} */ (e.target).value }; }}
+                    />
+                    <button
+                      class="shrink-0 text-muted-foreground hover:text-destructive px-1 text-xs"
+                      title="Remove property"
+                      onclick={() => { const c = { ...viewEditConfig }; delete c[key]; viewEditConfig = c; }}
+                    >✕</button>
+                  </div>
+                {/each}
+                <!-- Add new property row -->
+                <div class="flex items-center gap-2 pt-2 border-t mt-2">
+                  <input
+                    class="h-7 w-36 shrink-0 rounded border border-input bg-background px-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+                    placeholder="key"
+                    bind:value={newConfigKey}
+                  />
                   <input
                     class="h-7 flex-1 rounded border border-input bg-background px-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-ring"
-                    value={viewEditConfig[key]}
-                    oninput={(e) => { viewEditConfig = { ...viewEditConfig, [key]: /** @type {HTMLInputElement} */ (e.target).value }; }}
+                    placeholder="value"
+                    bind:value={newConfigValue}
                   />
                   <button
-                    class="shrink-0 text-muted-foreground hover:text-destructive px-1 text-xs"
-                    title="Remove property"
-                    onclick={() => { const c = { ...viewEditConfig }; delete c[key]; viewEditConfig = c; }}
-                  >✕</button>
+                    class="shrink-0 rounded border border-input px-2 py-0.5 text-xs hover:bg-muted disabled:opacity-40"
+                    disabled={!newConfigKey}
+                    onclick={() => { if (newConfigKey) { viewEditConfig = { ...viewEditConfig, [newConfigKey]: newConfigValue }; newConfigKey = ''; newConfigValue = ''; } }}
+                  >+ Add</button>
                 </div>
-              {/each}
-              <!-- Add new property row -->
-              <div class="flex items-center gap-2 pt-2 border-t mt-2">
-                <input
-                  class="h-7 w-36 shrink-0 rounded border border-input bg-background px-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-ring"
-                  placeholder="key"
-                  bind:value={newConfigKey}
-                />
-                <input
-                  class="h-7 flex-1 rounded border border-input bg-background px-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-ring"
-                  placeholder="value"
-                  bind:value={newConfigValue}
-                />
-                <button
-                  class="shrink-0 rounded border border-input px-2 py-0.5 text-xs hover:bg-muted disabled:opacity-40"
-                  disabled={!newConfigKey}
-                  onclick={() => { if (newConfigKey) { viewEditConfig = { ...viewEditConfig, [newConfigKey]: newConfigValue }; newConfigKey = ''; newConfigValue = ''; } }}
-                >+ Add</button>
               </div>
-            </div>
+            {/if}
             {#if configSaveError}
               <p class="mt-1 text-xs text-destructive">{configSaveError}</p>
             {/if}
