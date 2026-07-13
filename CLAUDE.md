@@ -122,6 +122,7 @@ Auth Hub is a separate page for browsing and managing OAuth connector configs/bu
 | `service-config/whitelist-key/+server.js` | PUT | Add a single whitelist key for a connector (admin only) |
 | `service-config/whitelist-key/+server.js` | DELETE | Remove a single whitelist key from a connector (admin only) |
 | `status/+server.js` | POST | Save verification status (`verified` / `not_verified` / `in_progress`) to DB |
+| `../public/connectors/+server.js` | GET | **Public** (no auth) list of Auth Hub connectors — returns only `connector`, `status`, `clientId`; optional `?status=` filter |
 | `upload/+server.js` | POST | Upload a ZIP bundle to Auth Hub; returns `{ ticket }` (admin only) |
 | `upload/+server.js` | GET | Poll upload ticket status (`?ticket=…`) (admin only) |
 

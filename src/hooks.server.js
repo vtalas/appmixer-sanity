@@ -11,7 +11,7 @@ async function protectionHandle({ event, resolve }) {
 	const session = await event.locals.auth();
 
 	// Allow access to login page, auth routes, and static assets
-	const unprotectedPaths = ['/login', '/auth'];
+	const unprotectedPaths = ['/login', '/auth', '/api/public'];
 	const isUnprotected = unprotectedPaths.some((path) => event.url.pathname.startsWith(path));
 
 	if (!session && !isUnprotected) {
