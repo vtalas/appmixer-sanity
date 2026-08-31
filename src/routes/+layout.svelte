@@ -28,6 +28,7 @@
       <nav class="flex items-center gap-4">
         <a href="/" class="text-sm text-muted-foreground hover:text-foreground">Dashboard</a>
         <a href="/e2e-flows" class="text-sm text-muted-foreground hover:text-foreground">E2E Flows</a>
+        <a href="/prs" class="text-sm text-muted-foreground hover:text-foreground">PRs</a>
         <a href="/authub" class="text-sm text-muted-foreground hover:text-foreground">Auth Hub</a>
         <a href="/settings" class="text-sm text-muted-foreground hover:text-foreground">Settings</a>
         {#if data.session?.user}

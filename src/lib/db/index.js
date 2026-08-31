@@ -198,6 +198,29 @@ export async function initializeDatabase() {
     )
   `);
 
+  // Open PRs of the connectors repo (cache refreshed by the PR scan),
+  // scoped per repo — the instance join happens at read time.
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS e2e_prs (
+      repo TEXT NOT NULL,
+      number INTEGER NOT NULL,
+      title TEXT,
+      author TEXT,
+      url TEXT,
+      base_branch TEXT,
+      head_branch TEXT,
+      head_sha TEXT,
+      draft INTEGER DEFAULT 0,
+      pr_created_at TEXT,
+      pr_updated_at TEXT,
+      connectors TEXT,
+      test_flows TEXT,
+      files_count INTEGER,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (repo, number)
+    )
+  `);
+
   await client.execute(`CREATE INDEX IF NOT EXISTS idx_e2e_runs_state ON e2e_runs(state)`);
   await client.execute(
     `CREATE INDEX IF NOT EXISTS idx_e2e_runs_flow ON e2e_runs(flow_name, queued_at DESC)`

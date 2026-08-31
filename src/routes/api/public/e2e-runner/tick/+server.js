@@ -2,6 +2,7 @@ import { json, error } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import { tickPass, tickLoop } from '$lib/server/e2e/runner.js';
 import { scanE2EFlows } from '$lib/server/e2e/scan.js';
+import { scanPRs } from '$lib/server/e2e/prs.js';
 import { getE2EFlows, enqueueRuns } from '$lib/db/e2e.js';
 import { getInstanceUrl } from '$lib/api/appmixer.js';
 
@@ -15,6 +16,7 @@ const DEFAULT_BUDGET_MS = 250_000;
  *
  * Query params:
  * - scan=1      refresh the e2e_flows cache from GitHub + instance first
+ * - prs=1       refresh the e2e_prs cache (open PRs of the connectors repo)
  * - schedule=1  enqueue all deployed flows that have no result from the last 20h
  * - loop=1      keep ticking until the queue drains or the time budget runs out
  *
@@ -39,9 +41,20 @@ export async function GET({ request, url }) {
   try {
     let enqueued = 0;
     let scan = null;
+    let prs = null;
 
     if (url.searchParams.get('scan') === '1') {
       scan = await scanE2EFlows(userId);
+    }
+
+    if (url.searchParams.get('prs') === '1') {
+      try {
+        prs = await scanPRs(userId);
+      } catch (e) {
+        // PR scan failure must not block the runner
+        console.error('Cron PR scan failed:', e);
+        prs = { error: /** @type {any} */ (e)?.message || 'PR scan failed' };
+      }
     }
 
     if (url.searchParams.get('schedule') === '1') {
@@ -66,7 +79,7 @@ export async function GET({ request, url }) {
         ? await tickLoop(userId, DEFAULT_BUDGET_MS)
         : await tickPass(userId);
 
-    return json({ scan, enqueued, ...result });
+    return json({ scan, prs, enqueued, ...result });
   } catch (e) {
     console.error('Cron runner tick failed:', e);
     throw error(500, e.message || 'Cron tick failed');

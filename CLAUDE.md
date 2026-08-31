@@ -116,15 +116,28 @@ Everything the page shows comes from a DB cache refreshed by an explicit **Scan*
 | `api/e2e-flows/delete` | POST | Delete flows from the instance (also updates cache) |
 | `api/e2e-flows/sync` | POST | Create a PR pushing modified/server-only flows to GitHub |
 | `api/e2e-flows/upload` | POST | Upload (import) GitHub flows to the instance — `appmixer e2e import` semantics via `src/lib/server/e2e/upload.js` (identity customFields, result stores, fail-fast errorHandling, account binding) |
-| `api/public/e2e-runner/tick` | GET | **Cron entrypoint** (no session; `CRON_SECRET` auth, env credentials). Params: `scan=1`, `schedule=1` (enqueue flows without a result in 20h), `loop=1` (tick until budget ~250s runs out) |
+| `api/public/e2e-runner/tick` | GET | **Cron entrypoint** (no session; `CRON_SECRET` auth, env credentials). Params: `scan=1`, `prs=1` (refresh the PR cache), `schedule=1` (enqueue flows without a result in 20h), `loop=1` (tick until budget ~250s runs out) |
 
-`vercel.json` schedules the cron daily (`scan=1&schedule=1&loop=1`). Vercel Cron sends `Authorization: Bearer <CRON_SECRET>` automatically when the env var is set; for more frequent processing point any external cron at the same URL.
+`vercel.json` schedules the cron daily (`scan=1&prs=1&schedule=1&loop=1`). Vercel Cron sends `Authorization: Bearer <CRON_SECRET>` automatically when the env var is set; for more frequent processing point any external cron at the same URL.
 
 ### Environment Variables
 
 - `CRON_SECRET` — auth for the public cron endpoint (required for cron)
 - `E2E_MAX_CONCURRENT` — max flows running at once (default 1 — the instance must never run everything at once)
 - `E2E_RUN_TIMEOUT_SECONDS` — per-run completion timeout (default 480, same as `appmixer e2e run`)
+
+## Connector PRs (`/prs`)
+
+Open PRs of the connectors repo with the E2E flow state of every connector they touch — the same per-flow view as `/e2e-flows` (sync status, last result, account badge) but grouped by PR.
+
+- **`e2e_prs`** table — PR cache keyed by `(repo, number)` (**repo-scoped, not instance-scoped** — the join with `e2e_flows` happens at read time): title/author/url/branches/draft, `connectors` (JSON — derived per changed file via connector roots, i.e. dirs under `src/appmixer/` containing bundle.json/service.json/package.json, longest match wins for nested connectors), `test_flows` (JSON — test-flow files changed by the PR with the flow identity read from the PR head), `files_count`.
+- **`src/lib/server/e2e/prs.js`** — `scanPRs(userId)`: list open PRs + changed files, replace the cache. `buildPROverview(userId)`: joins the PR cache with the caller-instance `e2e_flows` cache — per PR → per connector → flows with `changedInPR`/`newInPR` flags (flows added by the PR that dev doesn't know yet appear as `not_deployed` + `newInPR`).
+- **`src/lib/db/prs.js`** — `getPRs(repo)` / `replacePRs(repo, prs)`.
+
+| Route | Methods | Description |
+|---|---|---|
+| `api/prs/scan` | POST | Refresh the PR cache (session auth) |
+| `api/public/prs` | GET | **Public** (no auth) PR status from the caches only — per PR: connectors with `accountAvailable` + flows (`syncStatus`, `deployed`, `lastResult`, `changedInPR`); optional `?connector=` filter |
 
 ## Auth Hub (`/authub`)
 

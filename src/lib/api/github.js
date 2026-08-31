@@ -253,6 +253,123 @@ export function generateFlowPath(connector, flowName) {
 }
 
 /**
+ * List all open pull requests of the configured repository
+ * @param {string} userId - User ID (email)
+ * @returns {Promise<Array<{number: number, title: string, url: string, author: string, baseBranch: string, headBranch: string, headSha: string, draft: boolean, createdAt: string, updatedAt: string}>>}
+ */
+export async function listOpenPullRequests(userId) {
+  const config = await getGitHubConfig(userId);
+  const prs = [];
+
+  for (let page = 1; page <= 10; page++) {
+    const response = await fetch(
+      `${GITHUB_API_BASE}/repos/${config.owner}/${config.repo}/pulls?state=open&per_page=100&page=${page}`,
+      { headers: getGitHubHeaders(config.token) }
+    );
+    if (!response.ok) {
+      throw new Error(`Failed to list pull requests: ${response.status}`);
+    }
+    const batch = await response.json();
+    for (const pr of batch) {
+      prs.push({
+        number: pr.number,
+        title: pr.title,
+        url: pr.html_url,
+        author: pr.user?.login || null,
+        baseBranch: pr.base?.ref || null,
+        headBranch: pr.head?.ref || null,
+        headSha: pr.head?.sha || null,
+        draft: !!pr.draft,
+        createdAt: pr.created_at,
+        updatedAt: pr.updated_at
+      });
+    }
+    if (batch.length < 100) break;
+  }
+
+  return prs;
+}
+
+/**
+ * List changed files of a pull request (GitHub caps this listing at 3000 files)
+ * @param {string} userId - User ID (email)
+ * @param {number} prNumber
+ * @returns {Promise<Array<{path: string, status: string, previousPath: string|null}>>}
+ */
+export async function listPullRequestFiles(userId, prNumber) {
+  const config = await getGitHubConfig(userId);
+  const files = [];
+
+  for (let page = 1; page <= 10; page++) {
+    const response = await fetch(
+      `${GITHUB_API_BASE}/repos/${config.owner}/${config.repo}/pulls/${prNumber}/files?per_page=100&page=${page}`,
+      { headers: getGitHubHeaders(config.token) }
+    );
+    if (!response.ok) {
+      throw new Error(`Failed to list files of PR #${prNumber}: ${response.status}`);
+    }
+    const batch = await response.json();
+    for (const file of batch) {
+      files.push({
+        path: file.filename,
+        status: file.status, // added | modified | removed | renamed | ...
+        previousPath: file.previous_filename || null
+      });
+    }
+    if (batch.length < 100) break;
+  }
+
+  return files;
+}
+
+/**
+ * Fetch and parse a JSON file at an arbitrary ref (branch or commit SHA)
+ * @param {string} userId - User ID (email)
+ * @param {string} path - File path in repository
+ * @param {string} ref - Branch name or commit SHA
+ * @returns {Promise<any>}
+ */
+export async function fetchJsonAtRef(userId, path, ref) {
+  const config = await getGitHubConfig(userId);
+  const response = await fetch(
+    `${GITHUB_API_BASE}/repos/${config.owner}/${config.repo}/contents/${path}?ref=${encodeURIComponent(ref)}`,
+    { headers: getGitHubHeaders(config.token) }
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch file ${path}@${ref}: ${response.status}`);
+  }
+
+  const data = await response.json();
+  return JSON.parse(Buffer.from(data.content, 'base64').toString('utf-8'));
+}
+
+/**
+ * Connector root directories (relative to src/appmixer/) — every directory that
+ * contains a bundle.json/service.json/package.json. Used to map an arbitrary
+ * changed file path to its connector (handles nested connectors like
+ * "microsoft/calendar" where "microsoft" is only a namespace).
+ * @param {string} userId - User ID (email)
+ * @returns {Promise<Set<string>>}
+ */
+export async function listConnectorRoots(userId) {
+  const config = await getGitHubConfig(userId);
+  const tree = await getRepoTree(config);
+
+  const roots = new Set();
+  for (const item of tree) {
+    if (item.type !== 'blob' || !item.path.startsWith('src/appmixer/')) continue;
+    const parts = item.path.split('/');
+    const fileName = parts[parts.length - 1];
+    if (fileName === 'bundle.json' || fileName === 'service.json' || fileName === 'package.json') {
+      const root = parts.slice(2, -1).join('/');
+      if (root) roots.add(root);
+    }
+  }
+  return roots;
+}
+
+/**
  * Get the SHA of a branch reference
  * @param {string} userId - User ID (email)
  * @param {string} branch - Branch name
