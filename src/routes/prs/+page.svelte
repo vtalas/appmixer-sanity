@@ -13,6 +13,7 @@
   let searchQuery = $state(params.get('q') || '');
   let connectorFilter = $state(params.get('connector') || '');
   let onlyWithFlows = $state(params.get('flows') === '1');
+  let accountFilter = $state(params.get('account') || '');
 
   // Sync filter state to URL
   let initialized = false;
@@ -20,6 +21,7 @@
     const q = searchQuery;
     const connector = connectorFilter;
     const flows = onlyWithFlows;
+    const account = accountFilter;
 
     if (!initialized) {
       initialized = true;
@@ -31,6 +33,7 @@
     q ? sp.set('q', q) : sp.delete('q');
     connector ? sp.set('connector', connector) : sp.delete('connector');
     flows ? sp.set('flows', '1') : sp.delete('flows');
+    account ? sp.set('account', account) : sp.delete('account');
 
     goto(url.pathname + (sp.toString() ? '?' + sp.toString() : ''), {
       replaceState: true,
@@ -66,7 +69,12 @@
 
       const matchesFlows = !onlyWithFlows || pr.testFlowCount > 0;
 
-      return matchesSearch && matchesConnector && matchesFlows;
+      const matchesAccount =
+        !accountFilter ||
+        (accountFilter === 'available' && pr.connectors.some((c) => c.accountAvailable === true)) ||
+        (accountFilter === 'missing' && pr.connectors.some((c) => c.accountAvailable === false));
+
+      return matchesSearch && matchesConnector && matchesFlows && matchesAccount;
     })
   );
 
@@ -215,6 +223,14 @@
       {#each allConnectors as connector}
         <option value={connector}>{connector}</option>
       {/each}
+    </select>
+    <select
+      bind:value={accountFilter}
+      class="h-10 rounded-md border border-input bg-background px-3 text-sm"
+    >
+      <option value="">Any account state</option>
+      <option value="available">Account available</option>
+      <option value="missing">No account</option>
     </select>
   </div>
 
