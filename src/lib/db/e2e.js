@@ -91,6 +91,41 @@ export async function replaceE2EFlows(instanceUrl, flows) {
 }
 
 /**
+ * Replace the cached account service names of one instance
+ * @param {string} instanceUrl
+ * @param {Array<string>} services
+ */
+export async function replaceAccountServices(instanceUrl, services) {
+  const db = getDb();
+  /** @type {Array<{sql: string, args: Array<any>}>} */
+  const statements = [
+    { sql: `DELETE FROM e2e_accounts WHERE instance_url = ?`, args: [instanceUrl] }
+  ];
+  for (const service of services) {
+    statements.push({
+      sql: `INSERT OR REPLACE INTO e2e_accounts (instance_url, service, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)`,
+      args: [instanceUrl, service]
+    });
+  }
+  await db.batch(statements, 'write');
+}
+
+/**
+ * Get the cached account service names of one instance
+ * @param {string} instanceUrl
+ * @returns {Promise<Array<string>>}
+ */
+export async function getAccountServices(instanceUrl) {
+  const db = getDb();
+  const result = await db.execute({
+    sql: `SELECT service FROM e2e_accounts WHERE instance_url = ?`,
+    args: [instanceUrl]
+  });
+  return result.rows.map((/** @type {any} */ r) => r.service);
+}
+
+/**
  * Update the last run result for a flow
  * @param {string} instanceUrl
  * @param {string} flowName

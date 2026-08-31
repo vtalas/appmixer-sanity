@@ -7,7 +7,8 @@ import {
 } from '$lib/api/github.js';
 import { getInstanceUrl } from '$lib/api/appmixer.js';
 import { getPRs, replacePRs } from '$lib/db/prs.js';
-import { getE2EFlows } from '$lib/db/e2e.js';
+import { getE2EFlows, getAccountServices } from '$lib/db/e2e.js';
+import { connectorServices } from '$lib/server/e2e/scan.js';
 
 const PR_BATCH = 5;
 const CONTENT_BATCH = 5;
@@ -46,6 +47,21 @@ function isTestFlowPath(path) {
     return path.includes('/artifacts/test-flows/');
   }
   return true;
+}
+
+/**
+ * Connector root directory of a manifest file path (bundle/service/package.json
+ * directly in a connector directory), or null.
+ * @param {string} path
+ */
+function manifestRoot(path) {
+  if (!path.startsWith('src/appmixer/')) return null;
+  const parts = path.split('/');
+  const fileName = parts[parts.length - 1];
+  if (fileName !== 'bundle.json' && fileName !== 'service.json' && fileName !== 'package.json') {
+    return null;
+  }
+  return parts.slice(2, -1).join('/') || null;
 }
 
 /**
@@ -94,12 +110,22 @@ export async function scanPRs(userId) {
     try {
       const files = await listPullRequestFiles(userId, pr.number);
 
+      // Connector roots added by the PR itself (a brand-new connector doesn't
+      // exist in the dev tree yet — without this it would map to its parent,
+      // e.g. "ai/huggingface" to "ai")
+      const prRoots = new Set(connectorRoots);
+      for (const file of files) {
+        if (file.status === 'removed') continue;
+        const root = manifestRoot(file.path);
+        if (root) prRoots.add(root);
+      }
+
       const connectors = new Set();
       /** @type {Array<{path: string, status: string, flowName: string|null, connector: string|null}>} */
       const testFlows = [];
 
       for (const file of files) {
-        const connector = connectorForPath(file.path, connectorRoots);
+        const connector = connectorForPath(file.path, prRoots);
         if (connector) connectors.add(connector);
 
         if (isTestFlowPath(file.path)) {
@@ -115,7 +141,7 @@ export async function scanPRs(userId) {
             path: file.previousPath,
             status: 'removed',
             flowName: null,
-            connector: connectorForPath(file.previousPath, connectorRoots)
+            connector: connectorForPath(file.previousPath, prRoots)
           });
         }
       }
@@ -168,7 +194,28 @@ export async function buildPROverview(userId) {
   const repoKey = `${config.owner}/${config.repo}`;
   const instanceUrl = await getInstanceUrl(userId);
 
-  const [prs, flows] = await Promise.all([getPRs(repoKey), getE2EFlows(instanceUrl)]);
+  const [prs, flows, accountServiceList] = await Promise.all([
+    getPRs(repoKey),
+    getE2EFlows(instanceUrl),
+    getAccountServices(instanceUrl)
+  ]);
+  const accountServices = new Set(accountServiceList);
+
+  /**
+   * Account availability for any connector — from the accounts snapshot taken
+   * during the e2e scan (works for connectors with no cached flows, e.g. new
+   * connectors added by a PR); falls back to the flow-cache value when no
+   * snapshot exists yet. utils never authenticates → null (no badge).
+   * @param {string} connector
+   * @param {Array<any>} cachedFlows
+   */
+  const accountAvailability = (connector, cachedFlows) => {
+    if (connector === 'utils' || connector.startsWith('utils/')) return null;
+    if (accountServices.size > 0) {
+      return connectorServices(connector).some((s) => accountServices.has(s));
+    }
+    return cachedFlows.find((f) => f.accountAvailable != null)?.accountAvailable ?? null;
+  };
 
   /** @type {Map<string, Array<any>>} */
   const flowsByConnector = new Map();
@@ -230,9 +277,7 @@ export async function buildPROverview(userId) {
 
       return {
         name,
-        accountAvailable:
-          (flowsByConnector.get(name) || []).find((f) => f.accountAvailable != null)
-            ?.accountAvailable ?? null,
+        accountAvailable: accountAvailability(name, flowsByConnector.get(name) || []),
         flows: connectorFlows
       };
     });

@@ -198,6 +198,18 @@ export async function initializeDatabase() {
     )
   `);
 
+  // Account service names present on an instance (snapshot taken during the
+  // e2e scan) — lets PR views compute account availability for connectors
+  // that have no cached flows (e.g. brand-new connectors added by a PR).
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS e2e_accounts (
+      instance_url TEXT NOT NULL,
+      service TEXT NOT NULL,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (instance_url, service)
+    )
+  `);
+
   // Open PRs of the connectors repo (cache refreshed by the PR scan),
   // scoped per repo — the instance join happens at read time.
   await client.execute(`

@@ -9,7 +9,7 @@ import {
   listAccounts,
   getInstanceUrl
 } from '$lib/api/appmixer.js';
-import { getE2EFlows, replaceE2EFlows } from '$lib/db/e2e.js';
+import { getE2EFlows, replaceE2EFlows, replaceAccountServices } from '$lib/db/e2e.js';
 
 const CONTENT_BATCH = 10;
 
@@ -92,7 +92,7 @@ function instanceFlowIdentity(flow) {
  * the top level, so "appmixer:ai" is tried as a fallback.
  * @param {string} connector
  */
-function connectorServices(connector) {
+export function connectorServices(connector) {
   const segments = connector.split('/');
   const services = [`appmixer:${segments.join(':')}`];
   if (segments.length > 1) services.push(`appmixer:${segments[0]}`);
@@ -343,6 +343,9 @@ export async function scanE2EFlows(userId, onProgress) {
   try {
     const accounts = await listAccounts(userId);
     const services = new Set(accounts.map((a) => a.service).filter(Boolean));
+    // Snapshot for views that need availability of connectors without cached
+    // flows (PR overview of brand-new connectors)
+    await replaceAccountServices(instanceUrl, [...services]);
     const availabilityByConnector = new Map();
     for (const row of rows) {
       if (!row.connector) continue;
