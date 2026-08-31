@@ -1,3 +1,9 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json"
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
+    {
+      "path": "/api/public/e2e-runner/tick?scan=1&schedule=1&loop=1",
+      "schedule": "0 3 * * *"
+    }
+  ]
 }

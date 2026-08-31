@@ -85,6 +85,47 @@ Use `invalidateAll()` after mutations to refetch data.
 - Connector status auto-calculates from component results unless manually blocked
 - Status hierarchy: Test Run → Connector → Component
 
+## E2E Test Flows (`/e2e-flows`)
+
+Overview of all E2E test flows: the source of truth is the **GitHub repo** (appmixer-connectors, dev branch — `src/appmixer/<connector>/test-flow*.json`), merged with the **Appmixer instance** deployment state and the latest run results, grouped by connector. Includes a throttled test runner that never starts more than `E2E_MAX_CONCURRENT` flows at once.
+
+### Data Model
+
+Everything the page shows comes from a DB cache refreshed by an explicit **Scan** (page button or cron). **All cache/queue rows are scoped by `instance_url`** (normalized Appmixer base URL from the caller's config — per-user DB settings override env), because different users and the env-credential cron may target different instances; every query in `src/lib/db/e2e.js` takes `instanceUrl` first.
+
+- **`e2e_flows`** — one row per test flow per instance, keyed by `(instance_url, flow_name)` (the flow's identity — `name` in the GitHub JSON, matched to `customFields.name` on the instance with legacy fallback to the flow name, same rule as the appmixer CLI). Columns: connector (from the file path), `github_path/sha/hash/url`, `flow_id` + `stage` + `server_mtime` (instance state), `sync_status` (`match` | `modified` | `not_deployed` | `server_only` | `error`), `last_result` (`passed` | `failed`) + `last_result_at` + `last_result_detail` (JSON per-component results), `account_available` (0/1/NULL — a service account matching the connector exists on the instance; computed per connector during scan with the same service-name rule as upload account binding).
+- **`e2e_runs`** — run queue + history: `state` (`queued` → `running` → `passed`/`failed`/`timeout`/`error`/`cancelled`), `baseline_result_at` (newest result-store record at start time; completion = a newer record, immune to clock skew).
+
+### Key Modules
+
+- **`src/lib/server/e2e/scan.js`** — `scanE2EFlows(userId)`: GitHub tree + contents (incremental — content refetched only when the blob sha changed), instance flow list, hash comparison (`cleanFlowForComparison` + md5, skipped when neither side changed), latest results from the global stores; replaces the `e2e_flows` cache atomically. `fetchLatestResults(userId)`: reads the two result stores ("E2E Failed Tests" / "E2E Succeeded Tests" — same names as the appmixer CLI), newer record wins per test case.
+- **`src/lib/server/e2e/runner.js`** — `tickPass(userId)`: one runner pass — (1) finalize running runs (result record newer than baseline → stop flow + record result; timeout after `E2E_RUN_TIMEOUT_SECONDS` → stop + timeout), (2) atomically claim queued runs (`UPDATE … RETURNING`) up to `E2E_MAX_CONCURRENT` and start them. `tickLoop(userId, budgetMs)`: repeats passes until queue drains or budget runs out (for cron). Ticks are driven by the page (15s interval while active) and/or cron.
+- **`src/lib/db/e2e.js`** — DB helpers for both tables.
+
+### API Routes
+
+| Route | Methods | Description |
+|---|---|---|
+| `api/e2e-flows/scan` | POST | Full cache refresh (GitHub + instance + results) |
+| `api/e2e-flows/run` | POST | Enqueue runs (`{flowNames?, connector?, all?}`), kicks one tick |
+| `api/e2e-flows/run` | DELETE | Cancel all queued runs |
+| `api/e2e-flows/runner/tick` | POST | One runner pass (session, driven by the open page) |
+| `api/e2e-flows/toggle` | POST | Manual start/stop of a flow (also updates cache stage) |
+| `api/e2e-flows/diff` | POST | Server vs GitHub flow JSON for the diff dialog |
+| `api/e2e-flows/revert` | POST | Overwrite instance flow with the GitHub version |
+| `api/e2e-flows/delete` | POST | Delete flows from the instance (also updates cache) |
+| `api/e2e-flows/sync` | POST | Create a PR pushing modified/server-only flows to GitHub |
+| `api/e2e-flows/upload` | POST | Upload (import) GitHub flows to the instance — `appmixer e2e import` semantics via `src/lib/server/e2e/upload.js` (identity customFields, result stores, fail-fast errorHandling, account binding) |
+| `api/public/e2e-runner/tick` | GET | **Cron entrypoint** (no session; `CRON_SECRET` auth, env credentials). Params: `scan=1`, `schedule=1` (enqueue flows without a result in 20h), `loop=1` (tick until budget ~250s runs out) |
+
+`vercel.json` schedules the cron daily (`scan=1&schedule=1&loop=1`). Vercel Cron sends `Authorization: Bearer <CRON_SECRET>` automatically when the env var is set; for more frequent processing point any external cron at the same URL.
+
+### Environment Variables
+
+- `CRON_SECRET` — auth for the public cron endpoint (required for cron)
+- `E2E_MAX_CONCURRENT` — max flows running at once (default 1 — the instance must never run everything at once)
+- `E2E_RUN_TIMEOUT_SECONDS` — per-run completion timeout (default 480, same as `appmixer e2e run`)
+
 ## Auth Hub (`/authub`)
 
 Auth Hub is a separate page for browsing and managing OAuth connector configs/bundles registered in an external Auth Hub service.

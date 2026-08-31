@@ -82,9 +82,15 @@ export async function initializeDatabase() {
     WHERE github_issue IS NOT NULL AND github_issue != '' AND (github_issues IS NULL OR github_issues = '')
   `);
 
-  await client.execute(`CREATE INDEX IF NOT EXISTS idx_connectors_test_run ON connectors(test_run_id)`);
-  await client.execute(`CREATE INDEX IF NOT EXISTS idx_components_connector ON components(connector_id)`);
-  await client.execute(`CREATE INDEX IF NOT EXISTS idx_test_runs_created ON test_runs(created_at DESC)`);
+  await client.execute(
+    `CREATE INDEX IF NOT EXISTS idx_connectors_test_run ON connectors(test_run_id)`
+  );
+  await client.execute(
+    `CREATE INDEX IF NOT EXISTS idx_components_connector ON components(connector_id)`
+  );
+  await client.execute(
+    `CREATE INDEX IF NOT EXISTS idx_test_runs_created ON test_runs(created_at DESC)`
+  );
 
   // Settings table for app configuration (legacy global settings)
   await client.execute(`
@@ -106,7 +112,9 @@ export async function initializeDatabase() {
     )
   `);
 
-  await client.execute(`CREATE INDEX IF NOT EXISTS idx_user_settings_user ON user_settings(user_id)`);
+  await client.execute(
+    `CREATE INDEX IF NOT EXISTS idx_user_settings_user ON user_settings(user_id)`
+  );
 
   // Auth Hub verification status
   await client.execute(`
@@ -126,7 +134,76 @@ export async function initializeDatabase() {
     )
   `);
   // Migrations
-  try { await client.execute(`ALTER TABLE github_oauth_connectors ADD COLUMN github_version TEXT`); } catch {}
-  try { await client.execute(`ALTER TABLE github_oauth_connectors ADD COLUMN is_oauth2 INTEGER NOT NULL DEFAULT 0`); } catch {}
-  try { await client.execute(`ALTER TABLE authhub_status ADD COLUMN notes TEXT`); } catch {}
+  try {
+    await client.execute(`ALTER TABLE github_oauth_connectors ADD COLUMN github_version TEXT`);
+  } catch {}
+  try {
+    await client.execute(
+      `ALTER TABLE github_oauth_connectors ADD COLUMN is_oauth2 INTEGER NOT NULL DEFAULT 0`
+    );
+  } catch {}
+  try {
+    await client.execute(`ALTER TABLE authhub_status ADD COLUMN notes TEXT`);
+  } catch {}
+
+  // E2E test flows cache (GitHub dev branch merged with instance state),
+  // scoped per Appmixer instance — different users may target different instances.
+  const E2E_FLOWS_SCHEMA = `
+    CREATE TABLE IF NOT EXISTS e2e_flows (
+      instance_url TEXT NOT NULL,
+      flow_name TEXT NOT NULL,
+      connector TEXT,
+      github_path TEXT,
+      github_sha TEXT,
+      github_hash TEXT,
+      github_url TEXT,
+      flow_id TEXT,
+      stage TEXT,
+      server_mtime TEXT,
+      sync_status TEXT,
+      last_result TEXT,
+      last_result_at TEXT,
+      last_result_detail TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (instance_url, flow_name)
+    )
+  `;
+  await client.execute(E2E_FLOWS_SCHEMA);
+  // Migration: the original table was single-instance (flow_name PK). It is just a
+  // cache — drop and recreate with the composite key; the next Scan repopulates it.
+  const flowCols = await client.execute(`PRAGMA table_info(e2e_flows)`);
+  if (!flowCols.rows.some((c) => c.name === 'instance_url')) {
+    await client.execute(`DROP TABLE e2e_flows`);
+    await client.execute(E2E_FLOWS_SCHEMA);
+  }
+  // Migration: per-connector "account available on the instance" flag (0/1, NULL = unknown)
+  try {
+    await client.execute(`ALTER TABLE e2e_flows ADD COLUMN account_available INTEGER`);
+  } catch {}
+
+  // E2E run queue + history
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS e2e_runs (
+      id TEXT PRIMARY KEY,
+      flow_name TEXT NOT NULL,
+      flow_id TEXT,
+      state TEXT CHECK(state IN ('queued', 'running', 'passed', 'failed', 'timeout', 'error', 'cancelled')) DEFAULT 'queued',
+      queued_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      started_at DATETIME,
+      finished_at DATETIME,
+      baseline_result_at TEXT,
+      error TEXT,
+      detail TEXT,
+      triggered_by TEXT
+    )
+  `);
+
+  await client.execute(`CREATE INDEX IF NOT EXISTS idx_e2e_runs_state ON e2e_runs(state)`);
+  await client.execute(
+    `CREATE INDEX IF NOT EXISTS idx_e2e_runs_flow ON e2e_runs(flow_name, queued_at DESC)`
+  );
+  // Migration: scope runs per instance (old rows keep NULL and drop out of scoped queries)
+  try {
+    await client.execute(`ALTER TABLE e2e_runs ADD COLUMN instance_url TEXT`);
+  } catch {}
 }
