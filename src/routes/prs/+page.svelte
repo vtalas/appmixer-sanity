@@ -14,6 +14,8 @@
   let connectorFilter = $state(params.get('connector') || '');
   let onlyWithFlows = $state(params.get('flows') === '1');
   let accountFilter = $state(params.get('account') || '');
+  // Drafts are hidden by default
+  let includeDrafts = $state(params.get('drafts') === '1');
 
   // Sync filter state to URL
   let initialized = false;
@@ -22,6 +24,7 @@
     const connector = connectorFilter;
     const flows = onlyWithFlows;
     const account = accountFilter;
+    const drafts = includeDrafts;
 
     if (!initialized) {
       initialized = true;
@@ -34,6 +37,7 @@
     connector ? sp.set('connector', connector) : sp.delete('connector');
     flows ? sp.set('flows', '1') : sp.delete('flows');
     account ? sp.set('account', account) : sp.delete('account');
+    drafts ? sp.set('drafts', '1') : sp.delete('drafts');
 
     goto(url.pathname + (sp.toString() ? '?' + sp.toString() : ''), {
       replaceState: true,
@@ -74,7 +78,9 @@
         (accountFilter === 'available' && pr.connectors.some((c) => c.accountAvailable === true)) ||
         (accountFilter === 'missing' && pr.connectors.some((c) => c.accountAvailable === false));
 
-      return matchesSearch && matchesConnector && matchesFlows && matchesAccount;
+      const matchesDraft = includeDrafts || !pr.draft;
+
+      return matchesSearch && matchesConnector && matchesFlows && matchesAccount && matchesDraft;
     })
   );
 
@@ -204,10 +210,15 @@
       <div class="text-2xl font-bold text-purple-700">{stats.withFlows}</div>
       <div class="text-xs font-medium text-purple-600">With Test Flows</div>
     </button>
-    <div class="border rounded-lg p-3">
+    <button
+      type="button"
+      onclick={() => (includeDrafts = !includeDrafts)}
+      class="border rounded-lg p-3 text-left hover:bg-muted/50 transition-colors cursor-pointer {includeDrafts ? 'ring-2 ring-gray-400' : ''}"
+      title={includeDrafts ? 'Drafts are shown — click to hide them' : 'Drafts are hidden — click to show them'}
+    >
       <div class="text-2xl font-bold text-muted-foreground">{stats.drafts}</div>
-      <div class="text-xs text-muted-foreground">Drafts</div>
-    </div>
+      <div class="text-xs text-muted-foreground">Drafts {includeDrafts ? '(shown)' : '(hidden)'}</div>
+    </button>
   </div>
 
   <!-- Filters -->
