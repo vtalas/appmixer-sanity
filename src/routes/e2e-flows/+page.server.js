@@ -1,107 +1,66 @@
-import { fetchE2EFlows, isAppmixerConfigured, getAppmixerInfo, getAppmixerConfig } from '$lib/api/appmixer.js';
+import {
+  isAppmixerConfigured,
+  getAppmixerInfo,
+  getAppmixerConfig,
+  getInstanceUrl
+} from '$lib/api/appmixer.js';
 import { getGitHubRepoInfo, getGitHubConfig } from '$lib/api/github.js';
+import { getE2EFlows, getRunnerSnapshot } from '$lib/db/e2e.js';
+import { getMaxConcurrent, getRunTimeoutMs } from '$lib/server/e2e/runner.js';
 import { SANITY_GITHUB_TOKEN } from '$env/static/private';
-
-/**
- * Extract connector name from flow name
- * E2E flows typically have names like "E2E box - Upload File" or "appmixer.box E2E test"
- * @param {string} flowName
- * @returns {string|null}
- */
-function extractConnectorFromFlowName(flowName) {
-    if (!flowName) return null;
-
-    // Common patterns in E2E flow names
-    const patterns = [
-        /e2e[_\s-]+(\w+)/i,           // "E2E box", "E2E_box", "E2E-box"
-        /(\w+)[_\s-]+e2e/i,           // "box E2E", "box_E2E"
-        /appmixer\.(\w+)/i,           // "appmixer.box"
-    ];
-
-    for (const pattern of patterns) {
-        const match = flowName.match(pattern);
-        if (match && match[1]) {
-            return match[1].toLowerCase();
-        }
-    }
-
-    return null;
-}
 
 /** @type {import('./$types').PageServerLoad} */
 export async function load({ locals }) {
-    const session = await locals.auth();
-    const userId = session?.user?.email;
+  const session = await locals.auth();
+  const userId = session?.user?.email;
 
-    const appmixerInfo = await getAppmixerInfo(userId);
-    const githubInfo = await getGitHubRepoInfo(userId);
-    const githubConfig = await getGitHubConfig(userId);
+  const [appmixerInfo, githubInfo, githubConfig, appmixerConfigured] = await Promise.all([
+    getAppmixerInfo(userId),
+    getGitHubRepoInfo(userId),
+    getGitHubConfig(userId),
+    isAppmixerConfigured(userId)
+  ]);
 
-    // Add token status info (don't expose actual token)
-    githubInfo.hasEnvToken = !!SANITY_GITHUB_TOKEN;
-    githubInfo.hasCustomToken = !!githubConfig.token && githubConfig.token !== SANITY_GITHUB_TOKEN;
+  githubInfo.hasEnvToken = !!SANITY_GITHUB_TOKEN;
+  githubInfo.hasCustomToken = !!githubConfig.token && githubConfig.token !== SANITY_GITHUB_TOKEN;
 
-    const appmixerConfigured = await isAppmixerConfigured(userId);
-    if (!appmixerConfigured) {
-        return {
-            flows: [],
-            error: 'Appmixer is not configured. Please set APPMIXER_USERNAME, APPMIXER_PASSWORD, and APPMIXER_BASE_URL environment variables or configure them in settings.',
-            designerBaseUrl: null,
-            appmixerInfo,
-            githubInfo
-        };
-    }
+  let designerBaseUrl = null;
+  if (appmixerConfigured) {
+    const appmixerConfig = await getAppmixerConfig(userId);
+    designerBaseUrl = appmixerConfig.baseUrl
+      .replace('api-', '')
+      // hard-coded exceptions
+      .replace('api.clientio.', 'my.clientio.');
+  }
 
-    try {
-        const [appmixerFlows, appmixerConfig] = await Promise.all([
-            fetchE2EFlows(userId),
-            getAppmixerConfig(userId)
-        ]);
+  // Everything below comes from the DB cache — refreshed via POST /api/e2e-flows/scan.
+  // Scoped to the user's configured Appmixer instance.
+  const instanceUrl = await getInstanceUrl(userId);
+  const [flows, runner] = await Promise.all([
+    getE2EFlows(instanceUrl),
+    getRunnerSnapshot(instanceUrl)
+  ]);
 
-        const designerBaseUrl = appmixerConfig.baseUrl.replace('api-', '')
-            // hard-coded exceptions
-            .replace('api.clientio.', 'my.clientio.');
+  const lastScanAt = flows.reduce((max, f) => {
+    return f.updatedAt && (!max || f.updatedAt > max) ? f.updatedAt : max;
+  }, null);
 
-        // Return basic flow data immediately - sync status loaded lazily on client
-        const flows = appmixerFlows.map((flow) => ({
-            flowId: flow.flowId,
-            name: flow.name,
-            connector: extractConnectorFromFlowName(flow.name),
-            url: `${designerBaseUrl}/designer/${flow.flowId}`,
-            stage: flow.stage || 'stopped',
-            createdAt: flow.btime,
-            updatedAt: flow.mtime,
-            running: flow.stage === 'running',
-            syncStatus: null,
-            githubUrl: null,
-            githubPath: null
-        }));
-
-        // Sort by connector name, then by flow name
-        flows.sort((a, b) => {
-            const connectorA = a.connector || 'zzz';
-            const connectorB = b.connector || 'zzz';
-            if (connectorA !== connectorB) {
-                return connectorA.localeCompare(connectorB);
-            }
-            return (a.name || '').localeCompare(b.name || '');
-        });
-
-        return {
-            flows,
-            error: null,
-            designerBaseUrl,
-            appmixerInfo,
-            githubInfo
-        };
-    } catch (e) {
-        console.error('Failed to fetch E2E flows:', e);
-        return {
-            flows: [],
-            error: `Failed to fetch E2E flows: ${e.message}`,
-            designerBaseUrl: null,
-            appmixerInfo,
-            githubInfo
-        };
-    }
+  return {
+    flows: flows.map((f) => ({
+      ...f,
+      url: f.flowId && designerBaseUrl ? `${designerBaseUrl}/designer/${f.flowId}` : null
+    })),
+    runner,
+    runnerConfig: {
+      maxConcurrent: getMaxConcurrent(),
+      runTimeoutSeconds: Math.round(getRunTimeoutMs() / 1000)
+    },
+    lastScanAt,
+    error: appmixerConfigured
+      ? null
+      : 'Appmixer is not configured. Please set APPMIXER_USERNAME, APPMIXER_PASSWORD, and APPMIXER_BASE_URL environment variables or configure them in settings.',
+    designerBaseUrl,
+    appmixerInfo,
+    githubInfo
+  };
 }

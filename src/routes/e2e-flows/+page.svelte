@@ -1,37 +1,30 @@
 <script>
   import { Input } from '$lib/components/ui/input';
   import { Button } from '$lib/components/ui/button';
-  import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '$lib/components/ui/table';
   import { Badge } from '$lib/components/ui/badge';
   import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '$lib/components/ui/dialog';
   import { Checkbox } from '$lib/components/ui/checkbox';
   import { invalidateAll, goto } from '$app/navigation';
   import { page } from '$app/stores';
-  import { ExternalLink, Github, Trash2, FileDiff, FileText, Play, Square } from 'lucide-svelte';
+  import { ExternalLink, Github, Trash2, FileDiff, FileText, Play, Square, RefreshCw, ListX, PlayCircle, Clipboard, Check } from 'lucide-svelte';
 
   let { data } = $props();
-
-  const PAGE_SIZE = 16;
 
   // Initialize filters from URL params
   const params = $page.url.searchParams;
   let searchQuery = $state(params.get('q') || '');
   let connectorFilter = $state(params.get('connector') || '');
   let syncFilter = $state(params.get('sync') || '');
-  let runningFilter = $state(params.get('status') || '');
-  let currentPage = $state(parseInt(params.get('page') || '1', 10) || 1);
+  let resultFilter = $state(params.get('result') || '');
 
   // Sync filter state to URL
   let initialized = false;
   $effect(() => {
-    // Read all filter values to track them
     const q = searchQuery;
     const connector = connectorFilter;
     const sync = syncFilter;
-    const status = runningFilter;
-    const pg = currentPage;
+    const result = resultFilter;
 
-    // Skip the first run to avoid replacing the URL on mount
     if (!initialized) {
       initialized = true;
       return;
@@ -39,13 +32,10 @@
 
     const url = new URL($page.url);
     const sp = url.searchParams;
-
-    // Set or delete each param
     q ? sp.set('q', q) : sp.delete('q');
     connector ? sp.set('connector', connector) : sp.delete('connector');
     sync ? sp.set('sync', sync) : sp.delete('sync');
-    status ? sp.set('status', status) : sp.delete('status');
-    pg > 1 ? sp.set('page', String(pg)) : sp.delete('page');
+    result ? sp.set('result', result) : sp.delete('result');
 
     goto(url.pathname + (sp.toString() ? '?' + sp.toString() : ''), {
       replaceState: true,
@@ -54,70 +44,292 @@
     });
   });
 
-  // Flow selection state
-  let selectedFlowIds = $state(new Set());
+  const flows = $derived(data.flows || []);
 
-  // Sync status deferred loading
-  /** @type {Record<string, {syncStatus: string, githubUrl: string|null, githubPath: string|null}>} */
-  let syncStatuses = $state({});
-  let syncStatusLoading = $state(false);
+  // Runner state derived from the snapshot
+  const runner = $derived(data.runner || { counts: {}, running: [], queued: [], recent: [] });
+  const runningNames = $derived(new Set(runner.running.map((r) => r.flowName)));
+  const queuedNames = $derived(new Set(runner.queued.map((r) => r.flowName)));
+  const runnerActive = $derived(runner.running.length + runner.queued.length > 0);
 
-  // Merge sync statuses into flows
-  const flows = $derived(
-    data.flows.map(f => {
-      const status = syncStatuses[f.flowId];
-      if (status) {
-        return { ...f, ...status };
-      }
-      return f;
+  // Stats
+  const stats = $derived({
+    total: flows.length,
+    deployed: flows.filter((f) => f.flowId).length,
+    notDeployed: flows.filter((f) => f.syncStatus === 'not_deployed').length,
+    match: flows.filter((f) => f.syncStatus === 'match').length,
+    modified: flows.filter((f) => f.syncStatus === 'modified').length,
+    serverOnly: flows.filter((f) => f.syncStatus === 'server_only').length,
+    passed: flows.filter((f) => f.lastResult === 'passed').length,
+    failed: flows.filter((f) => f.lastResult === 'failed').length,
+    neverRan: flows.filter((f) => !f.lastResult).length
+  });
+
+  // Filtering
+  const connectors = $derived(
+    [...new Set(flows.map((f) => f.connector).filter(Boolean))].sort()
+  );
+
+  const filteredFlows = $derived(
+    flows.filter((flow) => {
+      const matchesSearch =
+        !searchQuery ||
+        flow.flowName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        flow.connector?.toLowerCase().includes(searchQuery.toLowerCase());
+
+      const matchesConnector = !connectorFilter || flow.connector === connectorFilter;
+      const matchesSync = !syncFilter || flow.syncStatus === syncFilter;
+
+      const matchesResult =
+        !resultFilter ||
+        (resultFilter === 'passed' && flow.lastResult === 'passed') ||
+        (resultFilter === 'failed' && flow.lastResult === 'failed') ||
+        (resultFilter === 'none' && !flow.lastResult) ||
+        (resultFilter === 'active' && (runningNames.has(flow.flowName) || queuedNames.has(flow.flowName)));
+
+      return matchesSearch && matchesConnector && matchesSync && matchesResult;
     })
   );
 
-  // Compute stats from merged flows
-  const stats = $derived({
-    total: flows.length,
-    running: flows.filter(f => f.running).length,
-    stopped: flows.filter(f => !f.running).length,
-    match: flows.filter(f => f.syncStatus === 'match').length,
-    modified: flows.filter(f => f.syncStatus === 'modified').length,
-    serverOnly: flows.filter(f => f.syncStatus === 'server_only').length,
-    error: flows.filter(f => f.syncStatus === 'error').length
+  // Group filtered flows by connector
+  const groupedFlows = $derived.by(() => {
+    const groups = new Map();
+    for (const flow of filteredFlows) {
+      const key = flow.connector || 'unknown';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(flow);
+    }
+    return [...groups.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([connector, items]) => ({
+        connector,
+        flows: items.sort((a, b) => a.flowName.localeCompare(b.flowName)),
+        deployed: items.filter((f) => f.flowId).length,
+        passed: items.filter((f) => f.lastResult === 'passed').length,
+        failed: items.filter((f) => f.lastResult === 'failed').length,
+        // Account availability is per connector — every flow row carries the same value
+        accountAvailable: items.find((f) => f.accountAvailable != null)?.accountAvailable ?? null
+      }));
   });
 
-  // Fetch sync statuses lazily after page renders
-  async function loadSyncStatuses() {
-    if (!data.flows.length) return;
+  // --- Runner pump: while the page is open and the queue is active, tick every 15s ---
+  let ticking = $state(false);
 
-    syncStatusLoading = true;
+  async function tickRunner() {
+    if (ticking) return;
+    ticking = true;
     try {
-      const response = await fetch('/api/e2e-flows/sync-status', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          flows: data.flows.map(f => ({ flowId: f.flowId, name: f.name }))
-        })
-      });
-
+      const response = await fetch('/api/e2e-flows/runner/tick', { method: 'POST' });
       if (response.ok) {
-        const result = await response.json();
-        syncStatuses = result.statuses;
+        await invalidateAll();
       }
     } catch (e) {
-      console.error('Failed to load sync statuses:', e);
+      console.error('Runner tick failed:', e);
     } finally {
-      syncStatusLoading = false;
+      ticking = false;
     }
   }
 
-  // Load sync statuses when data changes (initial load + after invalidateAll)
   $effect(() => {
-    // Access data.flows to track dependency
-    if (data.flows.length > 0) {
-      loadSyncStatuses();
+    if (!runnerActive) return;
+    const interval = setInterval(tickRunner, 15_000);
+    return () => clearInterval(interval);
+  });
+
+  // --- Scan (refresh from GitHub + instance, NDJSON progress stream) ---
+  let isScanning = $state(false);
+  let scanError = $state('');
+  let scanSummary = $state(null);
+  /** @type {{phase: string, done?: number, total?: number}|null} */
+  let scanProgress = $state(null);
+
+  const scanPhaseLabels = {
+    sources: 'Listing GitHub repo & instance flows…',
+    github: 'Fetching test-flow files from GitHub',
+    compare: 'Comparing flows with the instance',
+    results: 'Reading run results…',
+    save: 'Saving…'
+  };
+
+  const scanProgressPercent = $derived.by(() => {
+    const p = scanProgress;
+    if (!p) return 0;
+    // Weight phases: sources 5%, github 5-60%, compare 60-90%, results 90-95%, save 95-100%
+    const frac = p.total ? (p.done || 0) / p.total : 0;
+    switch (p.phase) {
+      case 'sources': return 3;
+      case 'github': return 5 + frac * 55;
+      case 'compare': return 60 + frac * 30;
+      case 'results': return 92;
+      case 'save': return 97;
+      default: return 0;
     }
   });
 
-  // Sync dialog state
+  async function runScan() {
+    isScanning = true;
+    scanError = '';
+    scanSummary = null;
+    scanProgress = { phase: 'sources' };
+
+    try {
+      const response = await fetch('/api/e2e-flows/scan', { method: 'POST' });
+      if (!response.ok || !response.body) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || `Scan failed: ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let finished = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let newline;
+        while ((newline = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, newline).trim();
+          buffer = buffer.slice(newline + 1);
+          if (!line) continue;
+
+          let event;
+          try {
+            event = JSON.parse(line);
+          } catch {
+            continue;
+          }
+
+          if (event.type === 'progress') {
+            scanProgress = event;
+          } else if (event.type === 'done') {
+            scanSummary = event.summary;
+            finished = true;
+          } else if (event.type === 'error') {
+            throw new Error(event.message);
+          }
+        }
+      }
+
+      if (!finished) {
+        throw new Error('Scan stream ended unexpectedly');
+      }
+
+      await invalidateAll();
+    } catch (e) {
+      scanError = e.message || 'Scan failed';
+    } finally {
+      isScanning = false;
+      scanProgress = null;
+    }
+  }
+
+  // --- Enqueue runs ---
+  let enqueueError = $state('');
+  let enqueueBusy = $state(false);
+
+  async function enqueue(body) {
+    enqueueBusy = true;
+    enqueueError = '';
+    try {
+      const response = await fetch('/api/e2e-flows/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || `Failed to enqueue: ${response.status}`);
+      }
+      await invalidateAll();
+    } catch (e) {
+      enqueueError = e.message || 'Failed to enqueue runs';
+    } finally {
+      enqueueBusy = false;
+    }
+  }
+
+  function runFlow(flow) {
+    enqueue({ flowNames: [flow.flowName] });
+  }
+
+  function runConnector(connector) {
+    enqueue({ connector });
+  }
+
+  function runAll() {
+    if (!confirm(`Queue all ${stats.deployed} deployed flows? They will run max ${data.runnerConfig.maxConcurrent} at a time.`)) {
+      return;
+    }
+    enqueue({ all: true });
+  }
+
+  async function cancelQueue() {
+    try {
+      const response = await fetch('/api/e2e-flows/run', { method: 'DELETE' });
+      if (response.ok) {
+        await invalidateAll();
+      }
+    } catch (e) {
+      console.error('Failed to cancel queue:', e);
+    }
+  }
+
+  // --- Selection for batch actions (sync to GitHub / upload to instance) ---
+  let selectedFlowNames = $state(new Set());
+
+  function isSelectable(flow) {
+    return (
+      (flow.flowId && (flow.syncStatus === 'modified' || flow.syncStatus === 'server_only')) ||
+      (flow.githubPath && flow.syncStatus === 'not_deployed')
+    );
+  }
+
+  const selectedFlows = $derived(flows.filter((f) => selectedFlowNames.has(f.flowName)));
+
+  // Sync to GitHub: instance is the source (modified / server_only, needs flowId)
+  const syncableFlows = $derived(
+    selectedFlows.filter(
+      (f) => f.flowId && (f.syncStatus === 'modified' || f.syncStatus === 'server_only')
+    )
+  );
+
+  // Upload to instance: GitHub is the source (modified = overwrite, not_deployed = create)
+  const uploadableFlows = $derived(
+    selectedFlows.filter(
+      (f) => f.githubPath && (f.syncStatus === 'modified' || f.syncStatus === 'not_deployed')
+    )
+  );
+
+  function toggleFlowSelection(flowName) {
+    const newSet = new Set(selectedFlowNames);
+    if (newSet.has(flowName)) {
+      newSet.delete(flowName);
+    } else {
+      newSet.add(flowName);
+    }
+    selectedFlowNames = newSet;
+  }
+
+  function clearSelection() {
+    selectedFlowNames = new Set();
+  }
+
+  function toggleGroupSelection(groupFlows, allSelected) {
+    const newSet = new Set(selectedFlowNames);
+    for (const f of groupFlows) {
+      if (allSelected) {
+        newSet.delete(f.flowName);
+      } else {
+        newSet.add(f.flowName);
+      }
+    }
+    selectedFlowNames = newSet;
+  }
+
+  // --- Sync to GitHub PR dialog ---
   let showSyncDialog = $state(false);
   let syncPrTitle = $state('');
   let syncPrDescription = $state('');
@@ -126,21 +338,155 @@
   let syncError = $state('');
   let syncResult = $state(null);
 
-  // Delete dialog state
-  let showDeleteDialog = $state(false);
-  let flowToDelete = $state(null);
-  let isDeleting = $state(false);
-  let deleteError = $state('');
+  function generateFlowPath(connector, flowName) {
+    const safeName = flowName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+    return `src/appmixer/${connector || 'unknown'}/test-flow-${safeName}.json`;
+  }
 
-  // Toggle (start/stop) state - track which flows are currently toggling
-  /** @type {Set<string>} */
-  let togglingFlowIds = $state(new Set());
+  function openSyncDialog() {
+    const count = syncableFlows.length;
+    syncPrTitle = `Sync ${count} E2E flow${count > 1 ? 's' : ''} from Appmixer`;
+    syncPrDescription = '';
+    syncTargetBranch = data.githubInfo?.branch || 'dev';
+    syncError = '';
+    syncResult = null;
+    showSyncDialog = true;
+  }
+
+  async function performSync() {
+    if (!syncPrTitle.trim()) {
+      syncError = 'PR title is required';
+      return;
+    }
+
+    isSyncing = true;
+    syncError = '';
+
+    try {
+      const flowsToSync = syncableFlows.map((f) => ({
+        flowId: f.flowId,
+        name: f.flowName,
+        connector: f.connector,
+        githubPath: f.githubPath || null
+      }));
+
+      const response = await fetch('/api/e2e-flows/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          flows: flowsToSync,
+          prTitle: syncPrTitle.trim(),
+          prDescription: syncPrDescription.trim(),
+          targetBranch: syncTargetBranch.trim()
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || `Failed to sync: ${response.status}`);
+      }
+
+      syncResult = await response.json();
+      clearSelection();
+    } catch (e) {
+      syncError = e.message || 'Failed to sync flows';
+    } finally {
+      isSyncing = false;
+    }
+  }
+
+  async function closeSyncDialog() {
+    const hadSuccess = syncResult?.success;
+    showSyncDialog = false;
+    syncResult = null;
+    if (hadSuccess) {
+      await invalidateAll();
+    }
+  }
+
+  // --- Upload to instance dialog (GitHub → instance, per-flow progress) ---
+  let showUploadDialog = $state(false);
+  let isUploading = $state(false);
+  let uploadFinished = $state(false);
+  /** @type {Array<{flowName: string, state: string, detail: string}>} */
+  let uploadRows = $state([]);
+
+  function openUploadDialog() {
+    uploadRows = uploadableFlows.map((f) => ({
+      flowName: f.flowName,
+      state: 'pending',
+      detail: f.syncStatus === 'not_deployed' ? 'will be created' : 'will be overwritten'
+    }));
+    uploadFinished = false;
+    showUploadDialog = true;
+  }
+
+  async function performUpload() {
+    isUploading = true;
+
+    for (let i = 0; i < uploadRows.length; i++) {
+      uploadRows[i] = { ...uploadRows[i], state: 'uploading', detail: '' };
+      uploadRows = [...uploadRows];
+
+      try {
+        const response = await fetch('/api/e2e-flows/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ flowNames: [uploadRows[i].flowName] })
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(errorData.message || `Upload failed: ${response.status}`);
+        }
+
+        const { results } = await response.json();
+        const result = results?.[0] || {};
+
+        if (result.error) {
+          uploadRows[i] = { ...uploadRows[i], state: 'error', detail: result.error };
+        } else {
+          const parts = [result.created ? 'created' : 'updated'];
+          if (result.accounts?.length) parts.push(`account bound`);
+          if (result.warning) parts.push(result.warning);
+          uploadRows[i] = {
+            ...uploadRows[i],
+            state: result.warning ? 'warning' : 'done',
+            detail: parts.join(' · ')
+          };
+        }
+      } catch (e) {
+        uploadRows[i] = { ...uploadRows[i], state: 'error', detail: e.message || 'Upload failed' };
+      }
+      uploadRows = [...uploadRows];
+    }
+
+    isUploading = false;
+    uploadFinished = true;
+    await invalidateAll();
+  }
+
+  function closeUploadDialog() {
+    if (isUploading) return;
+    showUploadDialog = false;
+    if (uploadFinished) {
+      clearSelection();
+    }
+    uploadRows = [];
+    uploadFinished = false;
+  }
+
+  // --- Toggle (start/stop) ---
+  let togglingFlowNames = $state(new Set());
 
   async function toggleFlow(flow) {
-    const action = flow.running ? 'stop' : 'start';
-    const newSet = new Set(togglingFlowIds);
-    newSet.add(flow.flowId);
-    togglingFlowIds = newSet;
+    const action = flow.stage === 'running' ? 'stop' : 'start';
+    const newSet = new Set(togglingFlowNames);
+    newSet.add(flow.flowName);
+    togglingFlowNames = newSet;
 
     try {
       const response = await fetch('/api/e2e-flows/toggle', {
@@ -159,30 +505,93 @@
       console.error(`Failed to ${action} flow:`, e);
       alert(`Failed to ${action} flow: ${e.message}`);
     } finally {
-      const cleanup = new Set(togglingFlowIds);
-      cleanup.delete(flow.flowId);
-      togglingFlowIds = cleanup;
+      const cleanup = new Set(togglingFlowNames);
+      cleanup.delete(flow.flowName);
+      togglingFlowNames = cleanup;
     }
   }
 
-  // Diff dialog state
+  // --- Delete dialog ---
+  let showDeleteDialog = $state(false);
+  let flowToDelete = $state(null);
+  let isDeleting = $state(false);
+  let deleteError = $state('');
+
+  function confirmDelete(flow) {
+    flowToDelete = flow;
+    deleteError = '';
+    showDeleteDialog = true;
+  }
+
+  async function performDelete() {
+    if (!flowToDelete) return;
+
+    isDeleting = true;
+    deleteError = '';
+
+    try {
+      const response = await fetch('/api/e2e-flows/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ flowIds: [flowToDelete.flowId] })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || `Failed to delete: ${response.status}`);
+      }
+
+      const result = await response.json();
+      if (result.errors?.length > 0) {
+        throw new Error(result.errors[0].error);
+      }
+
+      showDeleteDialog = false;
+      flowToDelete = null;
+      await invalidateAll();
+    } catch (e) {
+      deleteError = e.message || 'Failed to delete flow';
+    } finally {
+      isDeleting = false;
+    }
+  }
+
+  // --- Diff dialog ---
   let showDiffDialog = $state(false);
   let diffFlow = $state(null);
   let isDiffLoading = $state(false);
   let diffError = $state('');
   let diffData = $state(null);
-
-  // E2E results dialog state
-  let showResultsDialog = $state(false);
-  let resultsFlow = $state(null);
-  let isResultsLoading = $state(false);
-  let resultsError = $state('');
-  let resultsData = $state(null);
-
-  // Revert state (inside diff dialog)
   let isReverting = $state(false);
   let revertError = $state('');
   let revertSuccess = $state(false);
+
+  async function openDiff(flow) {
+    diffFlow = flow;
+    diffError = '';
+    diffData = null;
+    showDiffDialog = true;
+    isDiffLoading = true;
+
+    try {
+      const response = await fetch('/api/e2e-flows/diff', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ flowId: flow.flowId, flowName: flow.flowName })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || `Failed to load diff: ${response.status}`);
+      }
+
+      diffData = await response.json();
+    } catch (e) {
+      diffError = e.message || 'Failed to load diff';
+    } finally {
+      isDiffLoading = false;
+    }
+  }
 
   async function revertFlow() {
     if (!diffFlow) return;
@@ -194,7 +603,7 @@
       const response = await fetch('/api/e2e-flows/revert', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ flowId: diffFlow.flowId, flowName: diffFlow.name })
+        body: JSON.stringify({ flowId: diffFlow.flowId, flowName: diffFlow.flowName })
       });
 
       if (!response.ok) {
@@ -221,82 +630,96 @@
     }
   }
 
-  async function openDiff(flow) {
-    diffFlow = flow;
-    diffError = '';
-    diffData = null;
-    showDiffDialog = true;
-    isDiffLoading = true;
+  // --- Results dialog (renders the cached last result) ---
+  let showResultsDialog = $state(false);
+  let resultsFlow = $state(null);
 
-    try {
-      const response = await fetch('/api/e2e-flows/diff', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ flowId: flow.flowId, flowName: flow.name })
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.message || `Failed to load diff: ${response.status}`);
-      }
-
-      diffData = await response.json();
-    } catch (e) {
-      diffError = e.message || 'Failed to load diff';
-    } finally {
-      isDiffLoading = false;
-    }
-  }
-
-  async function openResults(flow) {
+  function openResults(flow) {
     resultsFlow = flow;
-    resultsError = '';
-    resultsData = null;
     showResultsDialog = true;
-    isResultsLoading = true;
-
-    try {
-      const response = await fetch('/api/e2e-flows/results', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ flowId: flow.flowId, flowName: flow.name })
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.message || `Failed to load results: ${response.status}`);
-      }
-
-      resultsData = await response.json();
-    } catch (e) {
-      resultsError = e.message || 'Failed to load E2E results';
-    } finally {
-      isResultsLoading = false;
-    }
   }
+
+  const resultsDetails = $derived.by(() => {
+    const detail = resultsFlow?.lastResultDetail;
+    if (!Array.isArray(detail)) return [];
+    return detail.map((item) => {
+      const errors = Array.isArray(item?.error) ? item.error : [];
+      const success = Array.isArray(item?.success) ? item.success : [];
+      return {
+        componentId: item?.componentId || '',
+        componentName: item?.componentName || 'Unknown component',
+        success,
+        errors,
+        status: errors.length > 0 ? 'failed' : 'passed'
+      };
+    });
+  });
 
   function getComponentLink(componentId) {
     if (!resultsFlow?.url || !componentId) {
       return resultsFlow?.url || '#';
     }
-
     return `${resultsFlow.url}?componentId=${encodeURIComponent(componentId)}`;
   }
 
-  /**
-   * Compute a simple line-based unified diff between two strings
-   */
+  // --- Markdown report export (same format as appmixer-component-preview) ---
+  let exportCopied = $state(false);
+
+  function formatResultTimestamp(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? '' : date.toLocaleString();
+  }
+
+  async function copyMarkdownReport() {
+    const lines = [];
+
+    for (const group of groupedFlows) {
+      lines.push(`## ${group.connector}`);
+      for (const flow of group.flows) {
+        let line = flow.url ? `- [${flow.flowName}](${flow.url})` : `- ${flow.flowName}`;
+        const fileName = flow.githubPath ? flow.githubPath.split('/').pop() : null;
+        if (fileName) line += ` — \`${fileName}\``;
+
+        if (flow.lastResult) {
+          const label = flow.lastResult === 'failed' ? 'Failure' : 'Success';
+          const time = flow.lastResultAt ? ` (${formatResultTimestamp(flow.lastResultAt)})` : '';
+          line += ` — **${label}**${time}`;
+        } else {
+          line += ' — Not Available';
+        }
+        lines.push(line);
+
+        if (Array.isArray(flow.lastResultDetail)) {
+          for (const detail of flow.lastResultDetail) {
+            for (const check of Array.isArray(detail?.success) ? detail.success : []) {
+              lines.push(`  - ✅ ${check}`);
+            }
+            for (const check of Array.isArray(detail?.error) ? detail.error : []) {
+              lines.push(`  - ❌ ${check}`);
+            }
+          }
+        }
+      }
+      lines.push('');
+    }
+
+    try {
+      await navigator.clipboard.writeText(lines.join('\n').trim() + '\n');
+      exportCopied = true;
+      setTimeout(() => (exportCopied = false), 2000);
+    } catch (e) {
+      console.error('Failed to copy report:', e);
+    }
+  }
+
+  // --- Diff computation (line-based LCS) ---
   function computeDiff(oldText, newText) {
     const oldLines = oldText.split('\n');
     const newLines = newText.split('\n');
     const result = [];
-    let oi = 0, ni = 0;
-
-    // Simple LCS-based diff
     const lcs = buildLCS(oldLines, newLines);
-    let li = 0;
-    oi = 0;
-    ni = 0;
+    let li = 0, oi = 0, ni = 0;
 
     while (oi < oldLines.length || ni < newLines.length) {
       if (li < lcs.length && oi < oldLines.length && ni < newLines.length && oldLines[oi] === lcs[li] && newLines[ni] === lcs[li]) {
@@ -322,7 +745,6 @@
 
   function buildLCS(a, b) {
     const m = a.length, n = b.length;
-    // For very large files, skip LCS and show full replace
     if (m * n > 2_000_000) {
       return [];
     }
@@ -347,264 +769,34 @@
     return result;
   }
 
-  // Check if a flow can be selected (only modified and server_only)
-  function isSelectable(flow) {
-    return flow.syncStatus === 'modified' || flow.syncStatus === 'server_only';
-  }
-
-  // Selected flows data (for sync dialog)
-  const selectedFlows = $derived(
-    flows.filter(f => selectedFlowIds.has(f.flowId))
-  );
-
-  // Toggle selection of a single flow
-  function toggleFlowSelection(flowId) {
-    const newSet = new Set(selectedFlowIds);
-    if (newSet.has(flowId)) {
-      newSet.delete(flowId);
-    } else {
-      newSet.add(flowId);
-    }
-    selectedFlowIds = newSet;
-  }
-
-  // Toggle selection of all selectable flows
-  function toggleSelectAll() {
-    if (allSelectableSelected) {
-      // Deselect all selectable flows
-      const newSet = new Set(selectedFlowIds);
-      selectableFlows.forEach(f => newSet.delete(f.flowId));
-      selectedFlowIds = newSet;
-    } else {
-      // Select all selectable flows
-      const newSet = new Set(selectedFlowIds);
-      selectableFlows.forEach(f => newSet.add(f.flowId));
-      selectedFlowIds = newSet;
-    }
-  }
-
-  // Clear all selections
-  function clearSelection() {
-    selectedFlowIds = new Set();
-  }
-
-  // Generate file path for server_only flows
-  function generateFlowPath(connector, flowName) {
-    const safeName = flowName
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '');
-    return `src/appmixer/${connector || 'unknown'}/test-flow-${safeName}.json`;
-  }
-
-  // Open sync dialog
-  function openSyncDialog() {
-    const count = selectedFlowIds.size;
-    syncPrTitle = `Sync ${count} E2E flow${count > 1 ? 's' : ''} from Appmixer`;
-    syncPrDescription = '';
-    syncTargetBranch = data.githubInfo?.branch || 'dev';
-    syncError = '';
-    syncResult = null;
-    showSyncDialog = true;
-  }
-
-  // Perform the sync
-  async function performSync() {
-    if (!syncPrTitle.trim()) {
-      syncError = 'PR title is required';
-      return;
-    }
-
-    isSyncing = true;
-    syncError = '';
-
-    try {
-      const flowsToSync = selectedFlows.map(f => ({
-        flowId: f.flowId,
-        name: f.name,
-        connector: f.connector,
-        githubPath: f.githubPath || null
-      }));
-
-      const response = await fetch('/api/e2e-flows/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          flows: flowsToSync,
-          prTitle: syncPrTitle.trim(),
-          prDescription: syncPrDescription.trim(),
-          targetBranch: syncTargetBranch.trim()
-        })
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.message || `Failed to sync: ${response.status}`);
-      }
-
-      const result = await response.json();
-      syncResult = result;
-
-      // Clear selection after successful sync
-      clearSelection();
-
-    } catch (e) {
-      syncError = e.message || 'Failed to sync flows';
-    } finally {
-      isSyncing = false;
-    }
-  }
-
-  // Close sync dialog and refresh if successful
-  async function closeSyncDialog() {
-    const hadSuccess = syncResult?.success;
-    showSyncDialog = false;
-    syncResult = null;
-
-    if (hadSuccess) {
-      await invalidateAll();
-    }
-  }
-
-  // Open delete confirmation dialog
-  function confirmDelete(flow) {
-    flowToDelete = flow;
-    deleteError = '';
-    showDeleteDialog = true;
-  }
-
-  // Perform the delete
-  async function performDelete() {
-    if (!flowToDelete) return;
-
-    isDeleting = true;
-    deleteError = '';
-
-    try {
-      const response = await fetch('/api/e2e-flows/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          flowIds: [flowToDelete.flowId]
-        })
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.message || `Failed to delete: ${response.status}`);
-      }
-
-      const result = await response.json();
-      if (result.errors?.length > 0) {
-        throw new Error(result.errors[0].error);
-      }
-
-      // Remove from selection if selected
-      if (selectedFlowIds.has(flowToDelete?.flowId)) {
-        const newSet = new Set(selectedFlowIds);
-        newSet.delete(flowToDelete.flowId);
-        selectedFlowIds = newSet;
-      }
-
-      // Close dialog and refresh
-      showDeleteDialog = false;
-      flowToDelete = null;
-
-      await invalidateAll();
-
-    } catch (e) {
-      deleteError = e.message || 'Failed to delete flow';
-    } finally {
-      isDeleting = false;
-    }
-  }
-
-
-  // Get unique connectors for filter dropdown
-  const connectors = $derived(
-    [...new Set(flows.map(f => f.connector).filter(Boolean))].sort()
-  );
-
-  const filteredFlows = $derived(
-    flows.filter(flow => {
-      const matchesSearch = !searchQuery ||
-        flow.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        flow.connector?.toLowerCase().includes(searchQuery.toLowerCase());
-
-      const matchesConnector = !connectorFilter || flow.connector === connectorFilter;
-
-      const matchesSync = !syncFilter || flow.syncStatus === syncFilter;
-
-      const matchesRunning = !runningFilter ||
-        (runningFilter === 'running' && flow.running) ||
-        (runningFilter === 'stopped' && !flow.running);
-
-      return matchesSearch && matchesConnector && matchesSync && matchesRunning;
-    })
-  );
-
-  // Reset to page 1 when filters change (skip initial run to preserve URL page)
-  let filtersInitialized = false;
-  $effect(() => {
-    // Track all filter dependencies
-    searchQuery; connectorFilter; syncFilter; runningFilter;
-    if (!filtersInitialized) {
-      filtersInitialized = true;
-      return;
-    }
-    currentPage = 1;
-  });
-
-  // Pagination
-  const totalPages = $derived(Math.max(1, Math.ceil(filteredFlows.length / PAGE_SIZE)));
-
-  // Clamp currentPage when totalPages shrinks (e.g. sync statuses resolve with a filter active)
-  $effect(() => {
-    if (currentPage > totalPages) {
-      currentPage = totalPages;
-    }
-  });
-
-  const paginatedFlows = $derived(
-    filteredFlows.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
-  );
-
-  // Selectable flows from filtered list (must be after filteredFlows)
-  const selectableFlows = $derived(
-    filteredFlows.filter(isSelectable)
-  );
-
-  // Check if all selectable flows are selected
-  const allSelectableSelected = $derived(
-    selectableFlows.length > 0 &&
-    selectableFlows.every(f => selectedFlowIds.has(f.flowId))
-  );
-
-  // Visible page numbers (with ellipsis gaps)
-  const visiblePages = $derived(() => {
-    const pages = [];
-    for (let p = 1; p <= totalPages; p++) {
-      if (p === 1 || p === totalPages || (p >= currentPage - 2 && p <= currentPage + 2)) {
-        pages.push(p);
-      }
-    }
-    return pages;
-  });
-
-  // Sync status configuration
+  // --- Helpers ---
   const syncStatusConfig = {
-    match: { label: 'In Sync', class: 'bg-green-100 text-green-800 border-green-200', description: 'Flow matches the GitHub repository' },
-    modified: { label: 'Modified', class: 'bg-yellow-100 text-yellow-800 border-yellow-200', description: 'Changes on instance, needs to be pushed to git' },
-    server_only: { label: 'Server Only', class: 'bg-blue-100 text-blue-800 border-blue-200', description: 'Flow is not in the GitHub repository' },
-    error: { label: 'Error', class: 'bg-red-100 text-red-800 border-red-200', description: 'Failed to compare flow' }
+    match: { label: 'In Sync', class: 'bg-green-100 text-green-800 border-green-200' },
+    modified: { label: 'Modified', class: 'bg-yellow-100 text-yellow-800 border-yellow-200' },
+    not_deployed: { label: 'Not Deployed', class: 'bg-orange-100 text-orange-800 border-orange-200' },
+    server_only: { label: 'Server Only', class: 'bg-blue-100 text-blue-800 border-blue-200' },
+    error: { label: 'Error', class: 'bg-red-100 text-red-800 border-red-200' }
   };
 
-  // Handle Escape key to close dialogs
+  function formatRelativeTime(value) {
+    if (!value) return '';
+    const date = new Date(String(value).includes('T') || String(value).includes('Z') ? value : `${String(value).replace(' ', 'T')}Z`);
+    if (isNaN(date.getTime())) return '';
+    const diff = Date.now() - date.getTime();
+    const minutes = Math.round(diff / 60000);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 48) return `${hours}h ago`;
+    return `${Math.round(hours / 24)}d ago`;
+  }
+
   function handleKeydown(event) {
     if (event.key === 'Escape') {
       if (showDiffDialog) showDiffDialog = false;
       else if (showResultsDialog) showResultsDialog = false;
       else if (showDeleteDialog) showDeleteDialog = false;
+      else if (showUploadDialog) closeUploadDialog();
       else if (showSyncDialog) showSyncDialog = false;
     }
   }
@@ -621,7 +813,33 @@
   <div class="flex items-center justify-between">
     <div>
       <h1 class="text-3xl font-bold">E2E Test Flows</h1>
-      <p class="text-muted-foreground">All E2E test flows from the Appmixer instance compared with GitHub</p>
+      <p class="text-muted-foreground">
+        Test flows from GitHub ({data.githubInfo?.branch || 'dev'} branch), grouped by connector, with instance deployment state and run results
+      </p>
+    </div>
+    <div class="flex items-center gap-2">
+      <Button
+        variant="outline"
+        onclick={copyMarkdownReport}
+        disabled={flows.length === 0}
+        title="Copy a markdown report of the listed flows with per-check results"
+      >
+        {#if exportCopied}
+          <Check size={15} class="mr-2 text-green-600" />
+          Copied
+        {:else}
+          <Clipboard size={15} class="mr-2" />
+          Copy Report
+        {/if}
+      </Button>
+      <Button variant="outline" onclick={runScan} disabled={isScanning}>
+        <RefreshCw size={15} class="mr-2 {isScanning ? 'animate-spin' : ''}" />
+        {isScanning ? 'Scanning...' : 'Scan'}
+      </Button>
+      <Button onclick={runAll} disabled={enqueueBusy || stats.deployed === 0}>
+        <PlayCircle size={15} class="mr-2" />
+        Run All
+      </Button>
     </div>
   </div>
 
@@ -641,10 +859,14 @@
     {#if data.githubInfo}
       <div class="flex items-center gap-2 px-3 py-1.5 bg-muted rounded-md">
         <span class="text-muted-foreground">GitHub:</span>
-        <span class="text-blue-600">
-          {data.githubInfo.owner}/{data.githubInfo.repo}
-        </span>
+        <span class="text-blue-600">{data.githubInfo.owner}/{data.githubInfo.repo}</span>
         <Badge variant="outline">{data.githubInfo.branch}</Badge>
+      </div>
+    {/if}
+    {#if data.lastScanAt}
+      <div class="flex items-center gap-2 px-3 py-1.5 bg-muted rounded-md">
+        <span class="text-muted-foreground">Last scan:</span>
+        <span>{formatRelativeTime(data.lastScanAt)}</span>
       </div>
     {/if}
     <a href="/settings" class="flex items-center gap-1 px-3 py-1.5 text-muted-foreground hover:text-foreground transition-colors">
@@ -656,40 +878,176 @@
     </a>
   </div>
 
+  {#if isScanning && scanProgress}
+    <div class="border border-blue-200 bg-blue-50/60 rounded-lg p-4 space-y-2">
+      <div class="flex items-center justify-between text-sm">
+        <span class="font-medium text-blue-900">
+          {scanPhaseLabels[scanProgress.phase] || 'Scanning…'}
+          {#if scanProgress.total}
+            <span class="text-blue-700 font-normal ml-1">({scanProgress.done || 0}/{scanProgress.total})</span>
+          {/if}
+        </span>
+        <span class="text-blue-700 tabular-nums">{Math.round(scanProgressPercent)}%</span>
+      </div>
+      <div class="h-2 rounded-full bg-blue-100 overflow-hidden">
+        <div
+          class="h-full bg-blue-500 rounded-full transition-all duration-300"
+          style="width: {scanProgressPercent}%"
+        ></div>
+      </div>
+    </div>
+  {/if}
+
+  {#if scanError}
+    <div class="bg-red-50 border border-red-200 rounded-lg p-4">
+      <p class="text-red-700 text-sm">Scan failed: {scanError}</p>
+    </div>
+  {/if}
+  {#if scanSummary && !scanSummary.errors?.length}
+    <div class="bg-green-50 border border-green-200 rounded-lg px-4 py-2.5 flex items-center justify-between">
+      <p class="text-sm text-green-800">
+        Scan complete: {scanSummary.total} flows ({scanSummary.deployed} deployed, {scanSummary.serverOnly} server-only)
+      </p>
+      <button type="button" class="text-green-700 hover:text-green-900 text-sm" onclick={() => (scanSummary = null)}>✕</button>
+    </div>
+  {/if}
+  {#if scanSummary?.errors?.length > 0}
+    <div class="bg-amber-50 border border-amber-200 rounded-lg p-4">
+      <p class="text-sm font-medium text-amber-800">Scan finished with {scanSummary.errors.length} warning{scanSummary.errors.length > 1 ? 's' : ''}:</p>
+      <ul class="mt-1 text-xs text-amber-700 max-h-32 overflow-auto">
+        {#each scanSummary.errors as err}
+          <li>- {err}</li>
+        {/each}
+      </ul>
+    </div>
+  {/if}
+  {#if enqueueError}
+    <div class="bg-red-50 border border-red-200 rounded-lg p-4">
+      <p class="text-red-700 text-sm">{enqueueError}</p>
+    </div>
+  {/if}
+
   {#if data.error}
     <div class="bg-red-50 border border-red-200 rounded-lg p-4">
       <p class="text-red-700">{data.error}</p>
     </div>
   {:else}
+    <!-- Runner panel -->
+    {#if runnerActive || runner.recent.length > 0}
+      <div class="border rounded-lg p-4 space-y-3 {runnerActive ? 'bg-emerald-50/50 border-emerald-200' : 'bg-muted/30'}">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-4">
+            <h3 class="font-semibold text-sm">Test Runner</h3>
+            {#if runnerActive}
+              <span class="inline-flex items-center gap-1.5 text-sm text-emerald-700">
+                <svg class="animate-spin h-3.5 w-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Running {runner.running.length}/{data.runnerConfig.maxConcurrent}
+                {#if runner.queued.length > 0}
+                  · {runner.queued.length} queued
+                {/if}
+              </span>
+            {:else}
+              <span class="text-sm text-muted-foreground">Idle</span>
+            {/if}
+          </div>
+          <div class="flex items-center gap-2">
+            {#if runner.queued.length > 0}
+              <Button variant="outline" size="sm" onclick={cancelQueue}>
+                <ListX size={14} class="mr-1.5" />
+                Cancel Queue ({runner.queued.length})
+              </Button>
+            {/if}
+            {#if runnerActive}
+              <Button variant="outline" size="sm" onclick={tickRunner} disabled={ticking}>
+                {ticking ? 'Checking...' : 'Check Now'}
+              </Button>
+            {/if}
+          </div>
+        </div>
+
+        {#if runner.running.length > 0}
+          <div class="flex flex-wrap gap-2">
+            {#each runner.running as run (run.id)}
+              <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800 border border-emerald-200">
+                <svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                {run.flowName}
+                <span class="text-emerald-600 font-normal">{formatRelativeTime(run.startedAt)}</span>
+              </span>
+            {/each}
+          </div>
+        {/if}
+
+        {#if runner.recent.length > 0}
+          <div class="flex flex-wrap gap-1.5 items-center">
+            <span class="text-xs text-muted-foreground">Recent:</span>
+            {#each runner.recent.slice(0, 10) as run (run.id)}
+              <span
+                class="inline-flex items-center px-2 py-0.5 rounded-full text-xs border
+                  {run.state === 'passed' ? 'bg-green-50 text-green-700 border-green-200' : ''}
+                  {run.state === 'failed' ? 'bg-red-50 text-red-700 border-red-200' : ''}
+                  {run.state === 'timeout' ? 'bg-orange-50 text-orange-700 border-orange-200' : ''}
+                  {run.state === 'error' ? 'bg-red-50 text-red-700 border-red-200' : ''}"
+                title={run.error || run.state}
+              >
+                {run.state === 'passed' ? '✓' : '✗'} {run.flowName}
+              </span>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
+
     <!-- Stats -->
     <div class="flex flex-col lg:flex-row gap-4">
-      <!-- Flow Status -->
-      <div class="space-y-2">
-        <h3 class="text-xs font-medium text-muted-foreground uppercase tracking-wider">Flow Status</h3>
-        <div class="grid grid-cols-3 gap-3">
+      <!-- Deployment -->
+      <div class="space-y-2 flex-1">
+        <h3 class="text-xs font-medium text-muted-foreground uppercase tracking-wider">Deployment (GitHub → Instance)</h3>
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
           <button
             type="button"
-            onclick={() => { syncFilter = ''; runningFilter = ''; }}
-            class="border rounded-lg p-4 text-left hover:bg-muted/50 transition-colors cursor-pointer {syncFilter === '' && runningFilter === '' ? 'ring-2 ring-primary' : ''}"
+            onclick={() => { syncFilter = ''; resultFilter = ''; }}
+            class="border rounded-lg p-3 text-left hover:bg-muted/50 transition-colors cursor-pointer {syncFilter === '' && resultFilter === '' ? 'ring-2 ring-primary' : ''}"
           >
             <div class="text-2xl font-bold">{stats.total}</div>
-            <div class="text-sm text-muted-foreground">Total</div>
+            <div class="text-xs text-muted-foreground">Total Flows</div>
           </button>
           <button
             type="button"
-            onclick={() => runningFilter = runningFilter === 'running' ? '' : 'running'}
-            class="border rounded-lg p-4 bg-emerald-50 text-left hover:bg-emerald-100 transition-colors cursor-pointer {runningFilter === 'running' ? 'ring-2 ring-emerald-500' : ''}"
+            onclick={() => syncFilter = syncFilter === 'match' ? '' : 'match'}
+            class="border rounded-lg p-3 bg-green-50 text-left hover:bg-green-100 transition-colors cursor-pointer {syncFilter === 'match' ? 'ring-2 ring-green-500' : ''}"
           >
-            <div class="text-2xl font-bold text-emerald-700">{stats.running}</div>
-            <div class="text-sm font-medium text-emerald-600">Running</div>
+            <div class="text-2xl font-bold text-green-700">{stats.match}</div>
+            <div class="text-xs font-medium text-green-600">In Sync</div>
           </button>
           <button
             type="button"
-            onclick={() => runningFilter = runningFilter === 'stopped' ? '' : 'stopped'}
-            class="border rounded-lg p-4 bg-gray-50 text-left hover:bg-gray-100 transition-colors cursor-pointer {runningFilter === 'stopped' ? 'ring-2 ring-gray-400' : ''}"
+            onclick={() => syncFilter = syncFilter === 'modified' ? '' : 'modified'}
+            class="border rounded-lg p-3 bg-yellow-50 text-left hover:bg-yellow-100 transition-colors cursor-pointer {syncFilter === 'modified' ? 'ring-2 ring-yellow-500' : ''}"
           >
-            <div class="text-2xl font-bold text-gray-700">{stats.stopped}</div>
-            <div class="text-sm font-medium text-gray-600">Stopped</div>
+            <div class="text-2xl font-bold text-yellow-700">{stats.modified}</div>
+            <div class="text-xs font-medium text-yellow-600">Modified</div>
+          </button>
+          <button
+            type="button"
+            onclick={() => syncFilter = syncFilter === 'not_deployed' ? '' : 'not_deployed'}
+            class="border rounded-lg p-3 bg-orange-50 text-left hover:bg-orange-100 transition-colors cursor-pointer {syncFilter === 'not_deployed' ? 'ring-2 ring-orange-500' : ''}"
+          >
+            <div class="text-2xl font-bold text-orange-700">{stats.notDeployed}</div>
+            <div class="text-xs font-medium text-orange-600">Not Deployed</div>
+          </button>
+          <button
+            type="button"
+            onclick={() => syncFilter = syncFilter === 'server_only' ? '' : 'server_only'}
+            class="border rounded-lg p-3 bg-blue-50 text-left hover:bg-blue-100 transition-colors cursor-pointer {syncFilter === 'server_only' ? 'ring-2 ring-blue-500' : ''}"
+          >
+            <div class="text-2xl font-bold text-blue-700">{stats.serverOnly}</div>
+            <div class="text-xs font-medium text-blue-600">Server Only</div>
           </button>
         </div>
       </div>
@@ -698,57 +1056,33 @@
       <div class="hidden lg:block w-px bg-border self-stretch"></div>
       <div class="lg:hidden h-px bg-border"></div>
 
-      <!-- GitHub Sync -->
-      <div class="space-y-2 flex-1">
-        <h3 class="text-xs font-medium text-muted-foreground uppercase tracking-wider">GitHub Sync</h3>
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <!-- Results -->
+      <div class="space-y-2">
+        <h3 class="text-xs font-medium text-muted-foreground uppercase tracking-wider">Last Run Results</h3>
+        <div class="grid grid-cols-3 gap-3">
           <button
             type="button"
-            onclick={() => syncFilter = syncFilter === 'match' ? '' : 'match'}
-            class="border rounded-lg p-4 bg-green-50 text-left hover:bg-green-100 transition-colors cursor-pointer {syncFilter === 'match' ? 'ring-2 ring-green-500' : ''}"
+            onclick={() => resultFilter = resultFilter === 'passed' ? '' : 'passed'}
+            class="border rounded-lg p-3 bg-green-50 text-left hover:bg-green-100 transition-colors cursor-pointer {resultFilter === 'passed' ? 'ring-2 ring-green-500' : ''}"
           >
-            {#if syncStatusLoading}
-              <div class="text-2xl font-bold text-green-700/50">...</div>
-            {:else}
-              <div class="text-2xl font-bold text-green-700">{stats.match}</div>
-            {/if}
-            <div class="text-sm font-medium text-green-600">In Sync</div>
+            <div class="text-2xl font-bold text-green-700">{stats.passed}</div>
+            <div class="text-xs font-medium text-green-600">Passed</div>
           </button>
           <button
             type="button"
-            onclick={() => syncFilter = syncFilter === 'modified' ? '' : 'modified'}
-            class="border rounded-lg p-4 bg-yellow-50 text-left hover:bg-yellow-100 transition-colors cursor-pointer {syncFilter === 'modified' ? 'ring-2 ring-yellow-500' : ''}"
+            onclick={() => resultFilter = resultFilter === 'failed' ? '' : 'failed'}
+            class="border rounded-lg p-3 bg-red-50 text-left hover:bg-red-100 transition-colors cursor-pointer {resultFilter === 'failed' ? 'ring-2 ring-red-500' : ''}"
           >
-            {#if syncStatusLoading}
-              <div class="text-2xl font-bold text-yellow-700/50">...</div>
-            {:else}
-              <div class="text-2xl font-bold text-yellow-700">{stats.modified}</div>
-            {/if}
-            <div class="text-sm font-medium text-yellow-600">Modified</div>
+            <div class="text-2xl font-bold text-red-700">{stats.failed}</div>
+            <div class="text-xs font-medium text-red-600">Failed</div>
           </button>
           <button
             type="button"
-            onclick={() => syncFilter = syncFilter === 'server_only' ? '' : 'server_only'}
-            class="border rounded-lg p-4 bg-blue-50 text-left hover:bg-blue-100 transition-colors cursor-pointer {syncFilter === 'server_only' ? 'ring-2 ring-blue-500' : ''}"
+            onclick={() => resultFilter = resultFilter === 'none' ? '' : 'none'}
+            class="border rounded-lg p-3 bg-gray-50 text-left hover:bg-gray-100 transition-colors cursor-pointer {resultFilter === 'none' ? 'ring-2 ring-gray-400' : ''}"
           >
-            {#if syncStatusLoading}
-              <div class="text-2xl font-bold text-blue-700/50">...</div>
-            {:else}
-              <div class="text-2xl font-bold text-blue-700">{stats.serverOnly}</div>
-            {/if}
-            <div class="text-sm font-medium text-blue-600">Server Only</div>
-          </button>
-          <button
-            type="button"
-            onclick={() => syncFilter = syncFilter === 'error' ? '' : 'error'}
-            class="border rounded-lg p-4 bg-red-50 text-left hover:bg-red-100 transition-colors cursor-pointer {syncFilter === 'error' ? 'ring-2 ring-red-500' : ''}"
-          >
-            {#if syncStatusLoading}
-              <div class="text-2xl font-bold text-red-700/50">...</div>
-            {:else}
-              <div class="text-2xl font-bold text-red-700">{stats.error}</div>
-            {/if}
-            <div class="text-sm font-medium text-red-600">Errors</div>
+            <div class="text-2xl font-bold text-gray-700">{stats.neverRan}</div>
+            <div class="text-xs font-medium text-gray-600">No Result</div>
           </button>
         </div>
       </div>
@@ -772,28 +1106,31 @@
         {/each}
       </select>
       <select
-        bind:value={runningFilter}
-        class="px-3 py-2 border rounded-md bg-background text-sm"
-      >
-        <option value="">All Statuses</option>
-        <option value="running">Running</option>
-        <option value="stopped">Stopped</option>
-      </select>
-      <select
         bind:value={syncFilter}
         class="px-3 py-2 border rounded-md bg-background text-sm"
       >
         <option value="">All Sync Status</option>
         <option value="match">In Sync</option>
         <option value="modified">Modified</option>
+        <option value="not_deployed">Not Deployed</option>
         <option value="server_only">Server Only</option>
         <option value="error">Error</option>
       </select>
-      {#if searchQuery || connectorFilter || syncFilter || runningFilter}
+      <select
+        bind:value={resultFilter}
+        class="px-3 py-2 border rounded-md bg-background text-sm"
+      >
+        <option value="">All Results</option>
+        <option value="passed">Passed</option>
+        <option value="failed">Failed</option>
+        <option value="none">No Result</option>
+        <option value="active">Running / Queued</option>
+      </select>
+      {#if searchQuery || connectorFilter || syncFilter || resultFilter}
         <Button
           variant="ghost"
           size="sm"
-          onclick={() => { searchQuery = ''; connectorFilter = ''; syncFilter = ''; runningFilter = ''; }}
+          onclick={() => { searchQuery = ''; connectorFilter = ''; syncFilter = ''; resultFilter = ''; }}
         >
           Clear filters
         </Button>
@@ -802,240 +1139,327 @@
 
     <!-- Results count -->
     <p class="text-sm text-muted-foreground">
-      Showing {Math.min((currentPage - 1) * PAGE_SIZE + 1, filteredFlows.length)}–{Math.min(currentPage * PAGE_SIZE, filteredFlows.length)} of {filteredFlows.length} flows
+      {filteredFlows.length} flow{filteredFlows.length !== 1 ? 's' : ''} in {groupedFlows.length} connector{groupedFlows.length !== 1 ? 's' : ''}
       {#if filteredFlows.length !== flows.length}
         <span class="text-muted-foreground/60">(filtered from {flows.length})</span>
       {/if}
-      {#if syncStatusLoading}
-        <span class="ml-2 text-muted-foreground/60">— Loading sync statuses...</span>
-      {/if}
     </p>
 
-    <!-- Flows Table -->
-    {#if filteredFlows.length === 0}
+    <!-- Grouped flows -->
+    {#if flows.length === 0}
       <div class="text-center py-12 border rounded-lg bg-muted/50">
-        <p class="text-muted-foreground">No E2E flows found</p>
+        <p class="text-muted-foreground">No E2E flows cached yet.</p>
+        <Button class="mt-4" onclick={runScan} disabled={isScanning}>
+          <RefreshCw size={15} class="mr-2 {isScanning ? 'animate-spin' : ''}" />
+          {isScanning ? 'Scanning...' : 'Run First Scan'}
+        </Button>
+      </div>
+    {:else if filteredFlows.length === 0}
+      <div class="text-center py-12 border rounded-lg bg-muted/50">
+        <p class="text-muted-foreground">No flows match the current filters</p>
       </div>
     {:else}
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead class="w-12">
-              {#if selectableFlows.length > 0}
-                <Checkbox
-                  checked={allSelectableSelected}
-                  onCheckedChange={toggleSelectAll}
-                  aria-label="Select all syncable flows"
-                />
-              {/if}
-            </TableHead>
-            <TableHead>Connector</TableHead>
-            <TableHead>Flow Name</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead>Sync Status</TableHead>
-            <TableHead>Actions</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {#each paginatedFlows as flow (flow.flowId)}
-            {@const selectable = isSelectable(flow)}
-            <TableRow class={selectedFlowIds.has(flow.flowId) ? 'bg-muted/50' : ''}>
-              <TableCell>
-                {#if selectable}
+      <div class="space-y-4">
+        {#each groupedFlows as group (group.connector)}
+          {@const groupSelectable = group.flows.filter(isSelectable)}
+          {@const groupAllSelected =
+            groupSelectable.length > 0 &&
+            groupSelectable.every((f) => selectedFlowNames.has(f.flowName))}
+          <div class="border rounded-lg overflow-hidden">
+            <!-- Group header -->
+            <div class="flex items-center justify-between px-4 py-2.5 bg-muted/40 border-b">
+              <div class="flex items-center gap-3">
+                {#if groupSelectable.length > 0}
                   <Checkbox
-                    checked={selectedFlowIds.has(flow.flowId)}
-                    onCheckedChange={() => toggleFlowSelection(flow.flowId)}
-                    aria-label="Select {flow.name}"
+                    checked={groupAllSelected}
+                    onCheckedChange={() => toggleGroupSelection(groupSelectable, groupAllSelected)}
+                    aria-label="Select all actionable flows of {group.connector}"
                   />
                 {/if}
-              </TableCell>
-              <TableCell>
-                {#if flow.connector}
-                  <Badge variant="outline">{flow.connector}</Badge>
-                {:else}
-                  <span class="text-muted-foreground text-sm">Unknown</span>
+                <span class="font-semibold">{group.connector}</span>
+                <span class="text-xs text-muted-foreground">
+                  {group.flows.length} flow{group.flows.length !== 1 ? 's' : ''} · {group.deployed} deployed
+                </span>
+                {#if group.passed > 0}
+                  <span class="text-xs text-green-600 font-medium">✓ {group.passed}</span>
                 {/if}
-              </TableCell>
-              <TableCell>
-                <span class="font-medium">{flow.name}</span>
-                {#if flow.flowId}
-                  <div class="text-xs text-muted-foreground font-mono">{flow.flowId}</div>
+                {#if group.failed > 0}
+                  <span class="text-xs text-red-600 font-medium">✗ {group.failed}</span>
                 {/if}
-              </TableCell>
-              <TableCell>
-                {#if flow.running}
-                  <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border bg-emerald-100 text-emerald-800 border-emerald-200">
-                    Running
+                {#if group.accountAvailable === true}
+                  <span
+                    class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border bg-emerald-50 text-emerald-700 border-emerald-200"
+                    title="A service account for this connector exists on the instance"
+                  >
+                    Account
                   </span>
-                {:else}
-                  <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border bg-gray-100 text-gray-600 border-gray-200">
-                    Stopped
-                  </span>
-                {/if}
-              </TableCell>
-              <TableCell>
-                {#if flow.syncStatus === null}
-                  <div class="inline-flex items-center px-2.5 py-0.5 rounded-full h-5 min-w-20 bg-gradient-to-r from-muted via-muted/50 to-muted animate-pulse">
-                  </div>
-                {:else}
-                  {@const config = syncStatusConfig[flow.syncStatus] || syncStatusConfig.error}
-                  <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border {config.class}">
-                    {config.label}
+                {:else if group.accountAvailable === false}
+                  <span
+                    class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border bg-amber-50 text-amber-800 border-amber-200"
+                    title="No service account for this connector on the instance — flows will not run until one is connected"
+                  >
+                    No account
                   </span>
                 {/if}
-              </TableCell>
-              <TableCell>
-                <div class="flex items-center gap-1">
-                  <a
-                    href={flow.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    class="inline-flex items-center justify-center rounded-md p-1.5 text-blue-600 hover:bg-blue-50 transition-colors"
-                    title="Open in Designer"
-                  >
-                    <ExternalLink size={15} />
-                  </a>
-                  {#if flow.githubUrl}
-                    <a
-                      href={flow.githubUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      class="inline-flex items-center justify-center rounded-md p-1.5 text-gray-600 hover:bg-gray-100 transition-colors"
-                      title="View on GitHub"
-                    >
-                      <Github size={15} />
-                    </a>
-                  {:else if flow.syncStatus === null}
-                    <div class="inline-flex items-center justify-center rounded-md p-1.5 w-6 h-6 bg-gradient-to-r from-muted via-muted/50 to-muted animate-pulse">
-                    </div>
-                  {/if}
-                  {#if flow.syncStatus === 'modified'}
-                    <button
-                      type="button"
-                      onclick={() => openDiff(flow)}
-                      class="inline-flex items-center justify-center rounded-md p-1.5 text-yellow-600 hover:bg-yellow-50 transition-colors"
-                      title="View changes"
-                    >
-                      <FileDiff size={15} />
-                    </button>
-                  {:else if flow.syncStatus === null}
-                    <div class="inline-flex items-center justify-center rounded-md p-1.5 w-6 h-6 bg-gradient-to-r from-muted via-muted/50 to-muted animate-pulse">
-                    </div>
-                  {/if}
-                  <button
-                    type="button"
-                    onclick={() => openResults(flow)}
-                    class="inline-flex items-center justify-center rounded-md p-1.5 text-gray-600 hover:bg-gray-100 transition-colors"
-                    title="View E2E results"
-                  >
-                    <FileText size={15} />
-                  </button>
-                  <button
-                    type="button"
-                    onclick={() => toggleFlow(flow)}
-                    disabled={togglingFlowIds.has(flow.flowId)}
-                    class="inline-flex items-center justify-center rounded-md p-1.5 transition-colors {flow.running ? 'text-amber-600 hover:bg-amber-50' : 'text-emerald-600 hover:bg-emerald-50'} disabled:opacity-50 disabled:pointer-events-none"
-                    title={flow.running ? 'Stop flow' : 'Start flow'}
-                  >
-                    {#if togglingFlowIds.has(flow.flowId)}
-                      <svg class="animate-spin h-[15px] w-[15px]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                      </svg>
-                    {:else if flow.running}
-                      <Square size={15} />
-                    {:else}
-                      <Play size={15} />
-                    {/if}
-                  </button>
-                  <button
-                    type="button"
-                    onclick={() => confirmDelete(flow)}
-                    class="inline-flex items-center justify-center rounded-md p-1.5 text-red-600 hover:bg-red-50 transition-colors"
-                    title="Remove from Appmixer"
-                  >
-                    <Trash2 size={15} />
-                  </button>
-                </div>
-              </TableCell>
-            </TableRow>
-          {/each}
-        </TableBody>
-      </Table>
-    {/if}
+              </div>
+              {#if group.deployed > 0}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onclick={() => runConnector(group.connector)}
+                  disabled={enqueueBusy}
+                  title="Queue all deployed flows of this connector"
+                >
+                  <Play size={13} class="mr-1.5" />
+                  Run
+                </Button>
+              {/if}
+            </div>
 
-    <!-- Pagination -->
-    {#if totalPages > 1}
-      <div class="flex items-center justify-between">
-        <p class="text-sm text-muted-foreground">
-          Page {currentPage} of {totalPages}
-        </p>
-        <div class="flex items-center gap-1">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={currentPage === 1}
-            onclick={() => currentPage = 1}
-          >
-            First
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={currentPage === 1}
-            onclick={() => currentPage--}
-          >
-            Previous
-          </Button>
-          {#each visiblePages() as page, idx}
-            {#if idx > 0 && page - visiblePages()[idx - 1] > 1}
-              <span class="px-1 text-muted-foreground text-sm">...</span>
-            {/if}
-            <Button
-              variant={page === currentPage ? 'default' : 'outline'}
-              size="sm"
-              onclick={() => currentPage = page}
-            >
-              {page}
-            </Button>
-          {/each}
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={currentPage === totalPages}
-            onclick={() => currentPage++}
-          >
-            Next
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={currentPage === totalPages}
-            onclick={() => currentPage = totalPages}
-          >
-            Last
-          </Button>
-        </div>
+            <!-- Group rows -->
+            <table class="w-full text-sm">
+              <tbody class="divide-y">
+                {#each group.flows as flow (flow.flowName)}
+                  {@const isRunning = runningNames.has(flow.flowName)}
+                  {@const isQueued = queuedNames.has(flow.flowName)}
+                  {@const selectable = isSelectable(flow)}
+                  {@const syncConfig = syncStatusConfig[flow.syncStatus] || syncStatusConfig.error}
+                  <tr class="hover:bg-muted/30 {selectedFlowNames.has(flow.flowName) ? 'bg-muted/50' : ''}">
+                    <td class="w-10 px-4 py-2">
+                      {#if selectable}
+                        <Checkbox
+                          checked={selectedFlowNames.has(flow.flowName)}
+                          onCheckedChange={() => toggleFlowSelection(flow.flowName)}
+                          aria-label="Select {flow.flowName}"
+                        />
+                      {/if}
+                    </td>
+                    <td class="px-2 py-2">
+                      <span class="font-medium">{flow.flowName}</span>
+                      {#if flow.githubPath}
+                        <div class="text-xs text-muted-foreground font-mono">{flow.githubPath}</div>
+                      {:else if flow.flowId}
+                        <div class="text-xs text-muted-foreground font-mono">{flow.flowId}</div>
+                      {/if}
+                    </td>
+                    <td class="px-2 py-2 w-32">
+                      <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border {syncConfig.class}">
+                        {syncConfig.label}
+                      </span>
+                    </td>
+                    <td class="px-2 py-2 w-40">
+                      {#if isRunning}
+                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border bg-emerald-100 text-emerald-800 border-emerald-200">
+                          <svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                          </svg>
+                          Running
+                        </span>
+                      {:else if isQueued}
+                        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border bg-sky-100 text-sky-800 border-sky-200">
+                          Queued
+                        </span>
+                      {:else if flow.lastResult === 'passed'}
+                        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border bg-green-100 text-green-800 border-green-200" title={flow.lastResultAt}>
+                          ✓ Passed
+                        </span>
+                        <span class="text-xs text-muted-foreground ml-1">{formatRelativeTime(flow.lastResultAt)}</span>
+                      {:else if flow.lastResult === 'failed'}
+                        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border bg-red-100 text-red-800 border-red-200" title={flow.lastResultAt}>
+                          ✗ Failed
+                        </span>
+                        <span class="text-xs text-muted-foreground ml-1">{formatRelativeTime(flow.lastResultAt)}</span>
+                      {:else}
+                        <span class="text-xs text-muted-foreground">—</span>
+                      {/if}
+                      {#if flow.stage === 'running' && !isRunning}
+                        <span class="ml-1 inline-block w-2 h-2 rounded-full bg-emerald-500" title="Flow is running on the instance"></span>
+                      {/if}
+                    </td>
+                    <td class="px-4 py-2 w-52">
+                      <div class="flex items-center gap-1 justify-end">
+                        {#if flow.flowId}
+                          <button
+                            type="button"
+                            onclick={() => runFlow(flow)}
+                            disabled={enqueueBusy || isRunning || isQueued}
+                            class="inline-flex items-center justify-center rounded-md p-1.5 text-emerald-600 hover:bg-emerald-50 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+                            title="Run E2E test"
+                          >
+                            <Play size={15} />
+                          </button>
+                        {/if}
+                        {#if flow.lastResultDetail}
+                          <button
+                            type="button"
+                            onclick={() => openResults(flow)}
+                            class="inline-flex items-center justify-center rounded-md p-1.5 text-gray-600 hover:bg-gray-100 transition-colors"
+                            title="View last run details"
+                          >
+                            <FileText size={15} />
+                          </button>
+                        {/if}
+                        {#if flow.syncStatus === 'modified'}
+                          <button
+                            type="button"
+                            onclick={() => openDiff(flow)}
+                            class="inline-flex items-center justify-center rounded-md p-1.5 text-yellow-600 hover:bg-yellow-50 transition-colors"
+                            title="View changes (instance vs GitHub)"
+                          >
+                            <FileDiff size={15} />
+                          </button>
+                        {/if}
+                        {#if flow.url}
+                          <a
+                            href={flow.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            class="inline-flex items-center justify-center rounded-md p-1.5 text-blue-600 hover:bg-blue-50 transition-colors"
+                            title="Open in Designer"
+                          >
+                            <ExternalLink size={15} />
+                          </a>
+                        {/if}
+                        {#if flow.githubUrl}
+                          <a
+                            href={flow.githubUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            class="inline-flex items-center justify-center rounded-md p-1.5 text-gray-600 hover:bg-gray-100 transition-colors"
+                            title="View on GitHub"
+                          >
+                            <Github size={15} />
+                          </a>
+                        {/if}
+                        {#if flow.flowId}
+                          <button
+                            type="button"
+                            onclick={() => toggleFlow(flow)}
+                            disabled={togglingFlowNames.has(flow.flowName)}
+                            class="inline-flex items-center justify-center rounded-md p-1.5 transition-colors {flow.stage === 'running' ? 'text-amber-600 hover:bg-amber-50' : 'text-gray-400 hover:bg-gray-100'} disabled:opacity-50 disabled:pointer-events-none"
+                            title={flow.stage === 'running' ? 'Stop flow' : 'Start flow (without runner)'}
+                          >
+                            {#if togglingFlowNames.has(flow.flowName)}
+                              <svg class="animate-spin h-[15px] w-[15px]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                              </svg>
+                            {:else if flow.stage === 'running'}
+                              <Square size={15} />
+                            {:else}
+                              <Play size={15} class="opacity-60" />
+                            {/if}
+                          </button>
+                          <button
+                            type="button"
+                            onclick={() => confirmDelete(flow)}
+                            class="inline-flex items-center justify-center rounded-md p-1.5 text-red-600 hover:bg-red-50 transition-colors"
+                            title="Remove from Appmixer"
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        {/if}
+                      </div>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/each}
       </div>
     {/if}
 
     <!-- Floating Action Bar -->
-    {#if selectedFlowIds.size > 0}
+    {#if selectedFlowNames.size > 0}
       <div class="fixed bottom-6 left-1/2 -translate-x-1/2 bg-background border shadow-lg rounded-lg px-4 py-3 flex items-center gap-4 z-50">
         <span class="text-sm font-medium">
-          {selectedFlowIds.size} flow{selectedFlowIds.size > 1 ? 's' : ''} selected
+          {selectedFlowNames.size} flow{selectedFlowNames.size > 1 ? 's' : ''} selected
         </span>
         <div class="h-4 w-px bg-border"></div>
         <Button variant="outline" size="sm" onclick={clearSelection}>
           Clear
         </Button>
-        <Button size="sm" onclick={openSyncDialog}>
-          Sync to GitHub
+        <Button
+          variant="outline"
+          size="sm"
+          onclick={openUploadDialog}
+          disabled={uploadableFlows.length === 0}
+          title="Overwrite/create the selected flows on the instance from their GitHub version"
+        >
+          Upload to Instance{uploadableFlows.length ? ` (${uploadableFlows.length})` : ''}
+        </Button>
+        <Button size="sm" onclick={openSyncDialog} disabled={syncableFlows.length === 0}>
+          Sync to GitHub{syncableFlows.length ? ` (${syncableFlows.length})` : ''}
         </Button>
       </div>
     {/if}
   {/if}
 </div>
+
+<!-- Upload to Instance Dialog -->
+<Dialog bind:open={showUploadDialog}>
+  <DialogContent class="max-w-2xl max-h-[85vh] flex flex-col">
+    <DialogHeader>
+      <DialogTitle>Upload Flows to Instance</DialogTitle>
+      <DialogDescription>
+        Deploy the GitHub version of the selected flows to the Appmixer instance.
+        Existing flows are overwritten, missing ones are created; accounts are bound automatically.
+      </DialogDescription>
+    </DialogHeader>
+
+    <div class="py-2 overflow-auto flex-1 min-h-0">
+      <div class="border rounded-lg divide-y">
+        {#each uploadRows as row (row.flowName)}
+          <div class="flex items-center gap-3 px-3 py-2 text-sm">
+            <span class="w-5 text-center shrink-0">
+              {#if row.state === 'pending'}
+                <span class="text-muted-foreground">·</span>
+              {:else if row.state === 'uploading'}
+                <svg class="animate-spin h-3.5 w-3.5 text-blue-600 inline" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+              {:else if row.state === 'done'}
+                <span class="text-green-600">✓</span>
+              {:else if row.state === 'warning'}
+                <span class="text-amber-600">⚠</span>
+              {:else}
+                <span class="text-red-600">✗</span>
+              {/if}
+            </span>
+            <span class="font-medium flex-1 min-w-0 truncate">{row.flowName}</span>
+            <span class="text-xs shrink-0 max-w-[45%] truncate {row.state === 'error' ? 'text-red-600' : row.state === 'warning' ? 'text-amber-700' : 'text-muted-foreground'}" title={row.detail}>
+              {row.detail}
+            </span>
+          </div>
+        {/each}
+      </div>
+    </div>
+
+    <DialogFooter>
+      {#if uploadFinished}
+        <Button onclick={closeUploadDialog}>Close</Button>
+      {:else}
+        <Button variant="outline" onclick={closeUploadDialog} disabled={isUploading}>
+          Cancel
+        </Button>
+        <Button onclick={performUpload} disabled={isUploading}>
+          {#if isUploading}
+            <svg class="animate-spin -ml-1 mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Uploading…
+          {:else}
+            Upload {uploadRows.length} flow{uploadRows.length !== 1 ? 's' : ''}
+          {/if}
+        </Button>
+      {/if}
+    </DialogFooter>
+  </DialogContent>
+</Dialog>
 
 <!-- Sync to GitHub Dialog -->
 <Dialog bind:open={showSyncDialog}>
@@ -1048,7 +1472,6 @@
     </DialogHeader>
 
     {#if syncResult?.success}
-      <!-- Success state -->
       <div class="py-6 text-center space-y-4">
         <div class="w-16 h-16 mx-auto bg-green-100 rounded-full flex items-center justify-center">
           <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-green-600">
@@ -1068,11 +1491,7 @@
           class="inline-flex items-center gap-2 text-blue-600 hover:underline font-medium"
         >
           View Pull Request #{syncResult.prNumber}
-          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-            <polyline points="15 3 21 3 21 9"/>
-            <line x1="10" y1="14" x2="21" y2="3"/>
-          </svg>
+          <ExternalLink size={16} />
         </a>
         {#if syncResult.errors?.length > 0}
           <div class="mt-4 text-left bg-amber-50 border border-amber-200 rounded-lg p-3">
@@ -1089,7 +1508,6 @@
         <Button onclick={closeSyncDialog}>Close</Button>
       </DialogFooter>
     {:else}
-      <!-- Form state -->
       <div class="py-4 space-y-4">
         <div class="space-y-2">
           <label for="pr-title" class="text-sm font-medium">PR Title</label>
@@ -1127,7 +1545,7 @@
         </div>
 
         <div class="space-y-2">
-          <p class="text-sm font-medium">Flows to sync ({selectedFlows.length})</p>
+          <p class="text-sm font-medium">Flows to sync ({syncableFlows.length})</p>
           <div class="max-h-48 overflow-y-auto border rounded-lg">
             <table class="w-full text-sm">
               <thead class="bg-muted/50 sticky top-0">
@@ -1137,14 +1555,14 @@
                 </tr>
               </thead>
               <tbody class="divide-y">
-                {#each selectedFlows as flow}
+                {#each syncableFlows as flow}
                   <tr>
                     <td class="px-3 py-2">
-                      <span class="font-medium">{flow.name}</span>
+                      <span class="font-medium">{flow.flowName}</span>
                       <Badge variant="outline" class="ml-2 text-xs">{flow.syncStatus === 'modified' ? 'Modified' : 'New'}</Badge>
                     </td>
                     <td class="px-3 py-2 text-muted-foreground font-mono text-xs">
-                      {flow.githubPath || generateFlowPath(flow.connector, flow.name)}
+                      {flow.githubPath || generateFlowPath(flow.connector, flow.flowName)}
                     </td>
                   </tr>
                 {/each}
@@ -1193,7 +1611,7 @@
     <div class="py-4">
       {#if flowToDelete}
         <div class="bg-muted rounded-lg p-4">
-          <p class="font-medium">{flowToDelete.name}</p>
+          <p class="font-medium">{flowToDelete.flowName}</p>
           {#if flowToDelete.connector}
             <p class="text-sm text-muted-foreground mt-1">Connector: {flowToDelete.connector}</p>
           {/if}
@@ -1236,7 +1654,7 @@
       <DialogTitle>Flow Changes</DialogTitle>
       <DialogDescription>
         {#if diffFlow}
-          Comparing <span class="font-medium">{diffFlow.name}</span> — instance vs GitHub
+          Comparing <span class="font-medium">{diffFlow.flowName}</span> — instance vs GitHub
           {#if diffData?.githubPath}
             <span class="text-muted-foreground">({diffData.githubPath})</span>
           {/if}
@@ -1300,7 +1718,7 @@
             </svg>
             Reverting...
           {:else}
-            Revert
+            Revert to GitHub Version
           {/if}
         </Button>
       {/if}
@@ -1309,43 +1727,34 @@
   </DialogContent>
 </Dialog>
 
-<!-- E2E Results Dialog -->
+<!-- E2E Results Dialog (cached last run) -->
 <Dialog bind:open={showResultsDialog}>
   <DialogContent class="max-w-6xl max-h-[85vh] flex flex-col">
     <DialogHeader>
       <DialogTitle>E2E Test Run Details</DialogTitle>
       <DialogDescription>
         {#if resultsFlow}
-          Latest run for <span class="font-medium">{resultsFlow.name}</span>
+          Latest run for <span class="font-medium">{resultsFlow.flowName}</span>
+          {#if resultsFlow.lastResultAt}
+            <span class="text-muted-foreground">({formatRelativeTime(resultsFlow.lastResultAt)})</span>
+          {/if}
         {/if}
       </DialogDescription>
     </DialogHeader>
 
-    {#if isResultsLoading}
-      <div class="flex items-center justify-center py-12">
-        <svg class="animate-spin h-6 w-6 text-muted-foreground" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-        </svg>
-        <span class="ml-2 text-sm text-muted-foreground">Loading E2E results...</span>
-      </div>
-    {:else if resultsError}
-      <div class="bg-red-50 border border-red-200 rounded-lg p-4">
-        <p class="text-red-700 text-sm">{resultsError}</p>
-      </div>
-    {:else if resultsData}
+    {#if resultsFlow}
       <div class="space-y-6 overflow-auto flex-1 pr-1">
         <div class="border rounded-lg overflow-hidden">
           <table class="w-full text-sm">
             <tbody class="divide-y">
               <tr>
                 <td class="w-44 font-medium bg-muted/30 px-3 py-2">Name</td>
-                <td class="px-3 py-2">{resultsData.name}</td>
+                <td class="px-3 py-2">{resultsFlow.flowName}</td>
               </tr>
               <tr>
-                <td class="font-medium bg-muted/30 px-3 py-2">URL</td>
+                <td class="font-medium bg-muted/30 px-3 py-2">Designer</td>
                 <td class="px-3 py-2">
-                  {#if resultsFlow?.url}
+                  {#if resultsFlow.url}
                     <a href={resultsFlow.url} target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline break-all">{resultsFlow.url}</a>
                   {:else}
                     <span class="text-muted-foreground">N/A</span>
@@ -1354,15 +1763,19 @@
               </tr>
               <tr>
                 <td class="font-medium bg-muted/30 px-3 py-2">Status</td>
-                <td class="px-3 py-2">{resultsData.status}</td>
+                <td class="px-3 py-2">
+                  {#if resultsFlow.lastResult === 'passed'}
+                    <span class="text-green-700 font-medium">Passed</span>
+                  {:else if resultsFlow.lastResult === 'failed'}
+                    <span class="text-red-700 font-medium">Failed</span>
+                  {:else}
+                    <span class="text-muted-foreground">Unknown</span>
+                  {/if}
+                </td>
               </tr>
               <tr>
-                <td class="font-medium bg-muted/30 px-3 py-2">Failed asserts</td>
-                <td class="px-3 py-2">{resultsData.failedAsserts}</td>
-              </tr>
-              <tr>
-                <td class="font-medium bg-muted/30 px-3 py-2">Total asserts</td>
-                <td class="px-3 py-2">{resultsData.totalAsserts}</td>
+                <td class="font-medium bg-muted/30 px-3 py-2">Failed components</td>
+                <td class="px-3 py-2">{resultsDetails.filter(d => d.status === 'failed').length} / {resultsDetails.length}</td>
               </tr>
             </tbody>
           </table>
@@ -1374,23 +1787,24 @@
               <tr>
                 <th class="text-left px-3 py-2 font-medium">Component</th>
                 <th class="text-left px-3 py-2 font-medium w-20">Status</th>
-                <th class="text-left px-3 py-2 font-medium w-20">Asserts</th>
-                <th class="text-left px-3 py-2 font-medium">Errors</th>
+                <th class="text-left px-3 py-2 font-medium">Checks</th>
                 <th class="text-left px-3 py-2 font-medium">ComponentId</th>
               </tr>
             </thead>
             <tbody class="divide-y">
-              {#if resultsData.details?.length > 0}
-                {#each resultsData.details as detail}
+              {#if resultsDetails.length > 0}
+                {#each resultsDetails as detail}
                   <tr>
                     <td class="px-3 py-2">{detail.componentName}</td>
                     <td class="px-3 py-2 text-lg leading-none">{detail.status === 'failed' ? '❌' : '✅'}</td>
-                    <td class="px-3 py-2">{detail.asserts}</td>
                     <td class="px-3 py-2">
-                      {#if detail.errors?.length > 0}
+                      {#if detail.success?.length > 0 || detail.errors?.length > 0}
                         <div class="space-y-1">
+                          {#each detail.success as item}
+                            <div class="text-green-700">✅ {item}</div>
+                          {/each}
                           {#each detail.errors as item}
-                            <div class="text-red-700">{item}</div>
+                            <div class="text-red-700">❌ {item}</div>
                           {/each}
                         </div>
                       {:else}
@@ -1415,7 +1829,7 @@
                 {/each}
               {:else}
                 <tr>
-                  <td colspan="5" class="px-3 py-6 text-center text-muted-foreground">No component-level details found</td>
+                  <td colspan="4" class="px-3 py-6 text-center text-muted-foreground">No component-level details found</td>
                 </tr>
               {/if}
             </tbody>
