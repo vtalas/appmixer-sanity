@@ -233,6 +233,20 @@ export async function initializeDatabase() {
     )
   `);
 
+  // Migrations: merge-checklist data collected by the PR scan
+  // (linked issues, E2E report found on the issue, CI state, mergeability)
+  for (const column of [
+    'head_committed_at TEXT',
+    'mergeable INTEGER',
+    'ci_status TEXT',
+    'linked_issues TEXT',
+    'e2e_report TEXT'
+  ]) {
+    try {
+      await client.execute(`ALTER TABLE e2e_prs ADD COLUMN ${column}`);
+    } catch {}
+  }
+
   await client.execute(`CREATE INDEX IF NOT EXISTS idx_e2e_runs_state ON e2e_runs(state)`);
   await client.execute(
     `CREATE INDEX IF NOT EXISTS idx_e2e_runs_flow ON e2e_runs(flow_name, queued_at DESC)`

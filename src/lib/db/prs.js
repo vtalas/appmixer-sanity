@@ -34,6 +34,11 @@ function rowToPR(row) {
     connectors: safeParse(row.connectors) || [],
     testFlows: safeParse(row.test_flows) || [],
     filesCount: row.files_count == null ? null : Number(row.files_count),
+    headCommittedAt: row.head_committed_at || null,
+    mergeable: row.mergeable == null ? null : Boolean(row.mergeable),
+    ciStatus: row.ci_status || null,
+    linkedIssues: safeParse(row.linked_issues) || [],
+    e2eReport: safeParse(row.e2e_report),
     scannedAt: row.updated_at
   };
 }
@@ -62,8 +67,9 @@ export async function replacePRs(repo, prs) {
     statements.push({
       sql: `INSERT OR REPLACE INTO e2e_prs
         (repo, number, title, author, url, base_branch, head_branch, head_sha, draft,
-         pr_created_at, pr_updated_at, connectors, test_flows, files_count, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+         pr_created_at, pr_updated_at, connectors, test_flows, files_count,
+         head_committed_at, mergeable, ci_status, linked_issues, e2e_report, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
       args: [
         repo,
         pr.number,
@@ -78,7 +84,12 @@ export async function replacePRs(repo, prs) {
         pr.updatedAt ?? null,
         JSON.stringify(pr.connectors || []),
         JSON.stringify(pr.testFlows || []),
-        pr.filesCount ?? null
+        pr.filesCount ?? null,
+        pr.headCommittedAt ?? null,
+        pr.mergeable == null ? null : pr.mergeable ? 1 : 0,
+        pr.ciStatus ?? null,
+        JSON.stringify(pr.linkedIssues || []),
+        pr.e2eReport ? JSON.stringify(pr.e2eReport) : null
       ]
     });
   }

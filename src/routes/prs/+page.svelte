@@ -4,7 +4,14 @@
   import { Badge } from '$lib/components/ui/badge';
   import { invalidateAll, goto } from '$app/navigation';
   import { page } from '$app/stores';
-  import { ExternalLink, Github, RefreshCw, GitPullRequest } from 'lucide-svelte';
+  import {
+    ExternalLink,
+    Github,
+    RefreshCw,
+    GitPullRequest,
+    CircleDot,
+    ChevronRight
+  } from 'lucide-svelte';
 
   let { data } = $props();
 
@@ -16,6 +23,7 @@
   let accountFilter = $state(params.get('account') || '');
   // Drafts are hidden by default
   let includeDrafts = $state(params.get('drafts') === '1');
+  let readyOnly = $state(params.get('ready') === '1');
 
   // Sync filter state to URL
   let initialized = false;
@@ -25,6 +33,7 @@
     const flows = onlyWithFlows;
     const account = accountFilter;
     const drafts = includeDrafts;
+    const ready = readyOnly;
 
     if (!initialized) {
       initialized = true;
@@ -38,6 +47,7 @@
     flows ? sp.set('flows', '1') : sp.delete('flows');
     account ? sp.set('account', account) : sp.delete('account');
     drafts ? sp.set('drafts', '1') : sp.delete('drafts');
+    ready ? sp.set('ready', '1') : sp.delete('ready');
 
     goto(url.pathname + (sp.toString() ? '?' + sp.toString() : ''), {
       replaceState: true,
@@ -51,7 +61,8 @@
   const stats = $derived({
     total: prs.length,
     withFlows: prs.filter((pr) => pr.testFlowCount > 0).length,
-    drafts: prs.filter((pr) => pr.draft).length
+    drafts: prs.filter((pr) => pr.draft).length,
+    ready: prs.filter((pr) => pr.readyToMerge).length
   });
 
   const allConnectors = $derived(
@@ -80,7 +91,16 @@
 
       const matchesDraft = includeDrafts || !pr.draft;
 
-      return matchesSearch && matchesConnector && matchesFlows && matchesAccount && matchesDraft;
+      const matchesReady = !readyOnly || pr.readyToMerge;
+
+      return (
+        matchesSearch &&
+        matchesConnector &&
+        matchesFlows &&
+        matchesAccount &&
+        matchesDraft &&
+        matchesReady
+      );
     })
   );
 
@@ -107,6 +127,15 @@
       isScanning = false;
     }
   }
+
+  // Flow listings are collapsed by default, expanded per (PR, connector)
+  let expandedGroups = $state({});
+
+  const checklistStatusConfig = {
+    pass: { glyph: '✓', class: 'bg-green-50 text-green-700 border-green-200' },
+    fail: { glyph: '✗', class: 'bg-red-50 text-red-700 border-red-200' },
+    warn: { glyph: '!', class: 'bg-amber-50 text-amber-800 border-amber-200' }
+  };
 
   const syncStatusConfig = {
     match: { label: 'In Sync', class: 'bg-green-100 text-green-800 border-green-200' },
@@ -197,11 +226,20 @@
   {/if}
 
   <!-- Stats -->
-  <div class="grid grid-cols-3 gap-3 max-w-md">
+  <div class="grid grid-cols-4 gap-3 max-w-2xl">
     <div class="border rounded-lg p-3">
       <div class="text-2xl font-bold">{stats.total}</div>
       <div class="text-xs text-muted-foreground">Open PRs</div>
     </div>
+    <button
+      type="button"
+      onclick={() => (readyOnly = !readyOnly)}
+      class="border rounded-lg p-3 bg-green-50 text-left hover:bg-green-100 transition-colors cursor-pointer {readyOnly ? 'ring-2 ring-green-500' : ''}"
+      title={readyOnly ? 'Showing only mergeable PRs — click to show all' : 'Click to show only PRs whose merge checklist is fully green'}
+    >
+      <div class="text-2xl font-bold text-green-700">{stats.ready}</div>
+      <div class="text-xs font-medium text-green-600">Ready to Merge</div>
+    </button>
     <button
       type="button"
       onclick={() => (onlyWithFlows = !onlyWithFlows)}
@@ -287,6 +325,11 @@
                 {#if pr.draft}
                   <Badge variant="outline" class="text-xs shrink-0">Draft</Badge>
                 {/if}
+                {#if pr.readyToMerge}
+                  <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold border bg-green-100 text-green-800 border-green-300 shrink-0">
+                    ✓ Ready to merge
+                  </span>
+                {/if}
               </div>
               <span class="text-xs text-muted-foreground shrink-0" title={pr.updatedAt}>
                 updated {formatRelativeTime(pr.updatedAt)}
@@ -305,7 +348,48 @@
                   {pr.testFlowCount} test flow{pr.testFlowCount !== 1 ? 's' : ''} in PR
                 </span>
               {/if}
+              {#each pr.linkedIssues || [] as issue (issue.url)}
+                <a
+                  href={issue.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="inline-flex items-center gap-1 hover:underline {issue.state === 'open' ? 'text-green-700' : 'text-purple-700'}"
+                  title="Linked issue ({issue.state}): {issue.title}"
+                >
+                  <CircleDot size={12} />
+                  {issue.repo.split('/')[1]}#{issue.number}
+                </a>
+              {/each}
             </div>
+
+            <!-- Merge checklist -->
+            {#if pr.checklist?.length}
+              <div class="flex flex-wrap gap-1.5 pt-0.5">
+                {#each pr.checklist as item (item.key)}
+                  {@const config = checklistStatusConfig[item.status] || checklistStatusConfig.warn}
+                  {#if item.key === 'report' && pr.e2eReport?.url}
+                    <a
+                      href={pr.e2eReport.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border hover:opacity-80 {config.class}"
+                      title={item.detail}
+                    >
+                      <span class="font-bold">{config.glyph}</span>
+                      {item.label}
+                    </a>
+                  {:else}
+                    <span
+                      class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border {config.class}"
+                      title={item.detail}
+                    >
+                      <span class="font-bold">{config.glyph}</span>
+                      {item.label}
+                    </span>
+                  {/if}
+                {/each}
+              </div>
+            {/if}
           </div>
 
           <!-- Connector groups -->
@@ -316,12 +400,43 @@
           {:else}
             <div class="divide-y">
               {#each pr.connectors as group (group.name)}
+                {@const groupKey = `${pr.number}:${group.name}`}
+                {@const isExpanded = !!expandedGroups[groupKey]}
+                {@const passedCount = group.flows.filter((f) => f.lastResult === 'passed').length}
+                {@const failedCount = group.flows.filter((f) => f.lastResult === 'failed').length}
                 <div>
-                  <div class="flex items-center gap-3 px-4 py-2 bg-muted/20">
+                  <button
+                    type="button"
+                    onclick={() => (expandedGroups[groupKey] = !isExpanded)}
+                    class="w-full flex items-center gap-3 px-4 py-2 bg-muted/20 text-left hover:bg-muted/40 transition-colors cursor-pointer"
+                    title={isExpanded ? 'Collapse flows' : 'Expand flows'}
+                  >
+                    <ChevronRight
+                      size={14}
+                      class="shrink-0 text-muted-foreground transition-transform {isExpanded
+                        ? 'rotate-90'
+                        : ''}"
+                    />
                     <span class="font-medium text-sm">{group.name}</span>
                     <span class="text-xs text-muted-foreground">
                       {group.flows.length} flow{group.flows.length !== 1 ? 's' : ''}
                     </span>
+                    {#if passedCount > 0}
+                      <span
+                        class="inline-flex items-center px-1.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800"
+                        title="{passedCount} flow{passedCount !== 1 ? 's' : ''} passed"
+                      >
+                        {passedCount} ✓
+                      </span>
+                    {/if}
+                    {#if failedCount > 0}
+                      <span
+                        class="inline-flex items-center px-1.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800"
+                        title="{failedCount} flow{failedCount !== 1 ? 's' : ''} failed"
+                      >
+                        {failedCount} ✗
+                      </span>
+                    {/if}
                     {#if group.accountAvailable === true}
                       <span
                         class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border bg-emerald-50 text-emerald-700 border-emerald-200"
@@ -337,9 +452,11 @@
                         No account
                       </span>
                     {/if}
-                  </div>
+                  </button>
 
-                  {#if group.flows.length === 0}
+                  {#if !isExpanded}
+                    <!-- collapsed -->
+                  {:else if group.flows.length === 0}
                     <p class="px-4 py-2 text-xs text-muted-foreground">
                       No E2E flows known for this connector.
                     </p>

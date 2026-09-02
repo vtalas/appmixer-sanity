@@ -280,6 +280,7 @@ export async function listOpenPullRequests(userId) {
         headBranch: pr.head?.ref || null,
         headSha: pr.head?.sha || null,
         draft: !!pr.draft,
+        body: pr.body || '',
         createdAt: pr.created_at,
         updatedAt: pr.updated_at
       });
@@ -288,6 +289,160 @@ export async function listOpenPullRequests(userId) {
   }
 
   return prs;
+}
+
+/**
+ * Fetch a single pull request — the list endpoint doesn't compute `mergeable`.
+ * GitHub computes it lazily; null means "still computing" (unknown).
+ * @param {string} userId - User ID (email)
+ * @param {number} prNumber
+ * @returns {Promise<{mergeable: boolean|null, mergeableState: string|null}>}
+ */
+export async function fetchPullRequestDetail(userId, prNumber) {
+  const config = await getGitHubConfig(userId);
+  const response = await fetch(
+    `${GITHUB_API_BASE}/repos/${config.owner}/${config.repo}/pulls/${prNumber}`,
+    { headers: getGitHubHeaders(config.token) }
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch PR #${prNumber}: ${response.status}`);
+  }
+  const pr = await response.json();
+  return {
+    mergeable: typeof pr.mergeable === 'boolean' ? pr.mergeable : null,
+    mergeableState: pr.mergeable_state || null
+  };
+}
+
+/**
+ * Committer date of a commit (needed to judge whether E2E results are newer
+ * than the code being merged)
+ * @param {string} userId - User ID (email)
+ * @param {string} ref - Commit SHA
+ * @returns {Promise<string|null>} ISO date or null
+ */
+export async function fetchCommitDate(userId, ref) {
+  const config = await getGitHubConfig(userId);
+  const response = await fetch(
+    `${GITHUB_API_BASE}/repos/${config.owner}/${config.repo}/commits/${ref}`,
+    { headers: getGitHubHeaders(config.token) }
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch commit ${ref}: ${response.status}`);
+  }
+  const commit = await response.json();
+  return commit.commit?.committer?.date || commit.commit?.author?.date || null;
+}
+
+/**
+ * Combined CI state of a commit: check runs (Actions & apps) merged with the
+ * legacy commit status API.
+ * @param {string} userId - User ID (email)
+ * @param {string} ref - Commit SHA
+ * @returns {Promise<'success'|'failure'|'pending'|'none'>}
+ */
+export async function fetchCommitCiState(userId, ref) {
+  const config = await getGitHubConfig(userId);
+  const headers = getGitHubHeaders(config.token);
+  const base = `${GITHUB_API_BASE}/repos/${config.owner}/${config.repo}/commits/${ref}`;
+
+  const [checksResponse, statusResponse] = await Promise.all([
+    fetch(`${base}/check-runs?per_page=100`, { headers }),
+    fetch(`${base}/status`, { headers })
+  ]);
+  if (!checksResponse.ok) {
+    throw new Error(`Failed to fetch check runs of ${ref}: ${checksResponse.status}`);
+  }
+  if (!statusResponse.ok) {
+    throw new Error(`Failed to fetch commit status of ${ref}: ${statusResponse.status}`);
+  }
+  const checks = await checksResponse.json();
+  const status = await statusResponse.json();
+
+  const states = [];
+  for (const run of checks.check_runs || []) {
+    if (run.status !== 'completed') states.push('pending');
+    else if (
+      run.conclusion === 'success' ||
+      run.conclusion === 'neutral' ||
+      run.conclusion === 'skipped'
+    )
+      states.push('success');
+    else states.push('failure');
+  }
+  if (status.total_count > 0) states.push(status.state); // success | failure | pending
+
+  if (states.length === 0) return 'none';
+  if (states.includes('failure') || states.includes('error')) return 'failure';
+  if (states.includes('pending')) return 'pending';
+  return 'success';
+}
+
+/**
+ * Fetch one issue, possibly from a different repo than the configured one
+ * (the issue tracker lives in appmixer-components while PRs live in
+ * appmixer-connectors). Returns null when the issue doesn't exist.
+ * @param {string} userId - User ID (email)
+ * @param {string} owner
+ * @param {string} repo
+ * @param {number} issueNumber
+ * @returns {Promise<{number: number, title: string, state: string, url: string}|null>}
+ */
+export async function fetchIssue(userId, owner, repo, issueNumber) {
+  const config = await getGitHubConfig(userId);
+  const response = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${repo}/issues/${issueNumber}`, {
+    headers: getGitHubHeaders(config.token)
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error(`Failed to fetch issue ${owner}/${repo}#${issueNumber}: ${response.status}`);
+  }
+  const issue = await response.json();
+  // The issues API also returns PRs — a closing ref must point at a real issue
+  if (issue.pull_request) return null;
+  return {
+    number: issue.number,
+    title: issue.title,
+    state: issue.state,
+    url: issue.html_url
+  };
+}
+
+/**
+ * List comments of an issue (up to 300, oldest first — GitHub default order)
+ * @param {string} userId - User ID (email)
+ * @param {string} owner
+ * @param {string} repo
+ * @param {number} issueNumber
+ * @returns {Promise<Array<{body: string, createdAt: string, url: string, author: string|null}>>}
+ */
+export async function listIssueComments(userId, owner, repo, issueNumber) {
+  const config = await getGitHubConfig(userId);
+  const comments = [];
+
+  for (let page = 1; page <= 3; page++) {
+    const response = await fetch(
+      `${GITHUB_API_BASE}/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=100&page=${page}`,
+      { headers: getGitHubHeaders(config.token) }
+    );
+    if (!response.ok) {
+      throw new Error(
+        `Failed to list comments of ${owner}/${repo}#${issueNumber}: ${response.status}`
+      );
+    }
+    const batch = await response.json();
+    for (const comment of batch) {
+      comments.push({
+        body: comment.body || '',
+        createdAt: comment.created_at,
+        url: comment.html_url,
+        author: comment.user?.login || null
+      });
+    }
+    if (batch.length < 100) break;
+  }
+
+  return comments;
 }
 
 /**
