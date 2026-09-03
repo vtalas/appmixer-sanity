@@ -337,7 +337,7 @@ function parseDate(value) {
  * correct without a rescan.
  * @param {any} pr - Cached PR row
  * @param {Array<any>} connectors - Overview connector groups (with flows + accountAvailable)
- * @returns {{items: Array<{key: string, label: string, status: 'pass'|'fail'|'warn', detail: string}>, ready: boolean}}
+ * @returns {{items: Array<{key: string, label: string, status: 'pass'|'fail'|'warn', detail: string}>, ready: boolean, readyForTesting: boolean}}
  */
 export function buildChecklist(pr, connectors) {
   /** @type {Array<{key: string, label: string, status: 'pass'|'fail'|'warn', detail: string}>} */
@@ -543,7 +543,18 @@ export function buildChecklist(pr, connectors) {
     });
   }
 
-  return { items, ready: items.every((item) => item.status === 'pass') };
+  // "Ready for testing" is the earlier gate: the prerequisites for actually
+  // running the E2E suite against this PR — a service account for every touched
+  // connector and green CI on the head commit. Everything else (report, flows,
+  // linked issue) is what the testing itself produces.
+  /** @param {string} key */
+  const passed = (key) => items.find((item) => item.key === key)?.status === 'pass';
+
+  return {
+    items,
+    ready: items.every((item) => item.status === 'pass'),
+    readyForTesting: passed('account') && passed('ci')
+  };
 }
 
 /**
@@ -665,6 +676,7 @@ export async function buildPROverview(userId) {
       e2eReport: pr.e2eReport || null,
       checklist: checklist.items,
       readyToMerge: checklist.ready,
+      readyForTesting: checklist.readyForTesting,
       connectors
     };
   });

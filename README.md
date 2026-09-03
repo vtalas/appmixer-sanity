@@ -139,6 +139,7 @@ Open connector PRs with E2E state and the merge checklist. Data comes from the P
       "baseBranch": "dev",
       "updatedAt": "2026-08-31T19:46:55Z",
       "readyToMerge": false,
+      "readyForTesting": false,
       "checklist": [
         {
           "key": "account",
@@ -187,6 +188,8 @@ The **merge checklist** contains six items, each `pass` | `fail` | `warn` with a
 | `ci`        | CI checks on the head commit are green                                                                               |
 | `mergeable` | Not a draft, no merge conflict with the base branch                                                                  |
 | `flows`     | Flows changed by the PR are deployed and all of the connector's flows are green on the instance                      |
+
+`readyForTesting` is the earlier gate — true when the `account` and `ci` items pass, i.e. the PR can actually be E2E-tested (a service account exists for every touched connector and CI is green). The remaining items are what the testing itself produces.
 
 Time-based rules are evaluated at read time, so a stale report flips to `fail` without a rescan.
 

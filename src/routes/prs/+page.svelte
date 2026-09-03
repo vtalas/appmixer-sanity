@@ -24,6 +24,7 @@
   // Drafts are hidden by default
   let includeDrafts = $state(params.get('drafts') === '1');
   let readyOnly = $state(params.get('ready') === '1');
+  let testingOnly = $state(params.get('testing') === '1');
 
   // Sync filter state to URL
   let initialized = false;
@@ -34,6 +35,7 @@
     const account = accountFilter;
     const drafts = includeDrafts;
     const ready = readyOnly;
+    const testing = testingOnly;
 
     if (!initialized) {
       initialized = true;
@@ -48,6 +50,7 @@
     account ? sp.set('account', account) : sp.delete('account');
     drafts ? sp.set('drafts', '1') : sp.delete('drafts');
     ready ? sp.set('ready', '1') : sp.delete('ready');
+    testing ? sp.set('testing', '1') : sp.delete('testing');
 
     goto(url.pathname + (sp.toString() ? '?' + sp.toString() : ''), {
       replaceState: true,
@@ -58,11 +61,19 @@
 
   const prs = $derived(data.prs || []);
 
+  /** A touched connector has no service account on the instance yet */
+  const prNeedsAccount = (pr) => pr.connectors.some((c) => c.accountAvailable === false);
+
+  const needsAccountOnly = $derived(accountFilter === 'missing');
+
   const stats = $derived({
     total: prs.length,
     withFlows: prs.filter((pr) => pr.testFlowCount > 0).length,
     drafts: prs.filter((pr) => pr.draft).length,
-    ready: prs.filter((pr) => pr.readyToMerge).length
+    ready: prs.filter((pr) => pr.readyToMerge).length,
+    // Drafts are hidden by default — count only what clicking the tile shows
+    readyForTesting: prs.filter((pr) => pr.readyForTesting && (includeDrafts || !pr.draft)).length,
+    needsAccount: prs.filter((pr) => prNeedsAccount(pr) && (includeDrafts || !pr.draft)).length
   });
 
   const allConnectors = $derived(
@@ -87,11 +98,13 @@
       const matchesAccount =
         !accountFilter ||
         (accountFilter === 'available' && pr.connectors.some((c) => c.accountAvailable === true)) ||
-        (accountFilter === 'missing' && pr.connectors.some((c) => c.accountAvailable === false));
+        (accountFilter === 'missing' && prNeedsAccount(pr));
 
       const matchesDraft = includeDrafts || !pr.draft;
 
       const matchesReady = !readyOnly || pr.readyToMerge;
+
+      const matchesTesting = !testingOnly || pr.readyForTesting;
 
       return (
         matchesSearch &&
@@ -99,7 +112,8 @@
         matchesFlows &&
         matchesAccount &&
         matchesDraft &&
-        matchesReady
+        matchesReady &&
+        matchesTesting
       );
     })
   );
@@ -226,11 +240,33 @@
   {/if}
 
   <!-- Stats -->
-  <div class="grid grid-cols-4 gap-3 max-w-2xl">
+  <div class="grid grid-cols-6 gap-3 max-w-5xl">
     <div class="border rounded-lg p-3">
       <div class="text-2xl font-bold">{stats.total}</div>
       <div class="text-xs text-muted-foreground">Open PRs</div>
     </div>
+    <button
+      type="button"
+      onclick={() => (accountFilter = needsAccountOnly ? '' : 'missing')}
+      class="border rounded-lg p-3 bg-orange-50 text-left hover:bg-orange-100 transition-colors cursor-pointer {needsAccountOnly ? 'ring-2 ring-orange-500' : ''}"
+      title={needsAccountOnly
+        ? 'Showing only PRs missing a service account — click to show all'
+        : 'Click to show only PRs where a touched connector has no service account on the instance'}
+    >
+      <div class="text-2xl font-bold text-orange-700">{stats.needsAccount}</div>
+      <div class="text-xs font-medium text-orange-600">Needs Account</div>
+    </button>
+    <button
+      type="button"
+      onclick={() => (testingOnly = !testingOnly)}
+      class="border rounded-lg p-3 bg-blue-50 text-left hover:bg-blue-100 transition-colors cursor-pointer {testingOnly ? 'ring-2 ring-blue-500' : ''}"
+      title={testingOnly
+        ? 'Showing only PRs ready for testing — click to show all'
+        : 'Click to show only PRs with a service account for every touched connector and green CI checks'}
+    >
+      <div class="text-2xl font-bold text-blue-700">{stats.readyForTesting}</div>
+      <div class="text-xs font-medium text-blue-600">Ready for Testing</div>
+    </button>
     <button
       type="button"
       onclick={() => (readyOnly = !readyOnly)}
@@ -328,6 +364,13 @@
                 {#if pr.readyToMerge}
                   <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold border bg-green-100 text-green-800 border-green-300 shrink-0">
                     ✓ Ready to merge
+                  </span>
+                {:else if pr.readyForTesting}
+                  <span
+                    class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold border bg-blue-100 text-blue-800 border-blue-300 shrink-0"
+                    title="Service account available for every touched connector and CI checks are green — the E2E suite can be run"
+                  >
+                    ✓ Ready for testing
                   </span>
                 {/if}
               </div>

@@ -13,7 +13,7 @@ import { buildPROverview } from '$lib/server/e2e/prs.js';
  * - connector=<name>  only PRs touching this connector
  *
  * Shape per PR: { number, title, url, author, draft, updatedAt, readyToMerge,
- *   checklist: [{ key, label, status, detail }],
+ *   readyForTesting, checklist: [{ key, label, status, detail }],
  *   linkedIssues: [{ repo, number, state, url }], connectors:
  *   [{ name, accountAvailable, flows: [{ name, syncStatus, deployed,
  *      lastResult, lastResultAt, changedInPR, newInPR }] }] }
@@ -36,6 +36,7 @@ export async function GET({ url }) {
         baseBranch: pr.baseBranch,
         updatedAt: pr.updatedAt,
         readyToMerge: pr.readyToMerge,
+        readyForTesting: pr.readyForTesting,
         checklist: pr.checklist,
         linkedIssues: (pr.linkedIssues || []).map((issue) => ({
           repo: issue.repo,
