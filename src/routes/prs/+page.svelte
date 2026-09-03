@@ -142,6 +142,34 @@
     }
   }
 
+  // --- Per-PR refresh ---
+  // A single PR costs a handful of GitHub calls instead of a few hundred, so a
+  // card can be brought up to date without rescanning every other PR.
+  let refreshingPRs = $state({});
+  let refreshErrors = $state({});
+
+  async function refreshPR(number) {
+    refreshingPRs[number] = true;
+    delete refreshErrors[number];
+    try {
+      const response = await fetch(`/api/prs/${number}/scan`, { method: 'POST' });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.message || `Refresh failed (${response.status})`);
+      }
+      const result = await response.json();
+      if (result.errors?.length) {
+        refreshErrors[number] = result.errors.join('; ');
+      }
+      // Reloads the page data from the caches only — no GitHub calls
+      await invalidateAll();
+    } catch (e) {
+      refreshErrors[number] = e.message;
+    } finally {
+      delete refreshingPRs[number];
+    }
+  }
+
   // Flow listings are collapsed by default, expanded per (PR, connector)
   let expandedGroups = $state({});
 
@@ -374,9 +402,23 @@
                   </span>
                 {/if}
               </div>
-              <span class="text-xs text-muted-foreground shrink-0" title={pr.updatedAt}>
-                updated {formatRelativeTime(pr.updatedAt)}
-              </span>
+              <div class="flex items-center gap-1.5 shrink-0">
+                <span class="text-xs text-muted-foreground" title={pr.updatedAt}>
+                  updated {formatRelativeTime(pr.updatedAt)}
+                </span>
+                <button
+                  type="button"
+                  onclick={() => refreshPR(pr.number)}
+                  disabled={!!refreshingPRs[pr.number]}
+                  class="p-1 rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50 transition-colors cursor-pointer"
+                  title={pr.scannedAt
+                    ? `Refresh this PR (last scanned ${formatRelativeTime(pr.scannedAt)})`
+                    : 'Refresh this PR'}
+                  aria-label="Refresh PR #{pr.number}"
+                >
+                  <RefreshCw size={13} class={refreshingPRs[pr.number] ? 'animate-spin' : ''} />
+                </button>
+              </div>
             </div>
             <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
               {#if pr.author}
@@ -404,6 +446,10 @@
                 </a>
               {/each}
             </div>
+
+            {#if refreshErrors[pr.number]}
+              <p class="text-xs text-red-600">Refresh: {refreshErrors[pr.number]}</p>
+            {/if}
 
             <!-- Merge checklist -->
             {#if pr.checklist?.length}

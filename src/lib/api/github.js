@@ -292,11 +292,13 @@ export async function listOpenPullRequests(userId) {
 }
 
 /**
- * Fetch a single pull request — the list endpoint doesn't compute `mergeable`.
- * GitHub computes it lazily; null means "still computing" (unknown).
+ * Fetch a single pull request. Returns the same fields as the list endpoint
+ * plus `mergeable`, which the list endpoint doesn't compute — GitHub computes
+ * it lazily, so null means "still computing" (unknown). `state` lets a
+ * single-PR refresh notice that the PR was merged or closed meanwhile.
  * @param {string} userId - User ID (email)
  * @param {number} prNumber
- * @returns {Promise<{mergeable: boolean|null, mergeableState: string|null}>}
+ * @returns {Promise<{number: number, title: string, url: string, author: string|null, baseBranch: string|null, headBranch: string|null, headSha: string|null, draft: boolean, body: string, createdAt: string, updatedAt: string, state: string, merged: boolean, mergeable: boolean|null, mergeableState: string|null}>}
  */
 export async function fetchPullRequestDetail(userId, prNumber) {
   const config = await getGitHubConfig(userId);
@@ -309,6 +311,19 @@ export async function fetchPullRequestDetail(userId, prNumber) {
   }
   const pr = await response.json();
   return {
+    number: pr.number,
+    title: pr.title,
+    url: pr.html_url,
+    author: pr.user?.login || null,
+    baseBranch: pr.base?.ref || null,
+    headBranch: pr.head?.ref || null,
+    headSha: pr.head?.sha || null,
+    draft: !!pr.draft,
+    body: pr.body || '',
+    createdAt: pr.created_at,
+    updatedAt: pr.updated_at,
+    state: pr.state,
+    merged: !!pr.merged_at,
     mergeable: typeof pr.mergeable === 'boolean' ? pr.mergeable : null,
     mergeableState: pr.mergeable_state || null
   };

@@ -11,7 +11,7 @@ import {
   listIssueComments
 } from '$lib/api/github.js';
 import { getInstanceUrl } from '$lib/api/appmixer.js';
-import { getPRs, replacePRs } from '$lib/db/prs.js';
+import { getPRs, replacePRs, upsertPR, deletePR } from '$lib/db/prs.js';
 import { getE2EFlows, getAccountServices } from '$lib/db/e2e.js';
 import { connectorServices } from '$lib/server/e2e/scan.js';
 
@@ -191,88 +191,142 @@ export async function scanPRs(userId) {
     })
   ]);
 
-  const rows = await mapLimit(prs, PR_BATCH, async (pr) => {
-    try {
-      const [files, detail, headCommittedAt, ciStatus] = await Promise.all([
-        listPullRequestFiles(userId, pr.number),
+  const rows = await mapLimit(prs, PR_BATCH, (pr) =>
+    buildPRRow(userId, config, pr, connectorRoots, errors)
+  );
+
+  await replacePRs(repoKey, rows);
+
+  return {
+    total: rows.length,
+    withTestFlows: rows.filter((r) => r.testFlows.length > 0).length,
+    errors
+  };
+}
+
+/**
+ * Refresh a single PR in the cache — same data as a full scan, but for one PR
+ * (a handful of GitHub calls instead of a few hundred). Drops the PR from the
+ * cache when it turns out to be merged or closed.
+ * @param {any} userId - User ID (email) or null for env credentials
+ * @param {number} number - PR number
+ * @returns {Promise<{number: number, removed: boolean, state: string, pr: any, errors: Array<string>}>}
+ */
+export async function scanPR(userId, number) {
+  /** @type {Array<string>} */
+  const errors = [];
+
+  const config = await getGitHubConfig(userId);
+  const repoKey = `${config.owner}/${config.repo}`;
+
+  const [detail, connectorRoots] = await Promise.all([
+    fetchPullRequestDetail(userId, number),
+    listConnectorRoots(userId).catch((e) => {
+      errors.push(`Failed to list connector roots: ${e.message}`);
+      return new Set();
+    })
+  ]);
+
+  if (detail.state !== 'open') {
+    await deletePR(repoKey, number);
+    return {
+      number,
+      removed: true,
+      state: detail.merged ? 'merged' : detail.state,
+      errors,
+      pr: null
+    };
+  }
+
+  // The detail response already carries everything the list endpoint returns,
+  // so pass it along instead of fetching the PR twice.
+  const row = await buildPRRow(userId, config, detail, connectorRoots, errors, detail);
+  await upsertPR(repoKey, row);
+
+  return { number, removed: false, state: 'open', pr: row, errors };
+}
+
+/**
+ * Build one cache row for a PR: changed files → touched connectors and
+ * test-flow files (with the flow identity read from the PR head), plus
+ * mergeability, head commit CI state, linked issues and their newest E2E
+ * report. Never throws — failures land in `errors` and yield an empty row.
+ * @param {any} userId - User ID (email) or null for env credentials
+ * @param {{owner: string, repo: string}} config - GitHub config
+ * @param {any} pr - PR as returned by listOpenPullRequests / fetchPullRequestDetail
+ * @param {Set<string>} connectorRoots - Connector roots of the dev tree
+ * @param {Array<string>} errors - Collector for non-fatal failures
+ * @param {any} [prefetchedDetail] - PR detail when the caller already has it
+ * @returns {Promise<any>}
+ */
+async function buildPRRow(userId, config, pr, connectorRoots, errors, prefetchedDetail = null) {
+  try {
+    const [files, detail, headCommittedAt, ciStatus] = await Promise.all([
+      listPullRequestFiles(userId, pr.number),
+      prefetchedDetail ||
         fetchPullRequestDetail(userId, pr.number).catch((e) => {
           errors.push(`PR #${pr.number} detail: ${e.message}`);
           return { mergeable: null };
         }),
-        pr.headSha
-          ? fetchCommitDate(userId, pr.headSha).catch((e) => {
-              errors.push(`PR #${pr.number} head commit: ${e.message}`);
-              return null;
-            })
-          : null,
-        pr.headSha
-          ? fetchCommitCiState(userId, pr.headSha).catch((e) => {
-              errors.push(`PR #${pr.number} CI state: ${e.message}`);
-              return null;
-            })
-          : null
-      ]);
+      pr.headSha
+        ? fetchCommitDate(userId, pr.headSha).catch((e) => {
+            errors.push(`PR #${pr.number} head commit: ${e.message}`);
+            return null;
+          })
+        : null,
+      pr.headSha
+        ? fetchCommitCiState(userId, pr.headSha).catch((e) => {
+            errors.push(`PR #${pr.number} CI state: ${e.message}`);
+            return null;
+          })
+        : null
+    ]);
 
-      // Linked issues (closing refs) and the newest E2E report posted on them
-      const refs = parseClosingRefs(pr.body, config.owner, config.repo).slice(0, 5);
-      /** @type {Array<any>} */
-      const linkedIssues = [];
-      let e2eReport = null;
-      for (const ref of refs) {
-        try {
-          const issue = await fetchIssue(userId, ref.owner, ref.repo, ref.number);
-          if (!issue) continue;
-          linkedIssues.push({ ...issue, repo: `${ref.owner}/${ref.repo}` });
-          const comments = await listIssueComments(userId, ref.owner, ref.repo, ref.number);
-          const report = findE2EReport(comments);
-          if (report && (!e2eReport || report.createdAt > e2eReport.createdAt)) {
-            e2eReport = { ...report, issue: `${ref.owner}/${ref.repo}#${ref.number}` };
-          }
-        } catch (e) {
-          errors.push(
-            `PR #${pr.number} issue ${ref.owner}/${ref.repo}#${ref.number}: ${e.message}`
-          );
-        }
+    // Linked issues (closing refs) and the newest E2E report posted on them.
+    // Independent of the changed files, so it runs alongside the flow-content
+    // reads below instead of before them.
+    const issuesPromise = collectLinkedIssues(userId, config, pr, errors);
+
+    // Connector roots added by the PR itself (a brand-new connector doesn't
+    // exist in the dev tree yet — without this it would map to its parent,
+    // e.g. "ai/huggingface" to "ai")
+    const prRoots = new Set(connectorRoots);
+    for (const file of files) {
+      if (file.status === 'removed') continue;
+      const root = manifestRoot(file.path);
+      if (root) prRoots.add(root);
+    }
+
+    const connectors = new Set();
+    /** @type {Array<{path: string, status: string, flowName: string|null, connector: string|null}>} */
+    const testFlows = [];
+
+    for (const file of files) {
+      const connector = connectorForPath(file.path, prRoots);
+      if (connector) connectors.add(connector);
+
+      if (isTestFlowPath(file.path)) {
+        testFlows.push({
+          path: file.path,
+          status: file.status,
+          flowName: null,
+          connector
+        });
+      } else if (file.previousPath && isTestFlowPath(file.previousPath)) {
+        // Renamed away from a test-flow location — treat as removed
+        testFlows.push({
+          path: file.previousPath,
+          status: 'removed',
+          flowName: null,
+          connector: connectorForPath(file.previousPath, prRoots)
+        });
       }
+    }
 
-      // Connector roots added by the PR itself (a brand-new connector doesn't
-      // exist in the dev tree yet — without this it would map to its parent,
-      // e.g. "ai/huggingface" to "ai")
-      const prRoots = new Set(connectorRoots);
-      for (const file of files) {
-        if (file.status === 'removed') continue;
-        const root = manifestRoot(file.path);
-        if (root) prRoots.add(root);
-      }
-
-      const connectors = new Set();
-      /** @type {Array<{path: string, status: string, flowName: string|null, connector: string|null}>} */
-      const testFlows = [];
-
-      for (const file of files) {
-        const connector = connectorForPath(file.path, prRoots);
-        if (connector) connectors.add(connector);
-
-        if (isTestFlowPath(file.path)) {
-          testFlows.push({
-            path: file.path,
-            status: file.status,
-            flowName: null,
-            connector
-          });
-        } else if (file.previousPath && isTestFlowPath(file.previousPath)) {
-          // Renamed away from a test-flow location — treat as removed
-          testFlows.push({
-            path: file.previousPath,
-            status: 'removed',
-            flowName: null,
-            connector: connectorForPath(file.previousPath, prRoots)
-          });
-        }
-      }
-
-      // Read the flow identity (JSON "name") from the PR head for present files
-      await mapLimit(
+    // Read the flow identity (JSON "name") from the PR head for present files
+    const [{ linkedIssues, e2eReport }] = await Promise.all([
+      issuesPromise,
+      mapLimit(
         testFlows.filter((tf) => tf.status !== 'removed'),
         CONTENT_BATCH,
         async (tf) => {
@@ -283,42 +337,92 @@ export async function scanPRs(userId) {
             errors.push(`PR #${pr.number} ${tf.path}: ${e.message}`);
           }
         }
-      );
+      )
+    ]);
 
-      return {
-        ...pr,
-        connectors: [...connectors].sort(),
-        testFlows,
-        filesCount: files.length,
-        headCommittedAt,
-        mergeable: detail.mergeable,
-        ciStatus,
-        linkedIssues,
-        e2eReport
-      };
-    } catch (e) {
-      errors.push(`PR #${pr.number}: ${e.message}`);
-      return {
-        ...pr,
-        connectors: [],
-        testFlows: [],
-        filesCount: null,
-        headCommittedAt: null,
-        mergeable: null,
-        ciStatus: null,
-        linkedIssues: [],
-        e2eReport: null
-      };
+    return {
+      ...pr,
+      connectors: [...connectors].sort(),
+      testFlows,
+      filesCount: files.length,
+      headCommittedAt,
+      mergeable: detail.mergeable,
+      ciStatus,
+      linkedIssues,
+      e2eReport
+    };
+  } catch (e) {
+    errors.push(`PR #${pr.number}: ${e.message}`);
+    return {
+      ...pr,
+      connectors: [],
+      testFlows: [],
+      filesCount: null,
+      headCommittedAt: null,
+      mergeable: null,
+      ciStatus: null,
+      linkedIssues: [],
+      e2eReport: null
+    };
+  }
+}
+
+/**
+ * Closing-ref issues of a PR and the newest E2E report comment on any of them.
+ * Every ref is resolved in parallel (and the issue and its comments together),
+ * so a PR costs one round trip here instead of two per linked issue.
+ * @param {any} userId - User ID (email) or null for env credentials
+ * @param {{owner: string, repo: string}} config - GitHub config
+ * @param {any} pr - PR with a `body`
+ * @param {Array<string>} errors - Collector for non-fatal failures
+ * @returns {Promise<{linkedIssues: Array<any>, e2eReport: any}>}
+ */
+async function collectLinkedIssues(userId, config, pr, errors) {
+  const refs = parseClosingRefs(pr.body, config.owner, config.repo).slice(0, 5);
+
+  const resolved = await Promise.all(
+    refs.map(async (ref) => {
+      const label = `${ref.owner}/${ref.repo}#${ref.number}`;
+      try {
+        // The comments request is fired next to the issue request and thrown
+        // away when the ref turns out not to be a real issue.
+        const [issue, comments] = await Promise.all([
+          fetchIssue(userId, ref.owner, ref.repo, ref.number),
+          listIssueComments(userId, ref.owner, ref.repo, ref.number).then(
+            (value) => ({ value }),
+            (/** @type {any} */ error) => ({ error })
+          )
+        ]);
+        if (!issue) return null;
+        if (comments.error) {
+          errors.push(`PR #${pr.number} issue ${label}: ${comments.error.message}`);
+          return { label, repo: `${ref.owner}/${ref.repo}`, issue, report: null };
+        }
+        return {
+          label,
+          repo: `${ref.owner}/${ref.repo}`,
+          issue,
+          report: findE2EReport(comments.value)
+        };
+      } catch (e) {
+        errors.push(`PR #${pr.number} issue ${label}: ${/** @type {any} */ (e).message}`);
+        return null;
+      }
+    })
+  );
+
+  /** @type {Array<any>} */
+  const linkedIssues = [];
+  let e2eReport = null;
+  for (const entry of resolved) {
+    if (!entry) continue;
+    linkedIssues.push({ ...entry.issue, repo: entry.repo });
+    if (entry.report && (!e2eReport || entry.report.createdAt > e2eReport.createdAt)) {
+      e2eReport = { ...entry.report, issue: entry.label };
     }
-  });
+  }
 
-  await replacePRs(repoKey, rows);
-
-  return {
-    total: rows.length,
-    withTestFlows: rows.filter((r) => r.testFlows.length > 0).length,
-    errors
-  };
+  return { linkedIssues, e2eReport };
 }
 
 const REPORT_MAX_AGE_DAYS = 5;
@@ -674,6 +778,7 @@ export async function buildPROverview(userId) {
       testFlowCount: pr.testFlows.filter((tf) => tf.status !== 'removed').length,
       linkedIssues: pr.linkedIssues || [],
       e2eReport: pr.e2eReport || null,
+      scannedAt: pr.scannedAt || null,
       checklist: checklist.items,
       readyToMerge: checklist.ready,
       readyForTesting: checklist.readyForTesting,
@@ -681,8 +786,11 @@ export async function buildPROverview(userId) {
     };
   });
 
-  const lastScanAt = prs.reduce((max, pr) => {
-    return pr.scannedAt && (!max || pr.scannedAt > max) ? pr.scannedAt : max;
+  // Freshness of the cache as a whole — the oldest row, not the newest: with
+  // per-PR refreshes a single fresh card must not make the whole list look
+  // just scanned. A full scan rewrites every row, so it still reads "just now".
+  const lastScanAt = prs.reduce((min, pr) => {
+    return pr.scannedAt && (!min || pr.scannedAt < min) ? pr.scannedAt : min;
   }, /** @type {string|null} */ (null));
 
   return { repo: repoKey, prs: overview, lastScanAt };

@@ -64,35 +64,69 @@ export async function replacePRs(repo, prs) {
   const statements = [{ sql: `DELETE FROM e2e_prs WHERE repo = ?`, args: [repo] }];
 
   for (const pr of prs) {
-    statements.push({
-      sql: `INSERT OR REPLACE INTO e2e_prs
-        (repo, number, title, author, url, base_branch, head_branch, head_sha, draft,
-         pr_created_at, pr_updated_at, connectors, test_flows, files_count,
-         head_committed_at, mergeable, ci_status, linked_issues, e2e_report, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-      args: [
-        repo,
-        pr.number,
-        pr.title ?? null,
-        pr.author ?? null,
-        pr.url ?? null,
-        pr.baseBranch ?? null,
-        pr.headBranch ?? null,
-        pr.headSha ?? null,
-        pr.draft ? 1 : 0,
-        pr.createdAt ?? null,
-        pr.updatedAt ?? null,
-        JSON.stringify(pr.connectors || []),
-        JSON.stringify(pr.testFlows || []),
-        pr.filesCount ?? null,
-        pr.headCommittedAt ?? null,
-        pr.mergeable == null ? null : pr.mergeable ? 1 : 0,
-        pr.ciStatus ?? null,
-        JSON.stringify(pr.linkedIssues || []),
-        pr.e2eReport ? JSON.stringify(pr.e2eReport) : null
-      ]
-    });
+    statements.push(upsertStatement(repo, pr));
   }
 
   await db.batch(statements, 'write');
+}
+
+/**
+ * Write a single PR into the cache (single-PR refresh) — leaves every other
+ * cached PR of the repo untouched.
+ * @param {string} repo - "owner/repo"
+ * @param {any} pr - Object in the same shape as rowToPR output
+ */
+export async function upsertPR(repo, pr) {
+  const db = getDb();
+  await db.execute(upsertStatement(repo, pr));
+}
+
+/**
+ * Drop a PR from the cache — used when a single-PR refresh finds it closed
+ * or merged.
+ * @param {string} repo - "owner/repo"
+ * @param {number} number
+ */
+export async function deletePR(repo, number) {
+  const db = getDb();
+  await db.execute({
+    sql: `DELETE FROM e2e_prs WHERE repo = ? AND number = ?`,
+    args: [repo, number]
+  });
+}
+
+/**
+ * @param {string} repo
+ * @param {any} pr
+ * @returns {{sql: string, args: Array<any>}}
+ */
+function upsertStatement(repo, pr) {
+  return {
+    sql: `INSERT OR REPLACE INTO e2e_prs
+      (repo, number, title, author, url, base_branch, head_branch, head_sha, draft,
+       pr_created_at, pr_updated_at, connectors, test_flows, files_count,
+       head_committed_at, mergeable, ci_status, linked_issues, e2e_report, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+    args: [
+      repo,
+      pr.number,
+      pr.title ?? null,
+      pr.author ?? null,
+      pr.url ?? null,
+      pr.baseBranch ?? null,
+      pr.headBranch ?? null,
+      pr.headSha ?? null,
+      pr.draft ? 1 : 0,
+      pr.createdAt ?? null,
+      pr.updatedAt ?? null,
+      JSON.stringify(pr.connectors || []),
+      JSON.stringify(pr.testFlows || []),
+      pr.filesCount ?? null,
+      pr.headCommittedAt ?? null,
+      pr.mergeable == null ? null : pr.mergeable ? 1 : 0,
+      pr.ciStatus ?? null,
+      JSON.stringify(pr.linkedIssues || []),
+      pr.e2eReport ? JSON.stringify(pr.e2eReport) : null
+    ]
+  };
 }

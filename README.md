@@ -189,6 +189,8 @@ The **merge checklist** contains six items, each `pass` | `fail` | `warn` with a
 | `mergeable` | Not a draft, no merge conflict with the base branch                                                                  |
 | `flows`     | Flows changed by the PR are deployed and all of the connector's flows are green on the instance                      |
 
+`lastScanAt` is the **oldest** cached PR row — the freshness of the list as a whole, so refreshing a single PR card doesn't make it read as a full rescan.
+
 `readyForTesting` is the earlier gate — true when the `account` and `ci` items pass, i.e. the PR can actually be E2E-tested (a service account exists for every touched connector and CI is green). The remaining items are what the testing itself produces.
 
 Time-based rules are evaluated at read time, so a stale report flips to `fail` without a rescan.
