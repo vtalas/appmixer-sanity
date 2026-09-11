@@ -30,6 +30,7 @@
         <a href="/e2e-flows" class="text-sm text-muted-foreground hover:text-foreground">E2E Flows</a>
         <a href="/prs" class="text-sm text-muted-foreground hover:text-foreground">PRs</a>
         <a href="/authub" class="text-sm text-muted-foreground hover:text-foreground">Auth Hub</a>
+        <a href="/automation-hub" class="text-sm text-muted-foreground hover:text-foreground">Automation Hub</a>
         <a href="/settings" class="text-sm text-muted-foreground hover:text-foreground">Settings</a>
         {#if data.session?.user}
           <span class="text-sm text-muted-foreground">{data.session.user.email}</span>

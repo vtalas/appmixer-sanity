@@ -205,3 +205,13 @@ Admin features (edit service config, whitelist keys, upload bundle, delete conne
 - `AUTH_HUB_URL_PROD` — Base URL of the Auth Hub API
 - `AUTH_HUB_API_TOKEN_PROD` — Bearer token for Auth Hub API
 - `ADMIN_EMAILS` — Comma-separated list of admin email addresses
+
+## Automation Hub (`/automation-hub`)
+
+Embeds Appmixer's own marketplace widget — `appmixer.ui.AutomationHub` from the Appmixer UI SDK — for the caller's Appmixer configuration, so integrations (e.g. the GitHub / CI tab: the Copilot review and `@apx-vero` mention responders) can be activated, started/stopped and inspected without leaving the app.
+
+- **`src/routes/automation-hub/+page.server.js`** — `load()` calls `getAppmixerSession(userId)` and returns `{ baseUrl, uiUrl, token }` (or `error`).
+- **`src/routes/automation-hub/+page.svelte`** — loads the SDK from the instance itself (`<uiUrl>/appmixer/package/appmixer.js`, ~5 MB, cached by the browser), then `new Appmixer({ baseUrl })`, `set('accessToken', token)`, `AutomationHub({ el }).open()`.
+- **`getAppmixerSession(userId)`** / **`appmixerUiUrl(baseUrl)`** in `src/lib/api/appmixer.js` — the UI URL is derived from the API URL (`api-<tenant>` → `<tenant>`), the same rule the PRs page uses for Designer links.
+
+**The access token reaches the browser.** That is inherent to embedding the SDK; the page is behind the app login (`hooks.server.js`), but whoever opens it acts on the instance as the configured Appmixer user (per-user Settings, else the env account). Tabs, categories and titles are configured on the instance (`/automation-hub/settings`), not here.

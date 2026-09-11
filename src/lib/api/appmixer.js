@@ -80,6 +80,38 @@ async function getAccessToken(userId) {
 }
 
 /**
+ * UI (Designer / Studio) URL of an Appmixer instance, derived from its API URL —
+ * `https://api-<tenant>…` serves the UI at `https://<tenant>…`. Same rule the PRs
+ * page uses for its Designer links.
+ * @param {string} baseUrl - Appmixer API URL
+ * @returns {string}
+ */
+export function appmixerUiUrl(baseUrl) {
+  return (
+    (baseUrl || '')
+      .replace(/\/+$/, '')
+      .replace('api-', '')
+      // hard-coded exceptions
+      .replace('api.clientio.', 'my.clientio.')
+  );
+}
+
+/**
+ * Everything a browser-side Appmixer SDK widget needs for the caller's configuration:
+ * the API URL, the UI URL (which serves `/appmixer/package/appmixer.js`) and an access
+ * token. The token is the server's cached one, so hand it only to pages behind the
+ * app login.
+ * @param {string} userId - User ID (email)
+ * @returns {Promise<{baseUrl: string, uiUrl: string, token: string}>}
+ */
+export async function getAppmixerSession(userId) {
+  const config = await getAppmixerConfig(userId);
+  const token = await getAccessToken(userId);
+  const baseUrl = config.baseUrl.replace(/\/+$/, '');
+  return { baseUrl, uiUrl: appmixerUiUrl(baseUrl), token };
+}
+
+/**
  * Fetch all E2E test flows from Appmixer
  * @param {string} userId - User ID (email)
  * @returns {Promise<Array<{flowId: string, name: string}>>}
