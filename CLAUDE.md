@@ -16,6 +16,9 @@ pnpm run check        # Run TypeScript/Svelte type checking
 pnpm run check:watch  # Watch mode type checking
 pnpm run lint         # Check code formatting with Prettier
 pnpm run format       # Format code with Prettier
+
+# Publish a flow JSON as an Automation Hub integration (see "Migrating a flow to an integration")
+node --env-file=.env scripts/publish-integration.js <flow.json> [--category <name>] [--dry-run]
 ```
 
 ## Environment Variables
@@ -205,3 +208,78 @@ Admin features (edit service config, whitelist keys, upload bundle, delete conne
 - `AUTH_HUB_URL_PROD` — Base URL of the Auth Hub API
 - `AUTH_HUB_API_TOKEN_PROD` — Bearer token for Auth Hub API
 - `ADMIN_EMAILS` — Comma-separated list of admin email addresses
+
+## Automation Hub (`/automation-hub`)
+
+Embeds Appmixer's own marketplace widget — `appmixer.ui.AutomationHub` from the Appmixer UI SDK — for the caller's Appmixer configuration, so integrations (the `appmixer-sanity-hub` template category: the Copilot review and `@apx-vero` mention responders) can be activated, started/stopped and inspected without leaving the app.
+
+- **`src/routes/automation-hub/+page.server.js`** — `load()` calls `getAppmixerSession(userId)`, `findCategoryByName(userId, 'appmixer-sanity-hub')` and `listCategoryTemplates(userId, category.id)` and returns `{ baseUrl, uiUrl, token, category, templates }` (or `error`). A missing category is `null` and a failed template lookup is `[]`, not an error.
+- **`src/routes/automation-hub/+page.svelte`** — lists the category's templates with Designer links to the template and to its draft (`<uiUrl>/integration-designer/<flowId>` — Studio's route for integrations; `/designer/` is for plain flows; the draft is the template's `originFlowId`). Then it loads the SDK from the instance itself (`<uiUrl>/appmixer/package/appmixer.js`, ~5 MB, cached by the browser) and calls `new Appmixer({ baseUrl })`, `set('accessToken', token)`, `AutomationHub({ el, options })`, `state('flows/query/templates/categoryIds', [id])` and `open()`.
+- **`getAppmixerSession(userId)`** / **`appmixerUiUrl(baseUrl)`** / **`findCategoryByName(userId, name)`** / **`listCategoryTemplates(userId, categoryId)`** in `src/lib/api/appmixer.js` — the UI URL is derived from the API URL (`api-<tenant>` → `<tenant>`), the same rule the PRs page uses for Designer links. Templates are filtered server-side with `GET /flows?filter=type:integration-template&filter=categories:<id>`.
+
+**The widget is put back into the page flow.** The SDK's widget root (`.am-widget`) is `position: absolute; inset: 0; overflow: auto`: it fills the nearest positioned ancestor and scrolls inside it. In a plain `div` it covered the whole page (nav, heading, template list); in a sized container it added a second scrollbar. The page's `<style>` makes it `position: relative; overflow: visible` inside `#automation-hub`, so the hub takes its natural height, only the page scrolls and the hub's sticky headers stick to the viewport; `min-height: 75vh` keeps the `flex: 1` panels (Logs) from collapsing. Don't use `transform`/`contain` on the container — the hub's dialogs and the Wizard are `position: fixed` and must stay full-screen.
+
+**"Browse available" lists only published templates.** The widget queries `type:integration-template`, `categories:<id>`, `sharedWithPermissions=read` **and `sharedWith:![]`** — a template whose `sharedWith` is empty is hidden there, while the page's own template list (no `sharedWith` filter) still shows it.
+
+**Console noise in dev.** Svelte's dev build patches `Array.prototype.includes`/`indexOf` and warns `state_proxy_equality_mismatch` when an array element answers `in` for its `$state` symbol. The SDK's Vue components with runtime-compiled templates use a proxy whose `has` trap answers true for every symbol, so every hub re-render logged dozens of these. They are false positives; the page drops that one warning from `console.warn` while it is open (dev only — production has no patch).
+
+**The access token reaches the browser.** That is inherent to embedding the SDK; the page is behind the app login (`hooks.server.js`), but whoever opens it acts on the instance as the configured Appmixer user (per-user Settings, else the env account).
+
+**Filtering.** The instance is shared, so the unfiltered widget lists every template anyone published. The SDK widget does not read the hub's tabs from `/automation-hub/settings` — the page narrows it itself: `options.flows.templates.header.categories = { visible: true, tabs: [{ category: <categoryId>, label }] }` offers only that category next to "All", and the `categoryIds` state preselects it (the templates query filters on the *selected* categories, so without it the list starts on "All"). "All" still lists everything. "My automations" (instances) is per-user and the widget has no category filter for it — only search and `onlyRunning`. Options are deep-merged (`deepmerge`) over the widget defaults, so a partial `options` object is fine.
+
+**Wizard and customization.** The hub has no built-in handler for "Start automation" (templates) or "Edit settings" (instances): it emits `flow:open-wizard` and the page opens `appmixer.ui.Wizard({ flowId })` as a modal. Given a template, the Wizard clones it into a new `integration-instance` as soon as it opens; its default `flow:start` action starts the instance and then emits `flow:start-after`. **SDK widgets run an event's default action only when nothing listens to it** (`emit()` calls `next()` only for unbound events). The page leaves `flow:start-after` unbound (its default emits `close`) and handles two events. **`close`**: runs the default (`event.next()`, unmount), then `hub.reload({ mode: 'soft', scope: { flows: { instances: true } } })` — instances only. A plain `hub.reload()` is a hard reload of instances *and* templates, and the SDK's templates paging then runs away: it keeps requesting the next offset while loaded < count (0 < 3), every ~50 ms, and "Browse available" stays empty. **`cancel`** (the ×) is left to its default — delete the instance if it was never started, then emit `close` — but the Wizard is created with its own `deleteFlow` (widget option `api`: methods there override `appmixer.api` for that widget) that only remembers the id and resolves. The default deletes while the Wizard is still mounted, and the Wizard then kept assigning accounts (`PUT /auth/account/<id>/components`) and fetching `/variables/<id>/fetch` for the deleted flow — a burst of 404s. The `close` handler above runs `event.next()` (unmount), then waits for the Wizard's teardown and only then deletes the remembered ids and reloads instances. Unmounting does not stop work already under way — the Wizard still assigns accounts and re-fetches variables for about a second, with nothing signalling the end — so `wizardSettled()` watches finished requests (`PerformanceObserver`, type `resource`) that mention the instance or `/auth/account/` and resolves after 600 ms without one (no sooner than 1 s, no later than 10 s). Both halves are needed: deleting right after unmount collided with the teardown, and waiting without unmounting let the still-mounted Wizard re-fetch the deleted instance. Leaving the page before the wait ends leaves the stopped instance behind. Don't replace this with a `cancel` listener that calls `wizard.close()`: the public widget object (`open`, `close`, `reload`, `reset`, `on`, `off`, `state`, `set`, `get` — no `unmount`) hides the Wizard without unmounting it or emitting `close`, and the still-mounted Wizard re-fetched the variables of the instance as soon as it was deleted. "Customize in Editor" would need a Designer the app doesn't embed (the hub emits `flow:open-designer` after creating a stopped `custom-integration-instance`), so `customization.entryPoints` is off — which also keeps those "Custom" copies out of "My automations".
+
+## Migrating a flow to an integration
+
+An Appmixer flow that someone keeps running by hand becomes an **integration**: a template users activate themselves from `/automation-hub`, filling in a Wizard. Three flow types are involved:
+
+- **`integration-draft`** — the editable source (opens in the Designer), created from a flow JSON.
+- **`integration-template`** — published from the draft: a clone with `originFlowId` = the draft and `sharedWith` = every user of the instance. The page lists templates of the `appmixer-sanity-hub` category.
+- **`integration-instance`** — one user's copy, created by the Wizard from the template (`templateId` = the template, its own component IDs).
+
+Worked example: the Copilot review and `@apx-vero` mention responders in [`Appmixer-ai/appmixer-connectors` → `.github/appmixer-flows/`](https://github.com/Appmixer-ai/appmixer-connectors/tree/dev/.github/appmixer-flows) — the JSON format `scripts/publish-integration.js` reads, with a README on what each flow does.
+
+### 1. The flow JSON
+
+Keep it in the repository of whatever the flow automates (not here), as `{ name, description, flow, notes, wizard }`:
+
+- Start from the running flow — `GET /flows/<flowId>` — and keep those keys. Component IDs can stay: the draft keeps them, the template and every instance get their own (`componentIdMap`).
+- **`description`** — one plain sentence. The hub card shows it under the name, the Wizard in its header (as HTML).
+- **`notes`** — top-level `{ <uuid>: { x, y, width, height, content } }`, Markdown; for whoever opens an instance in the Designer.
+- Per component: pin `version` to what the instance has (`GET /components`; `appmixer component ls` reads the local connectors tree, not the instance) and set `onError` — only `errorPort`, `stopFlow` or `storeUnprocessed` are accepted; a polling trigger wants `storeUnprocessed` with auto-retry.
+- Everything a user has to choose (accounts, repository, channel, …) goes through the wizard; everything else stays fixed in the flow.
+
+### 2. The wizard
+
+`wizard.fields[]`, in the order the Wizard asks; every field has `type`, `label`, `tooltip`, `placeholder`:
+
+- **`account`** — `attrs: { service: 'appmixer:github', components: [<cid>, …] }`. The only field that fills several components.
+- **`inspectorField`** — a **top-level `source`** (not inside `attrs`) naming exactly one input: `<cid>.config.properties.<name>` for a component property, or `<cid>.config.transform.in.<senderCid>.out.lambda.<name>` for an input-port field fed from `<senderCid>`.
+- `inspectorFieldset` (a component's whole inspector), `customField`, `text`, `image`.
+
+One value cannot be written into two components. When two need it, let the wizard fill one and wire the other to it in the flow (e.g. the dispatch takes `repository.full_name` from the trigger's output), so there is one place to enter it. The publish script refuses a wizard field that points at a component the flow doesn't have — such a field is silently dropped and the Wizard then asks for nothing.
+
+### 3. Publish
+
+```bash
+node --env-file=.env scripts/publish-integration.js <flow.json> --dry-run   # what would change
+node --env-file=.env scripts/publish-integration.js <flow.json>
+```
+
+- Credentials: `APPMIXER_BASE_URL`, `APPMIXER_USERNAME`, `APPMIXER_PASSWORD`; variables set in the shell win over `.env`. Point them at the instance the hub runs against (dev-automated-00001 for the responders) — `.env` may name another one.
+- **First run** creates the draft, publishes the template from it and puts it into the category (`--category <name>`, default `appmixer-sanity-hub`, created when missing).
+- **Later runs** (same `name`) update the draft and re-publish onto the **same** template the way the Designer's Publish does: component IDs remapped through the template's `componentIdMap`, `revision` bumped. Nothing is written when nothing changed. Existing instances stay on their revision until `appmixer integration update-instances <templateId>`.
+- Publishing shares the template with every user of the instance, so an agent's permission check may stop it — then the user runs the command.
+- API quirks the script handles: the clone's `additional` takes only `type` and `sharedWith` (anything else is a 400), so categories and the description are set with a `PUT` afterwards; a draft's wizard copied onto a template without remapping points every field at the draft's component IDs.
+
+### 4. Activate and verify
+
+- `/automation-hub` → the card → **Use → Start automation** → Wizard → **Start**. The instance belongs to the Appmixer user the page runs as, and so do the accounts the Wizard offers.
+- "My automations" shows it running. Make the trigger fire once for real and check **See logs**.
+- Without the UI: `POST /flows/<templateId>/clone` with `{ setOriginFlowId: true, additional: { type: 'integration-instance' } }`, then `PUT /flows/<id>` with `{ templateId }` (the clone alone is not linked to the template), bind accounts to the clone's **new** component IDs (`componentIdMap`) and start it. Prefer the Wizard.
+
+### 5. Retire the old flow
+
+Stop the original flow only after the instance has handled a real event, and leave it stopped — not deleted — as the fallback for a while. Retry its dead-letter queue before stopping it: `appmixer dead-letter retry` into a stopped flow loses the message.
+
+**Delete** under "My automations" deletes the running instance itself; whatever it automated stops until someone activates it again.

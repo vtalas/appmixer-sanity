@@ -80,6 +80,86 @@ async function getAccessToken(userId) {
 }
 
 /**
+ * UI (Designer / Studio) URL of an Appmixer instance, derived from its API URL —
+ * `https://api-<tenant>…` serves the UI at `https://<tenant>…`. Same rule the PRs
+ * page uses for its Designer links.
+ * @param {string} baseUrl - Appmixer API URL
+ * @returns {string}
+ */
+export function appmixerUiUrl(baseUrl) {
+  return (
+    (baseUrl || '')
+      .replace(/\/+$/, '')
+      .replace('api-', '')
+      // hard-coded exceptions
+      .replace('api.clientio.', 'my.clientio.')
+  );
+}
+
+/**
+ * Everything a browser-side Appmixer SDK widget needs for the caller's configuration:
+ * the API URL, the UI URL (which serves `/appmixer/package/appmixer.js`) and an access
+ * token. The token is the server's cached one, so hand it only to pages behind the
+ * app login.
+ * @param {string} userId - User ID (email)
+ * @returns {Promise<{baseUrl: string, uiUrl: string, token: string}>}
+ */
+export async function getAppmixerSession(userId) {
+  const config = await getAppmixerConfig(userId);
+  const token = await getAccessToken(userId);
+  const baseUrl = config.baseUrl.replace(/\/+$/, '');
+  return { baseUrl, uiUrl: appmixerUiUrl(baseUrl), token };
+}
+
+/**
+ * Find an integration-template category by name. The Automation Hub page uses it to
+ * open on one category instead of every template shared on the instance.
+ * @param {string} userId - User ID (email)
+ * @param {string} name - Category name, e.g. "appmixer-sanity-hub"
+ * @returns {Promise<{id: string, name: string}|null>}
+ */
+export async function findCategoryByName(userId, name) {
+  const config = await getAppmixerConfig(userId);
+  const token = await getAccessToken(userId);
+  const response = await fetch(`${config.baseUrl}/categories`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to list categories: ${response.status}`);
+  }
+
+  const data = await response.json();
+  const categories = Array.isArray(data) ? data : [];
+  return categories.find((c) => c.name === name) || null;
+}
+
+/**
+ * Integration templates in one category, each with the draft it was published from
+ * (`originFlowId`). The Automation Hub page links both into the Designer.
+ * @param {string} userId - User ID (email)
+ * @param {string} categoryId - Category ID
+ * @returns {Promise<Array<{flowId: string, name: string, originFlowId?: string}>>}
+ */
+export async function listCategoryTemplates(userId, categoryId) {
+  const config = await getAppmixerConfig(userId);
+  const token = await getAccessToken(userId);
+  const params = new URLSearchParams({ projection: 'flowId,name,originFlowId', limit: '500' });
+  params.append('filter', 'type:integration-template');
+  params.append('filter', `categories:${categoryId}`);
+  const response = await fetch(`${config.baseUrl}/flows?${params}`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to list templates: ${response.status}`);
+  }
+
+  const data = await response.json();
+  return (Array.isArray(data) ? data : []).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
  * Fetch all E2E test flows from Appmixer
  * @param {string} userId - User ID (email)
  * @returns {Promise<Array<{flowId: string, name: string}>>}
