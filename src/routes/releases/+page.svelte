@@ -18,7 +18,8 @@
     ChevronRight,
     ExternalLink,
     TriangleAlert,
-    GitCommitHorizontal
+    GitCommitHorizontal,
+    GitPullRequest
   } from 'lucide-svelte';
 
   let { data } = $props();
@@ -73,7 +74,8 @@
 
   // Stat tiles double as filters; `release` = everything releasable
   const TILES = [
-    { key: 'release', label: 'To release', box: 'bg-slate-50 hover:bg-slate-100', num: 'text-slate-900', text: 'text-slate-700 font-medium', ring: 'ring-slate-500' },
+    { key: 'release', label: 'To release', title: 'New, major, minor and patch — not in the open release PR yet', box: 'bg-slate-50 hover:bg-slate-100', num: 'text-slate-900', text: 'text-slate-700 font-medium', ring: 'ring-slate-500' },
+    { key: 'pending', label: 'In release PR', title: 'Already in the open release PR', box: 'bg-indigo-50 hover:bg-indigo-100', num: 'text-indigo-700', text: 'text-indigo-600 font-medium', ring: 'ring-indigo-500', hideEmpty: true },
     { key: 'new', label: 'New', box: 'bg-blue-50 hover:bg-blue-100', num: 'text-blue-700', text: 'text-blue-600 font-medium', ring: 'ring-blue-500' },
     { key: 'major', label: 'Major', box: 'bg-red-50 hover:bg-red-100', num: 'text-red-700', text: 'text-red-600 font-medium', ring: 'ring-red-500' },
     { key: 'minor', label: 'Minor', box: 'bg-amber-50 hover:bg-amber-100', num: 'text-amber-700', text: 'text-amber-600 font-medium', ring: 'ring-amber-500' },
@@ -113,22 +115,21 @@
   const namespaceChanges = $derived(
     Object.fromEntries((data.namespaces || []).map((ns) => [ns.name, ns]))
   );
-  const deploysToProduction = $derived(
-    data.target?.repo === 'Appmixer-ai/appmixer-components' && data.target?.branch === 'master'
-  );
-
   const counts = $derived.by(() => {
-    const result = { all: connectors.length, release: 0 };
+    const result = { all: connectors.length, release: 0, pending: 0 };
     for (const c of connectors) {
       result[c.status] = (result[c.status] || 0) + 1;
       if (c.releasable) result.release++;
+      if (c.inPr) result.pending++;
     }
     return result;
   });
 
   const filtered = $derived(
     connectors.filter((c) => {
-      const inView = view === 'all' || (view === 'release' ? c.releasable : c.status === view);
+      const inView =
+        view === 'all' ||
+        (view === 'release' ? c.releasable : view === 'pending' ? !!c.inPr : c.status === view);
       const q = searchQuery.trim().toLowerCase();
       return inView && (!q || c.name.toLowerCase().includes(q));
     })
@@ -216,6 +217,13 @@
     }
   }
 
+  const confirmLabel = $derived.by(() => {
+    const count = plan ? plan.commits.length : releaseTargets.length;
+    const commits = `${count} commit${count !== 1 ? 's' : ''}`;
+    const pr = plan?.pr ?? data.pr;
+    return pr ? `Add ${commits} to PR #${pr.number}` : `Push ${commits} & open PR`;
+  });
+
   // After a release, reload the comparison once the dialog is closed (button or backdrop)
   $effect(() => {
     if (!dialogOpen && result) {
@@ -253,6 +261,10 @@
       ...code,
       ...(artifacts ? [`${artifacts} artifact file${artifacts !== 1 ? 's' : ''}`] : [])
     ].join(', ');
+  }
+
+  function renamedList(renamed) {
+    return renamed.map((r) => (r.from === r.to ? `${r.to} (moved)` : `${r.from} → ${r.to}`)).join(', ');
   }
 
   function latestChange(c) {
@@ -308,6 +320,30 @@
           </span>
         </a>
       {/each}
+      {#if data.pr}
+        <a
+          href={data.pr.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          class="flex items-center gap-2 px-3 py-1.5 bg-indigo-50 text-indigo-800 rounded-md hover:bg-indigo-100"
+        >
+          <GitPullRequest size={14} />
+          <span>Open release PR #{data.pr.number}</span>
+          <span class="text-xs text-indigo-600">{data.head.repo}:{data.head.branch}</span>
+        </a>
+      {:else}
+        <a
+          href={data.head.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          class="flex items-center gap-2 px-3 py-1.5 bg-muted rounded-md hover:bg-muted/70"
+        >
+          <span class="text-muted-foreground">PR from:</span>
+          <span class="text-blue-600">{data.head.repo}</span>
+          <Badge variant="outline">{data.head.branch}</Badge>
+          <span class="text-xs text-muted-foreground">no open release PR</span>
+        </a>
+      {/if}
     </div>
 
     <!-- Stats / filters -->
@@ -320,7 +356,7 @@
           tile.key
             ? `ring-2 ${tile.ring}`
             : ''}"
-          title={view === tile.key ? 'Click to show all connectors' : STATUS[tile.key]?.title || 'New, major, minor and patch'}
+          title={view === tile.key ? 'Click to show all connectors' : tile.title || STATUS[tile.key]?.title}
         >
           <div class="text-2xl font-bold {tile.num}">{counts[tile.key] || 0}</div>
           <div class="text-xs {tile.text}">{tile.label}</div>
@@ -336,6 +372,9 @@
       <select bind:value={view} class="h-10 rounded-md border border-input bg-background px-3 text-sm">
         <option value="release">To release ({counts.release})</option>
         <option value="all">All connectors ({counts.all})</option>
+        {#if counts.pending}
+          <option value="pending">In release PR ({counts.pending})</option>
+        {/if}
         {#each Object.entries(STATUS) as [key, status]}
           {#if counts[key]}
             <option value={key}>{status.label} ({counts[key]})</option>
@@ -452,6 +491,17 @@
                   >
                     {status.label}
                   </span>
+                  {#if c.inPr}
+                    <a
+                      href={c.inPr.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="ml-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border whitespace-nowrap bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100"
+                      title="The open release PR carries {c.name} {c.inPr.version}"
+                    >
+                      <GitPullRequest size={11} /> #{c.inPr.number} · {c.inPr.version}
+                    </a>
+                  {/if}
                 </td>
                 <td class="px-3 py-2 font-mono text-xs whitespace-nowrap">
                   {#if c.changes.added.length + c.changes.modified.length + c.changes.removed.length > 0}
@@ -464,7 +514,7 @@
                   {#if c.releasable && c.removedComponents.length > 0}
                     <span
                       class="inline-flex align-middle text-red-600 ml-1"
-                      title="Removes components from production: {c.removedComponents.join(', ')}"
+                      title="Deletes components dev no longer has: {c.removedComponents.join(', ')}"
                     >
                       <TriangleAlert size={13} />
                     </span>
@@ -510,11 +560,17 @@
                       {/if}
                     </div>
 
-                    {#if c.releasable && c.removedComponents.length > 0}
+                    {#if c.removedComponents.length > 0}
                       <p class="text-red-700 flex items-center gap-1.5">
                         <TriangleAlert size={13} />
-                        Removes from production: {c.removedComponents.join(', ')}
+                        Deletes components dev no longer has: {c.removedComponents.join(', ')}
                       </p>
+                    {/if}
+                    {#if c.renamedComponents.length > 0}
+                      <p class="text-amber-700">Renamed: {renamedList(c.renamedComponents)}</p>
+                    {/if}
+                    {#if c.addedComponents.length > 0}
+                      <p class="text-green-700">New components: {c.addedComponents.join(', ')}</p>
                     {/if}
 
                     {#if c.changelog.length > 0}
@@ -586,19 +642,38 @@
     <DialogHeader>
       <DialogTitle>
         {#if result}
-          Released {result.commits.length} connector{result.commits.length !== 1 ? 's' : ''}
+          {result.pr.created ? 'Opened' : 'Updated'} release PR #{result.pr.number}
         {:else}
           Release {releaseTargets.length} connector{releaseTargets.length !== 1 ? 's' : ''}
         {/if}
       </DialogTitle>
       <DialogDescription>
-        One commit per connector on
-        <span class="font-medium text-foreground">{data.target?.repo}@{data.target?.branch}</span>,
-        copied from {data.source?.repo}@{data.source?.branch}.
+        One commit per connector from {data.source?.repo}@{data.source?.branch}, pushed to
+        <span class="font-medium text-foreground">{data.head?.repo}:{data.head?.branch}</span>
+        {#if data.pr}
+          and added to the open release PR #{data.pr.number}
+        {:else}
+          with a new <code>[RELEASE]</code> PR
+        {/if}
+        into {data.target?.repo}@{data.target?.branch}.
       </DialogDescription>
     </DialogHeader>
 
     {#if result}
+      <a
+        href={result.pr.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        class="inline-flex items-center gap-1.5 text-sm font-medium text-blue-600 hover:underline"
+      >
+        <GitPullRequest size={14} />
+        {result.pr.title} #{result.pr.number}
+        <ExternalLink size={12} />
+      </a>
+      <p class="text-xs text-muted-foreground">
+        Merge it with <strong>Rebase and merge</strong> to keep one commit per connector — merging
+        starts the Marketplace PRD workflow.
+      </p>
       <ul class="space-y-1.5 text-sm">
         {#each result.commits as commit (commit.sha)}
           <li class="flex items-center gap-2">
@@ -610,19 +685,15 @@
           </li>
         {/each}
       </ul>
-      <a href={result.compareUrl} target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-sm text-blue-600 hover:underline">
-        All changes on GitHub <ExternalLink size={12} />
-      </a>
     {:else}
-      {#if deploysToProduction}
-        <div class="bg-red-50 border border-red-200 rounded-md p-3 text-sm text-red-800 flex gap-2">
-          <TriangleAlert size={16} class="shrink-0 mt-0.5" />
-          <span>
-            A push to <code>master</code> starts the <strong>Marketplace PRD</strong> workflow — every
-            version below gets installed to production.
-          </span>
-        </div>
-      {/if}
+      <div class="bg-blue-50 border border-blue-200 rounded-md p-3 text-sm text-blue-900 flex gap-2">
+        <GitPullRequest size={16} class="shrink-0 mt-0.5" />
+        <span>
+          Nothing reaches <code>{data.target?.branch}</code> until the PR is merged. Merge it with
+          <strong>Rebase and merge</strong> to keep one commit per connector — merging starts the
+          <strong>Marketplace PRD</strong> workflow.
+        </span>
+      </div>
 
       {#if planLoading}
         <p class="text-sm text-muted-foreground flex items-center gap-2">
@@ -650,8 +721,14 @@
               </p>
               {#if commit.removedComponents.length > 0}
                 <p class="text-xs text-red-700 flex items-center gap-1">
-                  <TriangleAlert size={12} /> Removes from production: {commit.removedComponents.join(', ')}
+                  <TriangleAlert size={12} /> Deletes components dev no longer has: {commit.removedComponents.join(', ')}
                 </p>
+              {/if}
+              {#if commit.renamedComponents.length > 0}
+                <p class="text-xs text-amber-700">Renamed: {renamedList(commit.renamedComponents)}</p>
+              {/if}
+              {#if commit.addedComponents.length > 0}
+                <p class="text-xs text-green-700">New components: {commit.addedComponents.join(', ')}</p>
               {/if}
               {#if commit.shared.keptRemoved.length > 0}
                 <p class="text-xs text-muted-foreground">
@@ -673,15 +750,9 @@
         <Button onclick={() => (dialogOpen = false)}>Close</Button>
       {:else}
         <Button variant="outline" onclick={() => (dialogOpen = false)} disabled={releasing}>Cancel</Button>
-        <Button
-          variant={deploysToProduction ? 'destructive' : 'default'}
-          onclick={confirmRelease}
-          disabled={!plan || planLoading || releasing}
-        >
-          <Rocket size={14} class="mr-2" />
-          {releasing
-            ? 'Releasing...'
-            : `Release ${plan ? plan.commits.length : releaseTargets.length} commit${(plan ? plan.commits.length : releaseTargets.length) !== 1 ? 's' : ''}`}
+        <Button onclick={confirmRelease} disabled={!plan || planLoading || releasing}>
+          <GitPullRequest size={14} class="mr-2" />
+          {releasing ? 'Pushing...' : confirmLabel}
         </Button>
       {/if}
     </DialogFooter>

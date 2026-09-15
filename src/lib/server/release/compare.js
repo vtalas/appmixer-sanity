@@ -34,8 +34,10 @@ const treeCache = new Map();
 const RELEASABLE = new Set(['new', 'major', 'minor', 'patch']);
 
 /**
- * Source (development) and target (release) repositories.
- * @returns {{source: RepoRef, target: RepoRef}}
+ * Source (development), target (the release branch a PR goes into) and head
+ * (the branch the release commits are pushed to — by default the `release`
+ * branch of vtalas's fork, the head of every "[RELEASE]" PR so far).
+ * @returns {{source: RepoRef, target: RepoRef, head: RepoRef}}
  *
  * @typedef {{owner: string, name: string, fullName: string, branch: string, url: string}} RepoRef
  */
@@ -48,8 +50,29 @@ export function getReleaseConfig() {
     target: repoRef(
       env.RELEASE_TARGET_REPO || 'Appmixer-ai/appmixer-components',
       env.RELEASE_TARGET_BRANCH || 'master'
+    ),
+    head: repoRef(
+      env.RELEASE_HEAD_REPO || 'vtalas/appmixer-components',
+      env.RELEASE_HEAD_BRANCH || 'release'
     )
   };
+}
+
+/**
+ * The open PR from the head branch into the target branch, if any.
+ * @param {string} token
+ * @param {{target: RepoRef, head: RepoRef}} config
+ * @returns {Promise<{number: number, url: string, title: string} | null>}
+ */
+async function findReleasePr(token, { target, head }) {
+  const prs = await githubRequest(
+    token,
+    'GET',
+    `/repos/${target.fullName}/pulls?state=open&base=${encodeURIComponent(target.branch)}` +
+      `&head=${encodeURIComponent(`${head.owner}:${head.branch}`)}`
+  );
+  const pr = prs[0];
+  return pr ? { number: pr.number, url: pr.html_url, title: pr.title } : null;
 }
 
 function repoRef(fullName, branch) {
@@ -341,7 +364,7 @@ function releaseMessage(name, version, status) {
  * Compare one connector between the two repos.
  */
 function describeConnector(name, state, bundles) {
-  const { source, target } = state;
+  const { source, target, pending, pr } = state;
   const bundlePath = `${CONNECTORS_ROOT}${name}/bundle.json`;
   const devFile = source.files.get(bundlePath);
   const masterFile = target.files.get(bundlePath);
@@ -366,7 +389,17 @@ function describeConnector(name, state, bundles) {
     else if (devParsed.minor !== masterParsed.minor) status = 'minor';
     else status = 'patch';
   }
-  const releasable = RELEASABLE.has(status);
+
+  // Already on its way: the open release PR carries another bundle than master
+  const pendingFile = pending?.files.get(bundlePath);
+  const pendingVersion =
+    pendingFile && pendingFile.sha !== masterFile?.sha
+      ? (parseBundle(bundles.get(pendingFile.sha))?.version ?? null)
+      : null;
+  const inPr = pendingVersion ? { number: pr.number, url: pr.url, version: pendingVersion } : null;
+
+  // Releasable unless the open PR already carries this very version
+  const releasable = RELEASABLE.has(status) && !(inPr && inPr.version === dev?.version);
 
   // Changelog entries the release would ship (everything newer than master)
   const changelog = Object.entries(dev?.changelog || {})
@@ -384,6 +417,17 @@ function describeConnector(name, state, bundles) {
   const prefix = `${CONNECTORS_ROOT}${name}/`;
   const relative = (paths) => paths.map((path) => path.slice(prefix.length));
   const componentOf = (path) => path.slice(prefix.length).split('/').slice(-2, -1)[0];
+  const isComponent = (path) => path.endsWith('/component.json');
+
+  // A component whose directory only changed case or place (MakeAPICall →
+  // MakeApiCall) shows up as removed + added — report it as renamed instead
+  const removedNames = diff.removed.filter(isComponent).map(componentOf);
+  const addedNames = diff.added.filter(isComponent).map(componentOf);
+  const renamedComponents = [];
+  for (const from of removedNames) {
+    const to = addedNames.find((added) => added.toLowerCase() === from.toLowerCase());
+    if (to) renamedComponents.push({ from, to });
+  }
 
   return {
     name,
@@ -392,15 +436,17 @@ function describeConnector(name, state, bundles) {
     masterVersion: master?.version ?? null,
     status,
     releasable,
-    message: releasable ? releaseMessage(name, dev.version, status) : null,
+    inPr,
+    message: RELEASABLE.has(status) ? releaseMessage(name, dev.version, status) : null,
     changes: {
       added: relative(diff.added),
       modified: relative(diff.modified),
       removed: relative(diff.removed)
     },
-    // Components the release deletes from production (on master, gone on dev)
-    removedComponents: diff.removed.filter((p) => p.endsWith('/component.json')).map(componentOf),
-    addedComponents: diff.added.filter((p) => p.endsWith('/component.json')).map(componentOf),
+    // Components the release deletes (on master, dev doesn't have them at all)
+    removedComponents: removedNames.filter((n) => !renamedComponents.some((r) => r.from === n)),
+    addedComponents: addedNames.filter((n) => !renamedComponents.some((r) => r.to === n)),
+    renamedComponents,
     changelog
   };
 }
@@ -417,24 +463,35 @@ let lastComparison = null;
  */
 export async function loadReleaseState(token) {
   const config = getReleaseConfig();
-  const [source, target] = await Promise.all([
+  const [source, target, pr] = await Promise.all([
     fetchSnapshot(token, config.source),
-    fetchSnapshot(token, config.target)
+    fetchSnapshot(token, config.target),
+    findReleasePr(token, config)
   ]);
+  // With an open release PR, its branch is what the next commits build on, and
+  // it tells which connectors are already on their way to the release branch
+  const pending = pr ? await fetchSnapshot(token, config.head) : null;
+  const live = { source, target, pending, pr, head: config.head };
 
-  const key = `${source.repo.fullName}:${source.treeSha}|${target.repo.fullName}:${target.treeSha}`;
+  const key =
+    `${source.repo.fullName}:${source.treeSha}|${target.repo.fullName}:${target.treeSha}|` +
+    (pending ? `${pr.number}:${pending.treeSha}` : '-');
   if (lastComparison?.key === key) {
     // Fresh commit info (a new commit can keep the same tree), cached analysis
-    return { ...lastComparison.analysis, source, target };
+    return { ...lastComparison.analysis, ...live };
   }
 
   // Union of both repos' roots, so a file is attributed to the same connector
   // on both sides (e.g. a connector that got its bundle.json only on dev)
   const roots = new Set([...connectorRoots(source.files), ...connectorRoots(target.files)]);
   const { byConnector, byNamespace } = indexPaths(roots, source.files, target.files);
-  const bundles = await readBundles(token, [source, target], roots);
+  const bundles = await readBundles(
+    token,
+    pending ? [source, target, pending] : [source, target],
+    roots
+  );
 
-  const state = { source, target, roots, byConnector, byNamespace };
+  const state = { source, target, pending, pr, roots, byConnector, byNamespace };
   const connectors = [...roots].sort().map((name) => describeConnector(name, state, bundles));
 
   // Shared namespace files (google/auth.js, microsoft/microsoft-commons.js, ...)
@@ -455,7 +512,12 @@ export async function loadReleaseState(token) {
 
   const analysis = { roots, byConnector, byNamespace, connectors, namespaces };
   lastComparison = { key, analysis };
-  return { ...analysis, source, target };
+  return { ...analysis, ...live };
+}
+
+/** @param {RepoRef} head */
+function headInfo(head) {
+  return { repo: head.fullName, branch: head.branch, url: head.url };
 }
 
 /**
@@ -468,9 +530,11 @@ export async function compareReleases(userId) {
   return {
     source: snapshotInfo(state.source),
     target: snapshotInfo(state.target),
+    head: headInfo(state.head),
+    pr: state.pr,
     connectors: state.connectors,
     namespaces: state.namespaces
   };
 }
 
-export { snapshotInfo };
+export { snapshotInfo, headInfo };

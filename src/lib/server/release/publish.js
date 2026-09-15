@@ -1,8 +1,9 @@
 /**
- * Release: copy connectors from the development repo (appmixer-connectors dev)
- * to the release repo (appmixer-components master) — one commit per connector
- * with the message "<connector> <version> (<new|major|minor|patch>)", the same
- * convention as the hand-made releases before.
+ * Release: bring connectors from the development repo (appmixer-connectors
+ * dev) to the release branch (appmixer-components master) through a pull
+ * request — one commit per connector with the message
+ * "<connector> <version> (<new|major|minor|patch>)", the convention of the
+ * hand-made releases.
  *
  * Each commit mirrors the connector directory: files are added, changed and
  * deleted to match dev, while nested connectors (utils/http inside utils) and
@@ -12,9 +13,12 @@
  * them. Shared files are never deleted: other connectors of the namespace that
  * are not part of the release may still need them.
  *
- * The commits are chained through the Git Data API and published with a single
- * fast-forward of the branch ref at the end: either every commit lands or none
- * does, and a branch that moved meanwhile rejects the update.
+ * The commits are chained through the Git Data API in the head repo (the
+ * `release` branch of a fork by default) on top of master, or on top of the
+ * open release PR, which then just gets more commits. The head branch moves
+ * once at the end, so either every commit lands or none does. Nothing reaches
+ * master (and the Marketplace PRD workflow) until someone merges the PR with
+ * "Rebase and merge", which keeps one commit per connector.
  */
 
 import { getGitHubConfig } from '$lib/api/github.js';
@@ -22,6 +26,7 @@ import {
   CONNECTORS_ROOT,
   diffPaths,
   githubRequest,
+  headInfo,
   loadReleaseState,
   mapLimit,
   snapshotInfo
@@ -29,6 +34,7 @@ import {
 
 const BLOB_COPY_CONCURRENCY = 8;
 const NO_CHANGES = { added: [], modified: [], removed: [] };
+const PR_TITLE = '[RELEASE]';
 
 export class ReleaseError extends Error {
   /**
@@ -42,6 +48,7 @@ export class ReleaseError extends Error {
 }
 
 const relative = (paths) => paths.map((path) => path.slice(CONNECTORS_ROOT.length));
+const firstLine = (message) => String(message).split('\n')[0];
 
 function summarize(step) {
   const { connector, own, shared } = step;
@@ -54,6 +61,8 @@ function summarize(step) {
     modified: relative(own.modified),
     removed: relative(own.removed),
     removedComponents: connector.removedComponents,
+    renamedComponents: connector.renamedComponents,
+    addedComponents: connector.addedComponents,
     shared: {
       added: relative(shared.added),
       modified: relative(shared.modified),
@@ -61,6 +70,83 @@ function summarize(step) {
       keptRemoved: relative(shared.removed)
     }
   };
+}
+
+function prBody(messages, source, target) {
+  return [
+    `Connectors from ${source.repo.fullName}@${source.repo.branch}, released from the appmixer-sanity Release page — one commit per connector:`,
+    '',
+    ...messages.map((message) => `- ${message}`),
+    '',
+    `**Merge with "Rebase and merge"** to keep one commit per connector on \`${target.repo.branch}\` (a squash merge folds them into one). Merging starts the Marketplace PRD workflow.`
+  ].join('\n');
+}
+
+/** Head sha of a branch, null when the branch doesn't exist */
+async function readBranch(token, repo) {
+  try {
+    const ref = await githubRequest(
+      token,
+      'GET',
+      `/repos/${repo.fullName}/git/ref/heads/${encodeURIComponent(repo.branch)}`
+    );
+    return ref.object.sha;
+  } catch (e) {
+    if (/** @type {any} */ (e).status === 404) return null;
+    throw e;
+  }
+}
+
+/**
+ * A head branch without an open PR gets reset onto the target branch. Refuse
+ * when it carries commits the target doesn't have — compared by message,
+ * because "Rebase and merge" rewrites the shas but keeps the messages — so
+ * unmerged work is never thrown away.
+ */
+async function assertNothingUnmerged(token, target, head) {
+  const compare = await githubRequest(
+    token,
+    'GET',
+    `/repos/${target.repo.fullName}/compare/${encodeURIComponent(target.repo.branch)}...` +
+      encodeURIComponent(`${head.owner}:${head.branch}`)
+  );
+  if (!compare.ahead_by) return;
+
+  const onTarget = new Set();
+  for (let page = 1; page <= 3; page++) {
+    const commits = await githubRequest(
+      token,
+      'GET',
+      `/repos/${target.repo.fullName}/commits?sha=${encodeURIComponent(target.repo.branch)}&per_page=100&page=${page}`
+    );
+    for (const commit of commits) onTarget.add(firstLine(commit.commit.message));
+    if (commits.length < 100) break;
+  }
+
+  const unmerged = compare.commits.filter((c) => !onTarget.has(firstLine(c.commit.message)));
+  if (unmerged.length > 0) {
+    throw new ReleaseError(
+      `${head.fullName}@${head.branch} has ${unmerged.length} commit(s) that are not on ` +
+        `${target.repo.branch} and no open PR (e.g. "${firstLine(unmerged[0].commit.message)}") — ` +
+        'merge or delete that branch first',
+      409
+    );
+  }
+}
+
+/** Commit messages of a PR, oldest first */
+async function listPrMessages(token, target, number) {
+  const messages = [];
+  for (let page = 1; page <= 3; page++) {
+    const commits = await githubRequest(
+      token,
+      'GET',
+      `/repos/${target.repo.fullName}/pulls/${number}/commits?per_page=100&page=${page}`
+    );
+    messages.push(...commits.map((c) => firstLine(c.commit.message)));
+    if (commits.length < 100) break;
+  }
+  return messages;
 }
 
 /**
@@ -78,7 +164,7 @@ export async function releaseConnectors(userId, items, { dryRun = false } = {}) 
   }
 
   const state = await loadReleaseState(token);
-  const { source, target } = state;
+  const { source, target, pending, pr, head } = state;
   const byName = new Map(state.connectors.map((c) => [c.name, c]));
 
   const selected = new Map();
@@ -88,7 +174,12 @@ export async function releaseConnectors(userId, items, { dryRun = false } = {}) 
       throw new ReleaseError(`Unknown connector: ${item.name}`, 404);
     }
     if (!connector.releasable) {
-      throw new ReleaseError(`${item.name} has nothing to release (${connector.status})`, 409);
+      throw new ReleaseError(
+        connector.inPr
+          ? `${item.name} ${connector.devVersion} is already in PR #${connector.inPr.number}`
+          : `${item.name} has nothing to release (${connector.status})`,
+        409
+      );
     }
     if (item.devVersion && item.devVersion !== connector.devVersion) {
       throw new ReleaseError(
@@ -100,9 +191,11 @@ export async function releaseConnectors(userId, items, { dryRun = false } = {}) 
     selected.set(connector.name, connector);
   }
 
-  // Plan the commits against a working copy of the release tree, so that a
-  // namespace's shared files ship with the first of its connectors only
-  const working = new Map(target.files);
+  // The commits build on the open release PR when there is one, else on the
+  // release branch itself. Planned against a working copy of that tree, so a
+  // namespace's shared files ship with the first of its connectors only.
+  const base = pending || target;
+  const working = new Map(base.files);
   const steps = [...selected.values()]
     .sort((a, b) => a.name.localeCompare(b.name))
     .map((connector) => {
@@ -114,24 +207,40 @@ export async function releaseConnectors(userId, items, { dryRun = false } = {}) 
       for (const path of writes) working.set(path, source.files.get(path));
       for (const path of own.removed) working.delete(path);
       return { connector, own, shared, writes, deletes: own.removed };
-    });
+    })
+    .filter((step) => step.writes.length + step.deletes.length > 0);
+
+  if (steps.length === 0) {
+    throw new ReleaseError('Nothing to commit — the release branch already has these files', 409);
+  }
 
   if (dryRun) {
     return {
       dryRun: true,
       source: snapshotInfo(source),
       target: snapshotInfo(target),
+      head: headInfo(head),
+      pr,
       commits: steps.map(summarize)
     };
   }
 
-  const base = `/repos/${target.repo.fullName}`;
+  // Without an open PR the head branch is reset onto the release branch —
+  // check it first, before anything is written
+  const existingHead = pr ? null : await readBranch(token, head);
+  if (existingHead) {
+    await assertNothingUnmerged(token, target, head);
+  }
+  const previousMessages = pr ? await listPrMessages(token, target, pr.number) : [];
 
-  // Copy the blobs the release repo doesn't have yet. Git objects are
-  // content-addressed: a file already present anywhere on the release branch
+  const headApi = `/repos/${head.fullName}`;
+
+  // Copy the blobs the head repo doesn't have yet. Git objects are
+  // content-addressed: a file already present anywhere in the base tree
   // (unchanged icon, a file moved between components) needs no upload, and the
-  // copy must come back with the same sha.
-  const known = new Set([...target.files.values()].map((file) => file.sha));
+  // copy must come back with the same sha. A fork shares its parent's objects,
+  // so the base tree itself needs no copying.
+  const known = new Set([...base.files.values()].map((file) => file.sha));
   const missing = [
     ...new Set(steps.flatMap((step) => step.writes.map((path) => source.files.get(path).sha)))
   ].filter((sha) => !known.has(sha));
@@ -141,7 +250,7 @@ export async function releaseConnectors(userId, items, { dryRun = false } = {}) 
       'GET',
       `/repos/${source.repo.fullName}/git/blobs/${sha}`
     );
-    const created = await githubRequest(token, 'POST', `${base}/git/blobs`, {
+    const created = await githubRequest(token, 'POST', `${headApi}/git/blobs`, {
       content: blob.content.replace(/\n/g, ''),
       encoding: 'base64'
     });
@@ -150,8 +259,8 @@ export async function releaseConnectors(userId, items, { dryRun = false } = {}) 
     }
   });
 
-  let parent = target.commitSha;
-  let treeSha = target.treeSha;
+  let parent = base.commitSha;
+  let treeSha = base.treeSha;
   const commits = [];
   for (const step of steps) {
     const entries = [
@@ -161,18 +270,16 @@ export async function releaseConnectors(userId, items, { dryRun = false } = {}) 
       }),
       ...step.deletes.map((path) => ({
         path,
-        mode: target.files.get(path).mode,
+        mode: base.files.get(path)?.mode || '100644',
         type: 'blob',
         sha: null
       }))
     ];
-    if (entries.length === 0) continue;
-
-    const tree = await githubRequest(token, 'POST', `${base}/git/trees`, {
+    const tree = await githubRequest(token, 'POST', `${headApi}/git/trees`, {
       base_tree: treeSha,
       tree: entries
     });
-    const commit = await githubRequest(token, 'POST', `${base}/git/commits`, {
+    const commit = await githubRequest(token, 'POST', `${headApi}/git/commits`, {
       message: step.connector.message,
       tree: tree.sha,
       parents: [parent]
@@ -182,32 +289,66 @@ export async function releaseConnectors(userId, items, { dryRun = false } = {}) 
     commits.push({ ...summarize(step), sha: commit.sha, url: commit.html_url });
   }
 
-  if (commits.length === 0) {
-    throw new ReleaseError('Nothing to commit — the release branch already has these files', 409);
-  }
-
+  // Move the head branch once: fast-forward onto the open PR, else reset it
+  // onto the release branch (checked above) or create it
+  const refPath = `${headApi}/git/refs/heads/${encodeURIComponent(head.branch)}`;
   try {
-    await githubRequest(
-      token,
-      'PATCH',
-      `${base}/git/refs/heads/${encodeURIComponent(target.repo.branch)}`,
-      { sha: parent, force: false }
-    );
+    if (pr) {
+      await githubRequest(token, 'PATCH', refPath, { sha: parent, force: false });
+    } else if (existingHead) {
+      await githubRequest(token, 'PATCH', refPath, { sha: parent, force: true });
+    } else {
+      await githubRequest(token, 'POST', `${headApi}/git/refs`, {
+        ref: `refs/heads/${head.branch}`,
+        sha: parent
+      });
+    }
   } catch (e) {
     if (/** @type {any} */ (e).status === 422) {
       throw new ReleaseError(
-        `${target.repo.fullName}@${target.repo.branch} moved while releasing — nothing was published. Refresh and try again.`,
+        `${head.fullName}@${head.branch} moved while releasing — nothing was published. Refresh and try again.`,
         409
       );
     }
     throw e;
   }
 
+  const messages = [...previousMessages, ...commits.map((c) => c.message)];
+  let releasePr;
+  try {
+    if (pr) {
+      await githubRequest(token, 'PATCH', `/repos/${target.repo.fullName}/pulls/${pr.number}`, {
+        body: prBody(messages, source, target)
+      });
+      releasePr = { ...pr, created: false };
+    } else {
+      const created = await githubRequest(token, 'POST', `/repos/${target.repo.fullName}/pulls`, {
+        title: PR_TITLE,
+        head: `${head.owner}:${head.branch}`,
+        base: target.repo.branch,
+        body: prBody(messages, source, target)
+      });
+      releasePr = {
+        number: created.number,
+        url: created.html_url,
+        title: created.title,
+        created: true
+      };
+    }
+  } catch (e) {
+    throw new ReleaseError(
+      `The commits are on ${head.fullName}@${head.branch}, but ${pr ? 'updating' : 'opening'} the PR failed: ` +
+        `${/** @type {any} */ (e).message} — open it on GitHub by hand`,
+      502
+    );
+  }
+
   return {
     dryRun: false,
     source: snapshotInfo(source),
-    target: { ...snapshotInfo(target), newCommitSha: parent },
-    commits,
-    compareUrl: `https://github.com/${target.repo.fullName}/compare/${target.commitSha}...${parent}`
+    target: snapshotInfo(target),
+    head: { ...headInfo(head), sha: parent },
+    pr: releasePr,
+    commits
   };
 }
