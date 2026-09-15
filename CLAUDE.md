@@ -16,6 +16,9 @@ pnpm run check        # Run TypeScript/Svelte type checking
 pnpm run check:watch  # Watch mode type checking
 pnpm run lint         # Check code formatting with Prettier
 pnpm run format       # Format code with Prettier
+
+# Publish a flow JSON as an Automation Hub integration (see "Migrating a flow to an integration")
+node --env-file=.env scripts/publish-integration.js <flow.json> [--category <name>] [--dry-run]
 ```
 
 ## Environment Variables
@@ -215,3 +218,58 @@ Embeds Appmixer's own marketplace widget — `appmixer.ui.AutomationHub` from th
 - **`getAppmixerSession(userId)`** / **`appmixerUiUrl(baseUrl)`** in `src/lib/api/appmixer.js` — the UI URL is derived from the API URL (`api-<tenant>` → `<tenant>`), the same rule the PRs page uses for Designer links.
 
 **The access token reaches the browser.** That is inherent to embedding the SDK; the page is behind the app login (`hooks.server.js`), but whoever opens it acts on the instance as the configured Appmixer user (per-user Settings, else the env account). Tabs, categories and titles are configured on the instance (`/automation-hub/settings`), not here.
+
+## Migrating a flow to an integration
+
+An Appmixer flow that someone keeps running by hand becomes an **integration**: a template users activate themselves from `/automation-hub`, filling in a Wizard. Three flow types are involved:
+
+- **`integration-draft`** — the editable source (opens in the Designer), created from a flow JSON.
+- **`integration-template`** — published from the draft: a clone with `originFlowId` = the draft and `sharedWith` = every user of the instance. The page lists templates of the `appmixer-sanity-hub` category.
+- **`integration-instance`** — one user's copy, created by the Wizard from the template (`templateId` = the template, its own component IDs).
+
+Worked example: the Copilot review and `@apx-vero` mention responders in [`Appmixer-ai/appmixer-connectors` → `.github/appmixer-flows/`](https://github.com/Appmixer-ai/appmixer-connectors/tree/dev/.github/appmixer-flows) — the JSON format `scripts/publish-integration.js` reads, with a README on what each flow does.
+
+### 1. The flow JSON
+
+Keep it in the repository of whatever the flow automates (not here), as `{ name, description, flow, notes, wizard }`:
+
+- Start from the running flow — `GET /flows/<flowId>` — and keep those keys. Component IDs can stay: the draft keeps them, the template and every instance get their own (`componentIdMap`).
+- **`description`** — one plain sentence. The hub card shows it under the name, the Wizard in its header (as HTML).
+- **`notes`** — top-level `{ <uuid>: { x, y, width, height, content } }`, Markdown; for whoever opens an instance in the Designer.
+- Per component: pin `version` to what the instance has (`GET /components`; `appmixer component ls` reads the local connectors tree, not the instance) and set `onError` — only `errorPort`, `stopFlow` or `storeUnprocessed` are accepted; a polling trigger wants `storeUnprocessed` with auto-retry.
+- Everything a user has to choose (accounts, repository, channel, …) goes through the wizard; everything else stays fixed in the flow.
+
+### 2. The wizard
+
+`wizard.fields[]`, in the order the Wizard asks; every field has `type`, `label`, `tooltip`, `placeholder`:
+
+- **`account`** — `attrs: { service: 'appmixer:github', components: [<cid>, …] }`. The only field that fills several components.
+- **`inspectorField`** — a **top-level `source`** (not inside `attrs`) naming exactly one input: `<cid>.config.properties.<name>` for a component property, or `<cid>.config.transform.in.<senderCid>.out.lambda.<name>` for an input-port field fed from `<senderCid>`.
+- `inspectorFieldset` (a component's whole inspector), `customField`, `text`, `image`.
+
+One value cannot be written into two components. When two need it, let the wizard fill one and wire the other to it in the flow (e.g. the dispatch takes `repository.full_name` from the trigger's output), so there is one place to enter it. The publish script refuses a wizard field that points at a component the flow doesn't have — such a field is silently dropped and the Wizard then asks for nothing.
+
+### 3. Publish
+
+```bash
+node --env-file=.env scripts/publish-integration.js <flow.json> --dry-run   # what would change
+node --env-file=.env scripts/publish-integration.js <flow.json>
+```
+
+- Credentials: `APPMIXER_BASE_URL`, `APPMIXER_USERNAME`, `APPMIXER_PASSWORD`; variables set in the shell win over `.env`. Point them at the instance the hub runs against (dev-automated-00001 for the responders) — `.env` may name another one.
+- **First run** creates the draft, publishes the template from it and puts it into the category (`--category <name>`, default `appmixer-sanity-hub`, created when missing).
+- **Later runs** (same `name`) update the draft and re-publish onto the **same** template the way the Designer's Publish does: component IDs remapped through the template's `componentIdMap`, `revision` bumped. Nothing is written when nothing changed. Existing instances stay on their revision until `appmixer integration update-instances <templateId>`.
+- Publishing shares the template with every user of the instance, so an agent's permission check may stop it — then the user runs the command.
+- API quirks the script handles: the clone's `additional` takes only `type` and `sharedWith` (anything else is a 400), so categories and the description are set with a `PUT` afterwards; a draft's wizard copied onto a template without remapping points every field at the draft's component IDs.
+
+### 4. Activate and verify
+
+- `/automation-hub` → the card → **Use → Start automation** → Wizard → **Start**. The instance belongs to the Appmixer user the page runs as, and so do the accounts the Wizard offers.
+- "My automations" shows it running. Make the trigger fire once for real and check **See logs**.
+- Without the UI: `POST /flows/<templateId>/clone` with `{ setOriginFlowId: true, additional: { type: 'integration-instance' } }`, then `PUT /flows/<id>` with `{ templateId }` (the clone alone is not linked to the template), bind accounts to the clone's **new** component IDs (`componentIdMap`) and start it. Prefer the Wizard.
+
+### 5. Retire the old flow
+
+Stop the original flow only after the instance has handled a real event, and leave it stopped — not deleted — as the fallback for a while. Retry its dead-letter queue before stopping it: `appmixer dead-letter retry` into a stopped flow loses the message.
+
+**Delete** under "My automations" deletes the running instance itself; whatever it automated stops until someone activates it again.
