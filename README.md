@@ -16,7 +16,7 @@ See `CLAUDE.md` for the full architecture documentation (data model, modules, in
 | `/e2e-flows`                       | E2E test flows — GitHub (dev branch) merged with the Appmixer instance state and latest run results; diff, upload, revert, sync-to-PR, and a throttled test runner                                                 |
 | `/prs`                             | Connector PRs — open PRs of the connectors repo with the E2E flow state of every touched connector and a per-PR **merge checklist** (account, linked issue, fresh green E2E report, CI, mergeability, flows green) |
 | `/authub`                          | Auth Hub — browse and manage OAuth connector configs/bundles registered in Auth Hub, verification status tracking                                                                                                  |
-| `/automation-hub`                  | Automation Hub — Appmixer's own marketplace widget (`appmixer.ui.AutomationHub`) for the configured instance: activate, start/stop and inspect integrations such as the GitHub / CI responders                     |
+| `/automation-hub`                  | Automation Hub — Appmixer's own marketplace widget (`appmixer.ui.AutomationHub`) for the configured instance: activate, start/stop and inspect the `appmixer-sanity-hub` integrations (GitHub responders)          |
 | `/settings`                        | Per-user overrides for Appmixer / GitHub credentials (take precedence over env values)                                                                                                                             |
 
 ## Getting started

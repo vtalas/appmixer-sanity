@@ -112,6 +112,54 @@ export async function getAppmixerSession(userId) {
 }
 
 /**
+ * Find an integration-template category by name. The Automation Hub page uses it to
+ * open on one category instead of every template shared on the instance.
+ * @param {string} userId - User ID (email)
+ * @param {string} name - Category name, e.g. "appmixer-sanity-hub"
+ * @returns {Promise<{id: string, name: string}|null>}
+ */
+export async function findCategoryByName(userId, name) {
+  const config = await getAppmixerConfig(userId);
+  const token = await getAccessToken(userId);
+  const response = await fetch(`${config.baseUrl}/categories`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to list categories: ${response.status}`);
+  }
+
+  const data = await response.json();
+  const categories = Array.isArray(data) ? data : [];
+  return categories.find((c) => c.name === name) || null;
+}
+
+/**
+ * Integration templates in one category, each with the draft it was published from
+ * (`originFlowId`). The Automation Hub page links both into the Designer.
+ * @param {string} userId - User ID (email)
+ * @param {string} categoryId - Category ID
+ * @returns {Promise<Array<{flowId: string, name: string, originFlowId?: string}>>}
+ */
+export async function listCategoryTemplates(userId, categoryId) {
+  const config = await getAppmixerConfig(userId);
+  const token = await getAccessToken(userId);
+  const params = new URLSearchParams({ projection: 'flowId,name,originFlowId', limit: '500' });
+  params.append('filter', 'type:integration-template');
+  params.append('filter', `categories:${categoryId}`);
+  const response = await fetch(`${config.baseUrl}/flows?${params}`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to list templates: ${response.status}`);
+  }
+
+  const data = await response.json();
+  return (Array.isArray(data) ? data : []).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
  * Fetch all E2E test flows from Appmixer
  * @param {string} userId - User ID (email)
  * @returns {Promise<Array<{flowId: string, name: string}>>}
