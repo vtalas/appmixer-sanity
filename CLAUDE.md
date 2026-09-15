@@ -144,6 +144,27 @@ Open PRs of the connectors repo with the E2E flow state of every connector they 
 | `api/prs/[number]/scan` | POST | Refresh a single PR (session auth); returns `{removed: true}` when it is no longer open |
 | `api/public/prs` | GET | **Public** (no auth) PR status from the caches only — per PR: connectors with `accountAvailable` + flows (`syncStatus`, `deployed`, `lastResult`, `changedInPR`); optional `?connector=` filter |
 
+## Release (`/releases`)
+
+Compares the **release repo** (`Appmixer-ai/appmixer-components` `master` — every push there runs the **Marketplace PRD** workflow, which installs each new bundle version to production) with the **development repo** (`Appmixer-ai/appmixer-connectors` `dev`), and releases connectors from one to the other.
+
+- **Comparison** — `src/lib/server/release/compare.js`, `compareReleases(userId)` / `loadReleaseState(token)`. One recursive git tree per repo (cached in memory by tree sha) plus every connector's `bundle.json` (cached in the **`release_bundle_blobs`** table by blob sha — content-addressed, never invalidated). A connector is a directory under `src/appmixer/` with a `bundle.json`; a file belongs to the **nearest** one (`utils/http`, not its parent `utils`), and files no connector owns belong to their **namespace** (`google/auth.js`, `microsoft/microsoft-commons.js`). Files are compared by blob sha, so nothing is downloaded to find out they differ.
+- **Status** per connector: `new` (not on the release branch), `major` / `minor` / `patch` (dev version is higher — named after the part that changed), `drift` (same version, different files — bump the version on dev first), `behind` (release branch is higher — a hotfix), `master-only`, `same`, `invalid` (no semver version). Only `new` / `major` / `minor` / `patch` are releasable.
+- **Excluded files** — `artifacts/ai-artifacts/**` and `package-lock.json` are never compared, released or deleted (`isExcluded`). None of them ever reached master in the hand-made releases; without the rule 38 connectors looked drifted.
+- **Release** — `src/lib/server/release/publish.js`, `releaseConnectors(userId, items, {dryRun})`. One commit per connector with the message `<connector> <version> (<new|major|minor|patch>)`, the convention of the hand-made releases on master. Each commit mirrors the connector directory from dev: files are added, changed **and deleted** (the page warns when a release removes components from production). It also carries the namespace's added/changed shared files, in the first commit of that namespace only. Shared files are never deleted, because other connectors of the namespace may still use them.
+- **Atomic publish** — missing blobs are copied through the Git Data API (`git/blobs` → `git/trees` with `base_tree` → `git/commits`, chained). The branch ref moves **once** at the end with `force: false`: either every commit lands or none does, and a branch that moved meanwhile rejects the update (409, nothing published). The request carries the `devVersion` the admin reviewed, and the release is refused when dev has moved to another version since. `dryRun: true` returns the planned commits; the confirmation dialog shows them.
+- **GitHub calls** — `githubRequest()` retries reads (network errors, 5xx) with a 30 s timeout per request: GitHub occasionally closes the connection halfway through a 3 MB tree download, which used to hang a page load for minutes.
+- **Token** — the caller's GitHub token (Settings) or `SANITY_GITHUB_TOKEN`: read access to both repos (appmixer-components is private), push access to the release repo. Commits are authored by the token's owner.
+- **Admin gating** — the page is open to every signed-in user; checkboxes, the Release buttons and `POST /api/releases` require `isAdmin`.
+- **Trying it without deploying** — point `RELEASE_TARGET_REPO` / `RELEASE_TARGET_BRANCH` at a branch of a fork (forks don't run the marketplace workflow). The dialog shows the production warning only for `Appmixer-ai/appmixer-components` `master`.
+
+Routes:
+
+- `GET api/releases` — the comparison (session auth).
+- `POST api/releases` — body `{connectors: [{name, devVersion}], dryRun?}`; plans or performs a release (admin only).
+
+Environment: `RELEASE_SOURCE_REPO` / `RELEASE_SOURCE_BRANCH` (default `Appmixer-ai/appmixer-connectors` / `dev`), `RELEASE_TARGET_REPO` / `RELEASE_TARGET_BRANCH` (default `Appmixer-ai/appmixer-components` / `master`).
+
 ## Auth Hub (`/authub`)
 
 Auth Hub is a separate page for browsing and managing OAuth connector configs/bundles registered in an external Auth Hub service.

@@ -29,6 +29,7 @@
         <a href="/" class="text-sm text-muted-foreground hover:text-foreground">Dashboard</a>
         <a href="/e2e-flows" class="text-sm text-muted-foreground hover:text-foreground">E2E Flows</a>
         <a href="/prs" class="text-sm text-muted-foreground hover:text-foreground">PRs</a>
+        <a href="/releases" class="text-sm text-muted-foreground hover:text-foreground">Release</a>
         <a href="/authub" class="text-sm text-muted-foreground hover:text-foreground">Auth Hub</a>
         <a href="/automation-hub" class="text-sm text-muted-foreground hover:text-foreground">Automation Hub</a>
         <a href="/settings" class="text-sm text-muted-foreground hover:text-foreground">Settings</a>

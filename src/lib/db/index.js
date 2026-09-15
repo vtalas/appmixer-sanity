@@ -255,4 +255,14 @@ export async function initializeDatabase() {
   try {
     await client.execute(`ALTER TABLE e2e_runs ADD COLUMN instance_url TEXT`);
   } catch {}
+
+  // bundle.json contents by git blob sha for the release comparison (/releases).
+  // Content-addressed, so entries never go stale.
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS release_bundle_blobs (
+      sha TEXT PRIMARY KEY,
+      content TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
 }
