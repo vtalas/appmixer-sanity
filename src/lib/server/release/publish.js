@@ -310,6 +310,17 @@ export async function releaseConnectors(userId, items, { dryRun = false } = {}) 
         409
       );
     }
+    // A ref that brings .github/workflows/ changes into a fork (its branches are
+    // behind upstream) needs a token with the `workflow` scope — without it the
+    // ref API answers 404, while blobs, trees and commits still go through
+    if (/** @type {any} */ (e).status === 404) {
+      throw new ReleaseError(
+        `GitHub refused to ${pr || existingHead ? 'move' : 'create'} ${head.fullName}@${head.branch} (404) — nothing was published. ` +
+          `The commits bring in .github/workflows/ changes the fork doesn't have yet, and pushing those needs a GitHub token ` +
+          `with the "workflow" scope. Add that scope to the token (or sync the fork's master with upstream) and try again.`,
+        403
+      );
+    }
     throw e;
   }
 
