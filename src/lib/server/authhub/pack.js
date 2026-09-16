@@ -32,6 +32,26 @@ const COMMIT_SHA = /^[0-9a-f]{40}$/;
 /** @type {Map<string, Buffer>} */
 const blobCache = new Map();
 let blobCacheBytes = 0;
+// Commits and directory listings by commit sha — immutable too. A batch plans
+// many connectors at one commit, often several modules of the same service.
+const LISTING_CACHE_SIZE = 200;
+/** @type {Map<string, {sha: string, committedAt: string|null}>} */
+const commitCache = new Map();
+/** @type {Map<string, RepoFile[]>} */
+const listingCache = new Map();
+
+/**
+ * @template V
+ * @param {Map<string, V>} cache
+ * @param {string} key
+ * @param {V} value
+ */
+function remember(cache, key, value) {
+  cache.set(key, value);
+  const oldest = cache.keys().next().value;
+  if (cache.size > LISTING_CACHE_SIZE && oldest !== undefined) cache.delete(oldest);
+  return value;
+}
 
 export class PackError extends Error {
   /**
@@ -93,12 +113,18 @@ export function describeSource(source) {
  * @param {PackSource} source
  * @param {string} [commitSha]
  */
-async function resolveCommit(token, source, commitSha) {
+export async function resolveCommit(token, source, commitSha) {
   const base = `/repos/${source.fullName}`;
   if (commitSha) {
     if (!COMMIT_SHA.test(commitSha)) throw new PackError('Invalid commit sha');
+    const key = `${source.fullName}@${commitSha}`;
+    const cached = commitCache.get(key);
+    if (cached) return cached;
     const commit = await githubRequest(token, 'GET', `${base}/git/commits/${commitSha}`);
-    return { sha: commit.sha, committedAt: commit.committer?.date || null };
+    return remember(commitCache, key, {
+      sha: commit.sha,
+      committedAt: commit.committer?.date || null
+    });
   }
   const branch = await githubRequest(
     token,
@@ -118,6 +144,9 @@ async function resolveCommit(token, source, commitSha) {
  * @returns {Promise<RepoFile[]|null>}
  */
 async function listDir(token, source, commitSha, dir) {
+  const key = `${source.fullName}@${commitSha}:${dir}`;
+  const cached = listingCache.get(key);
+  if (cached) return cached;
   let tree;
   try {
     tree = await githubRequest(
@@ -134,14 +163,18 @@ async function listDir(token, source, commitSha, dir) {
   if (tree.truncated) {
     throw new PackError(`${dir} has too many files to list in one GitHub request`, 422);
   }
-  return tree.tree
-    .filter((/** @type {any} */ item) => item.type === 'blob' && item.mode !== '120000')
-    .map((/** @type {any} */ item) => ({
-      path: item.path,
-      sha: item.sha,
-      size: item.size,
-      executable: item.mode === '100755'
-    }));
+  return remember(
+    listingCache,
+    key,
+    tree.tree
+      .filter((/** @type {any} */ item) => item.type === 'blob' && item.mode !== '120000')
+      .map((/** @type {any} */ item) => ({
+        path: item.path,
+        sha: item.sha,
+        size: item.size,
+        executable: item.mode === '100755'
+      }))
+  );
 }
 
 /**

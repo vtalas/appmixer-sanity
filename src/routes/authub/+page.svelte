@@ -4,6 +4,7 @@
   import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '$lib/components/ui/table';
   import { Badge } from '$lib/components/ui/badge';
   import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '$lib/components/ui/dialog';
+  import { Checkbox } from '$lib/components/ui/checkbox';
 
   let { data } = $props();
 
@@ -46,10 +47,11 @@
    * or `{finished, err, data}` — `finished` is set on failure too.
    * @param {string} ticket
    * @param {(message: string) => void} onProgress
+   * @param {string} [envId] - the environment the upload went to
    * @returns {Promise<{ok: boolean, message: string}>}
    */
-  async function waitForUpload(ticket, onProgress) {
-    const url = api('/api/auth-hub/upload', { ticket });
+  async function waitForUpload(ticket, onProgress, envId = data.env.id) {
+    const url = api('/api/auth-hub/upload', { ticket, env: envId });
     const started = Date.now();
     while (Date.now() - started < UPLOAD_TIMEOUT_MS) {
       await new Promise((r) => setTimeout(r, 2000));
@@ -68,11 +70,37 @@
   }
 
   /**
-   * After a successful upload: show the connector and its new bundle version.
+   * Auth Hub lists a connector (GET /service-config) only once it has a service
+   * config — a bundle alone stays invisible. GET answers `{}` for a missing one.
    * @param {string} serviceId
+   * @param {string} envId
    */
-  async function afterUpload(serviceId) {
+  async function ensureServiceConfig(serviceId, envId) {
+    const res = await fetch(api('/api/auth-hub/service-config', { serviceId, env: envId }));
+    const config = res.ok ? await res.json() : {};
+    if (Object.keys(config).length > 0) return;
+    const put = await fetch(api('/api/auth-hub/service-config', { env: envId }), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ serviceId, config: { serviceId } })
+    });
+    if (!put.ok) {
+      const result = await put.json().catch(() => ({}));
+      throw new Error(`The bundle is uploaded, but creating its service config failed: ${result.error || put.status}`);
+    }
+  }
+
+  /**
+   * After a successful upload: register a connector new to the Auth Hub, show
+   * it and its new bundle version.
+   * @param {string} serviceId
+   * @param {string} [envId]
+   */
+  async function afterUpload(serviceId, envId = data.env.id) {
     const existing = connectors.find((c) => c.serviceId === serviceId);
+    if (!existing || existing.source === 'github') {
+      await ensureServiceConfig(serviceId, envId);
+    }
     if (!existing) {
       connectors = [...connectors, { serviceId, source: 'authhub' }]
         .sort((a, b) => (a.serviceId || '').localeCompare(b.serviceId || ''));
@@ -184,10 +212,165 @@
       uploadNewDialogOpen = false;
       notesDialogOpen = false;
       deleteDialogOpen = false;
+      batchDialogOpen = false;
+      batchStopRequested = true;
+      selected = new Set();
       bundleLoading = {};
     }
     shownEnv = envId;
   });
+
+  // Batch upload from the repository (admin only): select rows, preview them
+  // all at one commit, upload one after another
+  /** @type {Set<string>} */
+  let selected = $state(new Set());
+  let batchDialogOpen = $state(false);
+  let batchSource = $state('dev');
+  /** @type {{source: any, commitSha: string, committedAt: string|null, commitUrl: string}|null} */
+  let batchPreview = $state(null);
+  /**
+   * @typedef {'new'|'upgrade'|'same'|'downgrade'|'unknown'|'error'} Verdict
+   * @type {Array<any>}
+   */
+  let batchItems = $state([]);
+  let batchLoading = $state(false);
+  let batchError = $state('');
+  let batchRunning = $state(false);
+  let batchStopRequested = $state(false);
+  let batchRun = $state({ total: 0, finished: 0 });
+  let batchSeq = 0;
+
+  /**
+   * @param {string} serviceId
+   * @param {boolean} on
+   */
+  function toggleSelected(serviceId, on) {
+    const next = new Set(selected);
+    if (on) next.add(serviceId);
+    else next.delete(serviceId);
+    selected = next;
+  }
+
+  /** @param {boolean} on */
+  function toggleAllFiltered(on) {
+    const next = new Set(selected);
+    for (const c of filteredConnectors) {
+      if (on) next.add(c.serviceId);
+      else next.delete(c.serviceId);
+    }
+    selected = next;
+  }
+
+  /**
+   * What uploading `version` would do to the Auth Hub
+   * @param {string} serviceId
+   * @param {string|null} version
+   * @returns {Verdict}
+   */
+  function uploadVerdict(serviceId, version) {
+    if (connectors.find((c) => c.serviceId === serviceId)?.source === 'github') return 'new';
+    const cmp = compareVersions(cachedInfo[serviceId]?.version, version ?? undefined);
+    if (cmp === 'outdated') return 'upgrade';
+    if (cmp === 'match') return 'same';
+    if (cmp === 'newer') return 'downgrade';
+    return 'unknown';
+  }
+
+  function openBatch() {
+    batchSource = defaultRepoSource();
+    batchStopRequested = false;
+    batchDialogOpen = true;
+    loadBatchPreview();
+  }
+
+  async function loadBatchPreview() {
+    const seq = ++batchSeq;
+    batchPreview = null;
+    batchItems = [];
+    batchError = '';
+    batchLoading = true;
+    try {
+      const res = await fetch(api('/api/auth-hub/upload-from-repo/preview'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ serviceIds: [...selected].sort(), source: batchSource })
+      });
+      const result = await res.json();
+      if (seq !== batchSeq) return;
+      if (!res.ok) {
+        batchError = result.error || `Error ${res.status}`;
+        return;
+      }
+      const { items, ...commit } = result;
+      batchPreview = commit;
+      // Upgrades, new connectors and unknown Auth Hub versions go up by default;
+      // same versions and downgrades only when ticked
+      batchItems = items.map((/** @type {any} */ item) => {
+        const verdict = item.ok ? uploadVerdict(item.serviceId, item.version) : 'error';
+        return {
+          ...item,
+          verdict,
+          include: ['new', 'upgrade', 'unknown'].includes(verdict),
+          state: 'idle',
+          message: ''
+        };
+      });
+    } catch (err) {
+      if (seq === batchSeq) batchError = /** @type {Error} */ (err).message;
+    } finally {
+      if (seq === batchSeq) batchLoading = false;
+    }
+  }
+
+  let batchPending = $derived(batchItems.filter((i) => i.ok && i.include && i.state !== 'done'));
+  let batchIncludable = $derived(batchItems.filter((i) => i.ok && i.state !== 'done'));
+  let batchCounts = $derived({
+    done: batchItems.filter((i) => i.state === 'done').length,
+    failed: batchItems.filter((i) => i.state === 'failed').length
+  });
+
+  async function runBatch() {
+    const preview = batchPreview;
+    if (!preview || batchRunning) return;
+    // The whole batch goes to the environment it was started in
+    const envId = data.env.id;
+    const source = batchSource;
+    batchRunning = true;
+    batchStopRequested = false;
+    const queue = batchPending;
+    batchRun = { total: queue.length, finished: 0 };
+    for (const item of queue) {
+      if (batchStopRequested || data.env.id !== envId) break;
+      /** @param {string} message */
+      const progress = (message) => {
+        item.state = 'running';
+        item.message = message;
+      };
+      progress('Packing and uploading…');
+      try {
+        const res = await fetch(api('/api/auth-hub/upload-from-repo', { env: envId }), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ serviceId: item.serviceId, source, commitSha: preview.commitSha })
+        });
+        const result = await res.json();
+        const outcome = res.ok
+          ? await waitForUpload(result.ticket, progress, envId)
+          : { ok: false, message: result.error || 'Upload failed' };
+        if (outcome.ok && data.env.id === envId) {
+          await afterUpload(item.serviceId, envId);
+          toggleSelected(item.serviceId, false);
+        }
+        item.state = outcome.ok ? 'done' : 'failed';
+        item.message = outcome.ok ? `v${item.version} uploaded` : outcome.message;
+      } catch (err) {
+        item.state = 'failed';
+        item.message = /** @type {Error} */ (err).message;
+      }
+      batchRun.finished++;
+    }
+    batchRunning = false;
+  }
   /** @type {string|null} */
   let notesServiceId = $state(null);
   let notesDialogOpen = $state(false);
@@ -268,9 +451,9 @@
           : { ok: false, message: result.error || 'Upload failed' };
       }
 
+      if (outcome.ok && serviceId) await afterUpload(serviceId);
       uploadStatus = outcome.ok ? 'done' : 'error';
       uploadMessage = outcome.message;
-      if (outcome.ok && serviceId) await afterUpload(serviceId);
     } catch (err) {
       uploadStatus = 'error';
       uploadMessage = /** @type {Error} */ (err).message;
@@ -336,7 +519,8 @@
       uploadNewMessage = '';
       try {
         const res = await fetch(api('/api/auth-hub/service-config', { serviceId: sid }));
-        if (res.ok) {
+        // Auth Hub answers a missing config with an empty object
+        if (res.ok && Object.keys(await res.json()).length > 0) {
           // Exists — ask to confirm
           uploadNewStep = 'confirm';
           return;
@@ -344,26 +528,25 @@
       } catch { /* treat as not found */ }
     }
 
-    // Save config first (if any keys)
-    if (Object.keys(uploadNewConfig).length > 0) {
-      uploadNewStep = 'saving';
-      uploadNewMessage = 'Saving service config...';
-      const body = Object.fromEntries(
-        Object.entries(uploadNewConfig).map(([k, v]) => { try { return [k, JSON.parse(v)]; } catch { return [k, v]; } })
-      );
-      // Always include serviceId in config
-      if (!body.serviceId) body.serviceId = sid;
-      const res = await fetch(api('/api/auth-hub/service-config'), {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ serviceId: sid, config: body })
-      });
-      if (!res.ok) {
-        const r = await res.json();
-        uploadNewStep = 'error';
-        uploadNewMessage = r.error || 'Failed to save config';
-        return;
-      }
+    // Save the config first — even without keys: Auth Hub lists only connectors
+    // that have one
+    uploadNewStep = 'saving';
+    uploadNewMessage = 'Saving service config...';
+    const configBody = Object.fromEntries(
+      Object.entries(uploadNewConfig).map(([k, v]) => { try { return [k, JSON.parse(v)]; } catch { return [k, v]; } })
+    );
+    // Always include serviceId in config
+    if (!configBody.serviceId) configBody.serviceId = sid;
+    const saveRes = await fetch(api('/api/auth-hub/service-config'), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ serviceId: sid, config: configBody })
+    });
+    if (!saveRes.ok) {
+      const r = await saveRes.json();
+      uploadNewStep = 'error';
+      uploadNewMessage = r.error || 'Failed to save config';
+      return;
     }
 
     // Upload bundle (packed from the repository or the selected file)
@@ -402,9 +585,15 @@
       }
     }
 
+    try {
+      await afterUpload(sid);
+    } catch (err) {
+      uploadNewStep = 'error';
+      uploadNewMessage = /** @type {Error} */ (err).message;
+      return;
+    }
     uploadNewStep = 'done';
     uploadNewMessage = doneMessage;
-    await afterUpload(sid);
   }
 
   // View connector details popup
@@ -765,8 +954,19 @@
 
   // Switching the environment mid-operation would mix up the two Auth Hubs
   let busy = $derived(
-    fetchAllRunning || uploading || deleting || configSaving ||
+    fetchAllRunning || uploading || deleting || configSaving || batchRunning ||
       ['checking', 'saving', 'uploading', 'polling'].includes(uploadNewStep)
+  );
+
+  let allFilteredSelected = $derived(
+    filteredConnectors.length > 0 && filteredConnectors.every((c) => selected.has(c.serviceId))
+  );
+  // Rows the version column flags ⚠️ (Auth Hub older than the repository)
+  let outdatedIds = $derived(
+    connectors
+      .filter((c) => c.source !== 'github')
+      .filter((c) => compareVersions(cachedInfo[c.serviceId]?.version, githubVersions[c.serviceId]?.version) === 'outdated')
+      .map((c) => c.serviceId)
   );
 </script>
 
@@ -969,7 +1169,33 @@
           </button>
         {/each}
       </div>
+      {#if data.isAdmin}
+        <button
+          class="h-8 px-3 rounded-md border border-input bg-background text-xs text-muted-foreground transition-colors hover:bg-muted disabled:opacity-40"
+          title="Select every connector whose Auth Hub bundle is older than the repository (⚠️)"
+          disabled={outdatedIds.length === 0 || batchRunning}
+          onclick={() => { selected = new Set([...selected, ...outdatedIds]); }}
+        >
+          Select outdated ({outdatedIds.length})
+        </button>
+      {/if}
     </div>
+
+    {#if data.isAdmin && (selected.size > 0 || batchRunning)}
+      <div class="sticky top-2 z-20 flex flex-wrap items-center gap-3 rounded-md border bg-background px-3 py-2 text-sm shadow-md">
+        {#if batchRunning}
+          <div class="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent"></div>
+          <span>
+            Uploading to {data.env.label}: {batchRun.finished} of {batchRun.total} finished{batchCounts.failed ? `, ${batchCounts.failed} failed` : ''}
+          </span>
+          <button class="text-xs underline" onclick={() => { batchDialogOpen = true; }}>Show progress</button>
+        {:else}
+          <span class="font-medium">{selected.size} selected</span>
+          <Button size="sm" onclick={openBatch} disabled={busy}>Upload from repository…</Button>
+          <button class="text-xs text-muted-foreground underline hover:text-foreground" onclick={() => { selected = new Set(); }}>Clear</button>
+        {/if}
+      </div>
+    {/if}
 
     {#if filteredConnectors.length === 0}
       <div class="text-center py-12 border rounded-lg bg-muted/50">
@@ -980,6 +1206,16 @@
         <Table>
           <TableHeader>
             <TableRow>
+              {#if data.isAdmin}
+                <TableHead class="w-8">
+                  <Checkbox
+                    checked={allFilteredSelected}
+                    disabled={batchRunning}
+                    aria-label="Select all shown connectors"
+                    onCheckedChange={(/** @type {boolean} */ on) => toggleAllFiltered(on)}
+                  />
+                </TableHead>
+              {/if}
               <TableHead class="w-10"><span></span></TableHead>
               <TableHead>Connector</TableHead>
               <TableHead class="w-28">Auth Hub</TableHead>
@@ -995,7 +1231,17 @@
               {@const ghInfo = githubVersions[connector.serviceId]}
               {@const cmp = compareVersions(info?.version, ghInfo?.version)}
               {@const githubOnly = connector.source === 'github'}
-              <TableRow class={githubOnly ? 'opacity-60' : ''}>
+              <TableRow class={githubOnly && !selected.has(connector.serviceId) ? 'opacity-60' : ''}>
+                {#if data.isAdmin}
+                  <TableCell>
+                    <Checkbox
+                      checked={selected.has(connector.serviceId)}
+                      disabled={batchRunning}
+                      aria-label="Select {connector.serviceId}"
+                      onCheckedChange={(/** @type {boolean} */ on) => toggleSelected(connector.serviceId, on)}
+                    />
+                  </TableCell>
+                {/if}
                 <TableCell>
                   {#if info?.icon}
                     <img src={info.icon} alt="" class="w-5 h-5 object-contain" />
@@ -1009,14 +1255,19 @@
                   <div class="flex items-baseline gap-2">
                     <span class="font-medium">{info?.label || shortName(connector.serviceId)}</span>
                     <span class="text-xs text-muted-foreground">{connector.serviceId}</span>
-                    {#if githubOnly}
+                    {#if githubOnly && info?.version}
+                      <span
+                        class="rounded bg-yellow-100 px-1.5 py-0.5 text-xs text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400"
+                        title="{data.env.label} Auth Hub has its bundle, but no service config — it isn't listed until it has one. Add creates it."
+                      >bundle only, no service config</span>
+                    {:else if githubOnly}
                       <span class="rounded bg-orange-100 px-1.5 py-0.5 text-xs text-orange-700 dark:bg-orange-900/30 dark:text-orange-400">not in Auth Hub</span>
                     {/if}
                   </div>
                 </TableCell>
                 <TableCell>
                   {#if githubOnly}
-                    <span class="text-muted-foreground">—</span>
+                    <span class="text-muted-foreground tabular-nums">{info?.version ? `v${info.version}` : '—'}</span>
                   {:else if bundleLoading[connector.serviceId]}
                     <span class="text-xs text-muted-foreground">loading...</span>
                   {:else if info?.version}
@@ -1088,6 +1339,142 @@
     {/if}
   {/if}
 </div>
+
+<!-- Batch Upload Dialog -->
+<Dialog bind:open={batchDialogOpen}>
+  <DialogContent class="max-w-3xl">
+    <DialogHeader>
+      <DialogTitle>Upload {batchItems.length || selected.size} bundles from the repository</DialogTitle>
+      <DialogDescription>
+        Each connector is packed like <code>appmixer pack</code>, all from one commit, and uploaded one after another. A failed upload doesn't stop the rest.
+      </DialogDescription>
+    </DialogHeader>
+    {@render envTarget()}
+
+    <div class="flex min-w-0 flex-wrap items-center gap-2">
+      <label class="shrink-0 text-xs font-medium text-muted-foreground" for="batch-source">Source</label>
+      <select
+        id="batch-source"
+        class="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+        bind:value={batchSource}
+        onchange={loadBatchPreview}
+        disabled={batchLoading || batchRunning || batchCounts.done > 0}
+      >
+        {#each data.packSources || [] as src}
+          <option value={src.id}>{src.label} — {src.repo}@{src.branch}</option>
+        {/each}
+      </select>
+      {#if batchPreview}
+        <span class="text-xs text-muted-foreground">
+          at <a href={batchPreview.commitUrl} target="_blank" rel="noreferrer" class="font-mono underline hover:text-foreground">{batchPreview.commitSha.slice(0, 7)}</a>
+          {#if batchPreview.committedAt}({new Date(batchPreview.committedAt).toLocaleString()}){/if}
+        </span>
+      {/if}
+    </div>
+
+    {#if batchLoading}
+      <div class="flex items-center gap-2 rounded-md border p-3 text-xs text-muted-foreground">
+        <div class="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent"></div>
+        Reading {selected.size} connectors from GitHub…
+      </div>
+    {:else if batchError}
+      <p class="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-xs text-destructive">{batchError}</p>
+    {:else if batchItems.length}
+      <div class="max-h-[50vh] min-w-0 overflow-auto rounded-md border">
+        <table class="w-full text-xs">
+          <thead class="sticky top-0 z-10 bg-background text-left text-muted-foreground">
+            <tr class="border-b">
+              <th class="w-8 p-2">
+                <Checkbox
+                  checked={batchIncludable.length > 0 && batchIncludable.every((i) => i.include)}
+                  disabled={batchRunning || batchIncludable.length === 0}
+                  aria-label="Upload all"
+                  onCheckedChange={(/** @type {boolean} */ on) => { for (const i of batchIncludable) i.include = on; }}
+                />
+              </th>
+              <th class="p-2 font-medium">Connector</th>
+              <th class="p-2 font-medium">{data.env.label}</th>
+              <th class="p-2 font-medium">Repository</th>
+              <th class="p-2 font-medium">Result</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each batchItems as item (item.serviceId)}
+              {@const current = cachedInfo[item.serviceId]?.version}
+              <tr class="border-b last:border-0 align-top {item.ok ? '' : 'bg-destructive/5'}">
+                <td class="p-2">
+                  <Checkbox
+                    checked={item.include}
+                    disabled={!item.ok || batchRunning || item.state === 'done'}
+                    aria-label="Upload {item.serviceId}"
+                    onCheckedChange={(/** @type {boolean} */ on) => { item.include = on; }}
+                  />
+                </td>
+                <td class="p-2">
+                  <div class="font-mono">{item.serviceId}</div>
+                  {#if item.ok}
+                    <div class="text-muted-foreground">
+                      <a href={item.pathUrl} target="_blank" rel="noreferrer" class="underline hover:text-foreground">{item.kind}</a>
+                      · {item.fileCount} files, {formatSize(item.totalSize)}
+                    </div>
+                  {/if}
+                </td>
+                <td class="p-2 tabular-nums">
+                  {#if current}v{current}{:else if item.verdict === 'new'}<span class="text-muted-foreground">not there</span>{:else}<span class="text-muted-foreground" title="Not loaded — Refresh reads the Auth Hub versions">?</span>{/if}
+                </td>
+                <td class="p-2 tabular-nums">{item.ok ? `v${item.version ?? '?'}` : '—'}</td>
+                <td class="p-2">
+                  {#if item.state === 'running'}
+                    <span class="inline-flex items-center gap-1.5 text-muted-foreground">
+                      <span class="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-primary border-t-transparent"></span>
+                      {item.message}
+                    </span>
+                  {:else if item.state === 'done'}
+                    <span class="text-green-600">✅ {item.message}</span>
+                  {:else if item.state === 'failed'}
+                    <span class="break-words text-destructive">❌ {item.message}</span>
+                  {:else if !item.ok}
+                    <span class="break-words text-destructive">{item.error}</span>
+                  {:else if item.verdict === 'new'}
+                    <span class="rounded bg-orange-100 px-1.5 py-0.5 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400">new in {data.env.label}</span>
+                  {:else if item.verdict === 'upgrade'}
+                    <span class="rounded bg-green-100 px-1.5 py-0.5 text-green-700 dark:bg-green-900/30 dark:text-green-400">upgrade</span>
+                  {:else if item.verdict === 'same'}
+                    <span class="text-muted-foreground">same version</span>
+                  {:else if item.verdict === 'downgrade'}
+                    <span class="font-medium text-destructive">⚠ downgrade</span>
+                  {:else}
+                    <span class="text-muted-foreground">Auth Hub version not loaded</span>
+                  {/if}
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+      {#if batchCounts.done || batchCounts.failed}
+        {@const notYet = batchPending.filter((i) => i.state !== 'failed').length}
+        <p class="text-xs {batchCounts.failed ? 'text-destructive' : 'text-green-600'}">
+          {batchCounts.done} uploaded{batchCounts.failed ? `, ${batchCounts.failed} failed` : ''}{!batchRunning && notYet ? `, ${notYet} not uploaded yet` : ''}
+        </p>
+      {/if}
+    {/if}
+
+    <DialogFooter>
+      {#if batchRunning}
+        <Button variant="outline" onclick={() => { batchStopRequested = true; }} disabled={batchStopRequested}>
+          {batchStopRequested ? 'Stopping after the current one…' : 'Stop'}
+        </Button>
+      {:else}
+        <Button variant="outline" onclick={() => { batchDialogOpen = false; }}>Close</Button>
+        <Button onclick={runBatch} disabled={batchLoading || batchPending.length === 0}>
+          {batchCounts.failed && batchPending.every((i) => i.state === 'failed') ? 'Retry' : 'Upload'}
+          {batchPending.length} to {data.env.label}
+        </Button>
+      {/if}
+    </DialogFooter>
+  </DialogContent>
+</Dialog>
 
 <!-- Upload New Dialog -->
 <Dialog bind:open={uploadNewDialogOpen}>

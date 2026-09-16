@@ -184,6 +184,7 @@ Auth Hub is a separate page for browsing and managing OAuth connector configs/bu
 - **Bundle download** — proxy-download a connector's ZIP bundle from Auth Hub
 - **Bundle upload** — upload a new or replacement bundle, either a ZIP file or **packed from the repository** (below); polls a ticket until processing completes (admin only)
 - **Service config edit** — view and edit connector config in field mode or raw JSON mode (admin only)
+- **Batch upload** (admin only) — row checkboxes (select all shown, **Select outdated** = the ⚠️ rows), a sticky bar and **Upload from repository…**: one preview of every selected connector at one commit, then sequential uploads (below).
 - **GitHub oauth2 connector cache** — scans the GitHub repo for oauth2 connectors + `bundle.json` versions and caches results in DB; surfaced as a merged connector list. Connectors the repo has but the Auth Hub doesn't get an **Add** action (Upload New, prefilled, bundle from the repository).
 - **Version comparison** — compares the Auth Hub bundle version against the cached GitHub version and highlights outdated/matching/newer connectors
 
@@ -195,6 +196,20 @@ Auth Hub is a separate page for browsing and managing OAuth connector configs/bu
 - **What is packed** — `serviceId` → `src/<vendor>/<service>[/<module>]`, which must hold a `bundle.json`. A `service.json` directory packs everything under it as `<vendor>/<service>/…`; a `module.json` directory packs the module plus the service-level files of its parent except the module directories (shared `auth.js`, commons, icons). Never `node_modules/`, `artifacts/`, `package-lock.json`, `test-flow*.json` or hidden files. Prefixes come from the manifest `name`, like the CLI. A namespace (`appmixer:google` — `service.json` but no `bundle.json`) is refused with the list of its modules: each module upload carries the shared files. Verified identical (file set and contents) to `appmixer pack` for `appmixer:box` and `appmixer:google:drive`.
 - **One commit** — the preview (`GET api/auth-hub/upload-from-repo`) resolves the branch head and returns its sha; the upload (`POST`) requires that `commitSha` and packs exactly that commit, so what was reviewed is what goes up. Trees are listed per directory (`git/trees/<sha>:<dir>?recursive=1`), blobs fetched 8 at a time and kept in a 32 MB in-memory cache by sha; the ZIP (`src/lib/server/zip.js`, deflate, no zip64) is deterministic — entries are dated with the commit.
 - **The preview** shows the manifest name, bundle version against the Auth Hub's (upgrade / same / **downgrade**), commit and path links, the file list, and a Download ZIP link (`?download=1`) for inspection.
+
+### Batch upload
+
+- `POST api/auth-hub/upload-from-repo/preview` `{serviceIds, source}` resolves the branch head once and plans every connector at that commit (4 at a time, at most 100); per item either the pack summary or `error`. Commits and directory listings are cached in memory by commit sha, so modules of one service share their parent's listing.
+- The dialog shows the Auth Hub version next to the packed one with a verdict: **new** (not listed in the Auth Hub), **upgrade**, **same**, **downgrade**, **version not loaded** (the page knows Auth Hub versions only from the bundle cache — Refresh / Details), or the planning error. New, upgrade and unknown are ticked by default; same and downgrade only by hand.
+- Uploads run in the browser one after another (each is a short `POST upload-from-repo` + ticket polling), so no request runs long. A failure doesn't stop the batch; **Retry** re-runs the failed ones; **Stop** finishes the current upload and leaves the rest. Uploaded connectors leave the selection. The environment is fixed when the batch starts, and the switcher is disabled while it runs.
+
+### Service config = listed
+
+`GET /service-config` (the page's list) returns only connectors with a service config — a bundle uploaded alone stays invisible and the row keeps offering **Add**. `GET /service-config/<id>` answers **200 `{}`** for a missing config (`ServiceConfig.load`), so "does it exist" means a non-empty object; the old `res.ok` check asked to overwrite a config that didn't exist. Therefore:
+- Upload New always saves a config — `{serviceId}` when no keys were entered (PUT upserts and only `$set`s, so it never wipes existing keys).
+- After any successful upload of a connector the list doesn't have yet (Add, Upload New, batch), `ensureServiceConfig()` creates `{serviceId}` if it's missing. clientId/clientSecret are added later via Details → Edit.
+- A row the repo has, with a cached bundle but no config, is badged **bundle only, no service config** (the state a bundle-only upload used to leave behind); **Add** fixes it — a ZIP-file upload with no file saves just the config.
+- Tenants aren't affected by a config without credentials: a tenant goes to Auth Hub only when its own config says so (`authHubUrl`) or via the automatic fallback, and Auth Hub validates the credentials either way (`engine/src/auth/ServiceFactory.js`).
 
 ### Upload tickets
 
@@ -216,7 +231,7 @@ Every route that talks to Auth Hub or stores per-connector data takes `?env=prod
 | `+server.js` | GET | List all connectors from Auth Hub (`GET /service-config`) |
 | `bundle/+server.js` | GET | Read cached bundle info (version, icon, label) from disk for all connectors of the environment |
 | `bundle/+server.js` | POST | Download bundle ZIP from Auth Hub for a single `serviceId`, extract to the environment's local cache, return version |
-| `bundle-download/+server.js` | GET | Proxy-download a connector bundle ZIP to the browser (auth required) |
+| `bundle-download/+server.js` | GET | Proxy-download a connector bundle ZIP to the browser as `<selector>.zip` (auth required) |
 | `connector/+server.js` | DELETE | Delete service config + bundle from Auth Hub (admin only) |
 | `github-oauth/+server.js` | GET | Return cached GitHub oauth2 connector list from DB (environment-independent) |
 | `github-oauth/+server.js` | POST | Scan GitHub repo for oauth2 connectors + bundle.json versions, save to DB, return result |
@@ -231,6 +246,7 @@ Every route that talks to Auth Hub or stores per-connector data takes `?env=prod
 | `upload/+server.js` | GET | Poll upload ticket status (`?ticket=…`) (admin only) |
 | `upload-from-repo/+server.js` | GET | Pack preview: `?serviceId=&source=dev\|release[&commit=]` → manifest name, version, commit, file list; `&download=1` returns the ZIP (admin only) |
 | `upload-from-repo/+server.js` | POST | `{serviceId, source, commitSha}` → pack that commit and upload it; returns `{ ticket, …info, size }` (admin only) |
+| `upload-from-repo/preview/+server.js` | POST | Batch preview: `{serviceIds, source}` → `{commitSha, …, items: [{serviceId, ok, name, kind, version, fileCount, totalSize} \| {serviceId, ok: false, error}]}` (admin only) |
 
 ### Database Tables
 

@@ -34,7 +34,7 @@ export async function GET({ url, locals }) {
         return new Response(buffer, {
             headers: {
                 'Content-Type': 'application/zip',
-                'Content-Disposition': `attachment; filename="${selector}${hub.id === 'prod' ? '' : `.${hub.id}`}.zip"`
+                'Content-Disposition': `attachment; filename="${selector}.zip"`
             }
         });
     } catch (err) {
