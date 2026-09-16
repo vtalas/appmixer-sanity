@@ -1,20 +1,17 @@
 import { json } from '@sveltejs/kit';
-import { env } from '$env/dynamic/private';
+import { authHubFetch, resolveAuthHubFromUrl } from '$lib/server/authhub/hub.js';
 
-export async function GET() {
-    const baseUrl = env.AUTH_HUB_URL_PROD;
-    const token = env.AUTH_HUB_API_TOKEN_PROD;
-
-    if (!baseUrl || !token) {
-        return json({ error: 'AUTH_HUB_URL_PROD and AUTH_HUB_API_TOKEN_PROD must be configured' }, { status: 500 });
+/**
+ * GET — list all connectors (service configs) of the `?env=` Auth Hub.
+ */
+export async function GET({ url }) {
+    const { hub, error, status } = resolveAuthHubFromUrl(url);
+    if (!hub) {
+        return json({ error }, { status });
     }
 
     try {
-        const res = await fetch(`${baseUrl}/service-config`, {
-            headers: {
-                'Authorization': `Bearer ${token}`
-            }
-        });
+        const res = await authHubFetch(hub, '/service-config');
 
         if (!res.ok) {
             const text = await res.text();

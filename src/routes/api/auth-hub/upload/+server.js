@@ -1,47 +1,33 @@
 import { json } from '@sveltejs/kit';
-import { env } from '$env/dynamic/private';
 import { isAdmin } from '$lib/admin.js';
+import { authHubFetch, resolveAuthHubFromUrl, uploadToAuthHub } from '$lib/server/authhub/hub.js';
 
 /**
- * POST — upload a ZIP bundle to Auth Hub.
+ * POST — upload a ZIP bundle to the `?env=` Auth Hub.
  * Proxies the raw binary to POST /components and returns { ticket }.
  */
-export async function POST({ request, locals }) {
+export async function POST({ request, url, locals }) {
     const session = await locals.auth();
     if (!isAdmin(session?.user?.email)) {
         return json({ error: 'Forbidden' }, { status: 403 });
     }
 
-    const baseUrl = env.AUTH_HUB_URL_PROD;
-    const token = env.AUTH_HUB_API_TOKEN_PROD;
-    if (!baseUrl || !token) {
-        return json({ error: 'AUTH_HUB_URL_PROD and AUTH_HUB_API_TOKEN_PROD must be configured' }, { status: 500 });
+    const { hub, error, status } = resolveAuthHubFromUrl(url);
+    if (!hub) {
+        return json({ error }, { status });
     }
 
     try {
-        const buffer = await request.arrayBuffer();
-        const res = await fetch(`${baseUrl}/components`, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/octet-stream'
-            },
-            body: buffer
-        });
-
-        const data = await res.json();
-        if (!res.ok) {
-            return json({ error: data.message || `Auth Hub error: ${res.status}` }, { status: res.status });
-        }
-        return json(data); // { ticket }
+        return json(await uploadToAuthHub(hub, await request.arrayBuffer())); // { ticket }
     } catch (err) {
-        return json({ error: /** @type {Error} */ (err).message }, { status: 500 });
+        return json({ error: /** @type {Error} */ (err).message }, { status: /** @type {any} */ (err).status || 500 });
     }
 }
 
 /**
  * GET — poll upload status by ticket.
- * Proxies GET /components/uploader/{ticket}.
+ * Proxies GET /components/uploader/{ticket}: `{ started }` while running,
+ * then `{ finished, installed }` or `{ finished, err, data }`.
  */
 export async function GET({ url, locals }) {
     const session = await locals.auth();
@@ -49,10 +35,9 @@ export async function GET({ url, locals }) {
         return json({ error: 'Forbidden' }, { status: 403 });
     }
 
-    const baseUrl = env.AUTH_HUB_URL_PROD;
-    const token = env.AUTH_HUB_API_TOKEN_PROD;
-    if (!baseUrl || !token) {
-        return json({ error: 'AUTH_HUB_URL_PROD and AUTH_HUB_API_TOKEN_PROD must be configured' }, { status: 500 });
+    const { hub, error, status } = resolveAuthHubFromUrl(url);
+    if (!hub) {
+        return json({ error }, { status });
     }
 
     const ticket = url.searchParams.get('ticket');
@@ -61,9 +46,7 @@ export async function GET({ url, locals }) {
     }
 
     try {
-        const res = await fetch(`${baseUrl}/components/uploader/${encodeURIComponent(ticket)}`, {
-            headers: { 'Authorization': `Bearer ${token}` }
-        });
+        const res = await authHubFetch(hub, `/components/uploader/${encodeURIComponent(ticket)}`);
 
         const data = await res.json();
         if (!res.ok) {

@@ -146,6 +146,29 @@ export async function initializeDatabase() {
     await client.execute(`ALTER TABLE authhub_status ADD COLUMN notes TEXT`);
   } catch {}
 
+  // Auth Hub verification status + notes per Auth Hub environment (prod, qa).
+  // Replaces authhub_status (prod only): its rows are carried over as `prod`,
+  // newer ones win, so a deployment still running the old code loses nothing.
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS authhub_env_status (
+      env TEXT NOT NULL,
+      service_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'not_verified',
+      notes TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (env, service_id)
+    )
+  `);
+  await client.execute(`
+    INSERT INTO authhub_env_status (env, service_id, status, notes, updated_at)
+    SELECT 'prod', service_id, status, notes, updated_at FROM authhub_status WHERE true
+    ON CONFLICT(env, service_id) DO UPDATE SET
+      status = excluded.status,
+      notes = excluded.notes,
+      updated_at = excluded.updated_at
+    WHERE excluded.updated_at > authhub_env_status.updated_at
+  `);
+
   // E2E test flows cache (GitHub dev branch merged with instance state),
   // scoped per Appmixer instance — different users may target different instances.
   const E2E_FLOWS_SCHEMA = `

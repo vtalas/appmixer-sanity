@@ -1,5 +1,5 @@
 import { json } from '@sveltejs/kit';
-import { env } from '$env/dynamic/private';
+import { authHubFetch, isAuthHubEnv, resolveAuthHubFromUrl } from '$lib/server/authhub/hub.js';
 import { writeFile, mkdir, readFile, readdir, rm, access } from 'fs/promises';
 import { join, resolve } from 'path';
 import { inflateRawSync } from 'zlib';
@@ -84,10 +84,13 @@ async function findFileRecursive(dir, fileName) {
 }
 
 /**
- * GET — read cached versions for all connectors in a given environment.
+ * GET — read cached versions for all connectors in a given environment (`?env=`).
  */
 export async function GET({ url }) {
     const environment = url.searchParams.get('env') || 'prod';
+    if (!isAuthHubEnv(environment)) {
+        return json({ error: `Unknown Auth Hub environment "${environment}"` }, { status: 400 });
+    }
     const envDir = join(CACHE_BASE, environment);
 
     try {
@@ -132,35 +135,32 @@ export async function GET({ url }) {
 }
 
 /**
- * POST — download bundle ZIP, extract, return version.
+ * POST — download bundle ZIP from the `?env=` Auth Hub, extract, return version.
  */
-export async function POST({ request }) {
+export async function POST({ request, url }) {
     const { serviceId } = await request.json();
 
     if (!serviceId) {
         return json({ error: 'serviceId is required' }, { status: 400 });
     }
-
-    const baseUrl = env.AUTH_HUB_URL_PROD;
-    const token = env.AUTH_HUB_API_TOKEN_PROD;
-    const environment = 'prod';
-
-    if (!baseUrl || !token) {
-        return json({ error: 'AUTH_HUB_URL_PROD and AUTH_HUB_API_TOKEN_PROD must be configured' }, { status: 500 });
+    // The id becomes a cache directory name
+    if (!/^[\w:-]+$/.test(serviceId)) {
+        return json({ error: 'Invalid serviceId' }, { status: 400 });
     }
+
+    const { hub, error, status } = resolveAuthHubFromUrl(url);
+    if (!hub) {
+        return json({ error }, { status });
+    }
+    const environment = hub.id;
 
     const cacheDir = join(CACHE_BASE, environment, serviceId.replace(/:/g, '_'));
     console.log('[auth-hub/bundle] POST serviceId:', serviceId, 'cacheDir:', cacheDir);
 
     try {
         const namespace = serviceId.replaceAll(':', '.');
-        const apiUrl = `${baseUrl}/components/${namespace}`;
-        console.log('[auth-hub/bundle] Fetching:', apiUrl);
-        const res = await fetch(apiUrl, {
-            headers: {
-                'Authorization': `Bearer ${token}`
-            }
-        });
+        console.log('[auth-hub/bundle] Fetching:', `${hub.baseUrl}/components/${namespace}`);
+        const res = await authHubFetch(hub, `/components/${namespace}`);
 
         console.log('[auth-hub/bundle] Auth Hub response:', res.status, res.statusText, 'content-type:', res.headers.get('content-type'));
 

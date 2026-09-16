@@ -173,34 +173,52 @@ Environment: `RELEASE_SOURCE_REPO` / `RELEASE_SOURCE_BRANCH` (default `Appmixer-
 
 ## Auth Hub (`/authub`)
 
-Auth Hub is a separate page for browsing and managing OAuth connector configs/bundles registered in an external Auth Hub service.
+Auth Hub is a separate page for browsing and managing OAuth connector configs/bundles registered in an external Auth Hub service — the **production** or the **QA** one.
 
 ### Key Features
 
-- **Status tracking** — per-connector verification status (`not_verified` | `in_progress` | `verified`) stored in DB and updated inline
-- **Notes** — free-text notes per connector, stored in DB, edited via dialog
+- **Environments** — a Production / QA switcher in the header (`?env=prod|qa`, remembered in the `authhub_env` cookie). Every Auth Hub API route takes `?env=` (default `prod`); an environment whose variables are missing is shown disabled. Non-production is marked with a yellow badge, and every upload/delete dialog names its target.
+- **Status tracking** — per-connector verification status (`not_verified` | `in_progress` | `verified`) stored in DB **per environment** and updated inline
+- **Notes** — free-text notes per connector and environment, stored in DB, edited via dialog
 - **Whitelist management** — add/remove individual service-config keys to the Auth Hub whitelist (admin only)
 - **Bundle download** — proxy-download a connector's ZIP bundle from Auth Hub
-- **Bundle upload** — upload a new or replacement ZIP bundle; polls a ticket until processing completes (admin only)
+- **Bundle upload** — upload a new or replacement bundle, either a ZIP file or **packed from the repository** (below); polls a ticket until processing completes (admin only)
 - **Service config edit** — view and edit connector config in field mode or raw JSON mode (admin only)
-- **GitHub oauth2 connector cache** — scans the GitHub repo for oauth2 connectors + `bundle.json` versions and caches results in DB; surfaced as a merged connector list
+- **GitHub oauth2 connector cache** — scans the GitHub repo for oauth2 connectors + `bundle.json` versions and caches results in DB; surfaced as a merged connector list. Connectors the repo has but the Auth Hub doesn't get an **Add** action (Upload New, prefilled, bundle from the repository).
 - **Version comparison** — compares the Auth Hub bundle version against the cached GitHub version and highlights outdated/matching/newer connectors
+
+### Upload from the repository
+
+`src/lib/server/authhub/pack.js` builds the ZIP `appmixer pack` would build from a checkout, reading the files from GitHub — no clone, no CLI:
+
+- **Sources** — `dev`: the repo/branch from Settings or env (the one the version column compares with, default `Appmixer-ai/appmixer-connectors@dev`); `release`: `RELEASE_TARGET_REPO@RELEASE_TARGET_BRANCH` (`Appmixer-ai/appmixer-components@master`, what the PRD marketplace is built from). The dialog preselects `release` for Production and `dev` for QA.
+- **What is packed** — `serviceId` → `src/<vendor>/<service>[/<module>]`, which must hold a `bundle.json`. A `service.json` directory packs everything under it as `<vendor>/<service>/…`; a `module.json` directory packs the module plus the service-level files of its parent except the module directories (shared `auth.js`, commons, icons). Never `node_modules/`, `artifacts/`, `package-lock.json`, `test-flow*.json` or hidden files. Prefixes come from the manifest `name`, like the CLI. A namespace (`appmixer:google` — `service.json` but no `bundle.json`) is refused with the list of its modules: each module upload carries the shared files. Verified identical (file set and contents) to `appmixer pack` for `appmixer:box` and `appmixer:google:drive`.
+- **One commit** — the preview (`GET api/auth-hub/upload-from-repo`) resolves the branch head and returns its sha; the upload (`POST`) requires that `commitSha` and packs exactly that commit, so what was reviewed is what goes up. Trees are listed per directory (`git/trees/<sha>:<dir>?recursive=1`), blobs fetched 8 at a time and kept in a 32 MB in-memory cache by sha; the ZIP (`src/lib/server/zip.js`, deflate, no zip64) is deterministic — entries are dated with the commit.
+- **The preview** shows the manifest name, bundle version against the Auth Hub's (upgrade / same / **downgrade**), commit and path links, the file list, and a Download ZIP link (`?download=1`) for inspection.
+
+### Upload tickets
+
+Auth Hub (`appmixer-core` `auth-hub/routes/component.js` → engine `Uploader`) answers `POST /components` with a `ticket` and processes the bundle in the background (unzip, validate, npm install, test components, swap files). `GET /components/uploader/<ticket>` returns 404 until the ticket is stored, `{started}` while running, then `{finished, installed}` **or `{finished, err, data}`** — `finished` is set on failure too, so `err` must be checked first (the page used to report failed uploads as complete). `waitForUpload()` in the page polls every 2 s for up to 5 minutes.
 
 ### Architecture
 
-- **`src/routes/authub/+page.svelte`** — Main SPA page. Displays a filterable connector table (search, status filter, "not in Auth Hub" toggle) with version comparison indicators, status dropdowns, notes, and admin dialogs (upload bundle, upload new connector, view/edit service config, delete connector).
-- **`src/routes/authub/+page.server.js`** — Server `load` function. Fetches the connector list from Auth Hub, cached bundle info, DB-stored statuses/notes, and cached GitHub oauth2 connector data. Returns a merged connector list tagged by `source` (`authhub` | `github` | `both`). Uses `getGitHubRepoInfo` from `src/lib/api/github.js` to populate the GitHub repo link shown to admins.
+- **`src/lib/server/authhub/hub.js`** — environments (`listAuthHubEnvs`, `resolveAuthHub(id)`, `resolveAuthHubFromUrl(url)`, `isAuthHubEnv`), `authHubFetch(hub, path, init)` with the bearer token, `uploadToAuthHub(hub, zip)`. Add an environment to its `ENVIRONMENTS` list.
+- **`src/lib/server/authhub/pack.js`** — `getPackSources(userId)`, `planPack({token, source, serviceId, commitSha})` (file list + manifest info, no blob downloads except the manifests), `buildPack(token, plan)` (the ZIP).
+- **`src/routes/authub/+page.svelte`** — Main SPA page. Displays a filterable connector table (search, status filter, "not in Auth Hub" toggle) with version comparison indicators, status dropdowns, notes, and admin dialogs (upload bundle, upload new connector, view/edit service config, delete connector). All API calls go through `api(path, params)`, which adds `env`. Per-environment state (`connectors`, `cachedInfo`, `statuses`, `notes`, `githubVersions`) is an **overridable `$derived`** of `data`: switching `?env=` re-runs `load` and replaces it, local updates assign to it. Page `data` is not deeply reactive — `data.connectors = …` never re-rendered, so deletes and uploads didn't show until a reload. The switcher is disabled while an operation runs; dialogs close when the environment changes.
+- **`src/routes/authub/+page.server.js`** — Server `load` function. Picks the environment (`?env=`, else the cookie, else `prod`), fetches the connector list from that Auth Hub, cached bundle info, its DB-stored statuses/notes, and cached GitHub oauth2 connector data. Returns a merged connector list tagged by `source` (`authhub` | `github` | `both`) — only `serviceId` + `source` per connector: the upstream objects carry `clientSecret`, and the page data reaches every signed-in user. Also returns `env`, `envs` and the admin's `packSources`. Uses `getGitHubRepoInfo` from `src/lib/api/github.js` to populate the GitHub repo link shown to admins.
 
 ### API Routes (`src/routes/api/auth-hub/`)
+
+Every route that talks to Auth Hub or stores per-connector data takes `?env=prod|qa` (default `prod`, unknown → 400, unconfigured → 500).
 
 | Route | Methods | Description |
 |---|---|---|
 | `+server.js` | GET | List all connectors from Auth Hub (`GET /service-config`) |
-| `bundle/+server.js` | GET | Read cached bundle info (version, icon, label) from disk for all connectors in an environment (`?env=prod`) |
-| `bundle/+server.js` | POST | Download bundle ZIP from Auth Hub for a single `serviceId`, extract to local cache, return version |
+| `bundle/+server.js` | GET | Read cached bundle info (version, icon, label) from disk for all connectors of the environment |
+| `bundle/+server.js` | POST | Download bundle ZIP from Auth Hub for a single `serviceId`, extract to the environment's local cache, return version |
 | `bundle-download/+server.js` | GET | Proxy-download a connector bundle ZIP to the browser (auth required) |
 | `connector/+server.js` | DELETE | Delete service config + bundle from Auth Hub (admin only) |
-| `github-oauth/+server.js` | GET | Return cached GitHub oauth2 connector list from DB |
+| `github-oauth/+server.js` | GET | Return cached GitHub oauth2 connector list from DB (environment-independent) |
 | `github-oauth/+server.js` | POST | Scan GitHub repo for oauth2 connectors + bundle.json versions, save to DB, return result |
 | `notes/+server.js` | POST | Save per-connector notes to DB (auth required) |
 | `service-config/+server.js` | GET | Fetch service config for a single connector; `?whitelist=1` fetches the whitelist instead (auth required) |
@@ -208,33 +226,40 @@ Auth Hub is a separate page for browsing and managing OAuth connector configs/bu
 | `service-config/whitelist-key/+server.js` | PUT | Add a single whitelist key for a connector (admin only) |
 | `service-config/whitelist-key/+server.js` | DELETE | Remove a single whitelist key from a connector (admin only) |
 | `status/+server.js` | POST | Save verification status (`verified` / `not_verified` / `in_progress`) to DB |
-| `../public/connectors/+server.js` | GET | **Public** (no auth) list of Auth Hub connectors — returns only `connector`, `status`, `clientId`; optional `?status=` filter |
+| `../public/connectors/+server.js` | GET | **Public** (no auth) list of Auth Hub connectors — returns only `connector`, `status`, `clientId`; optional `?env=` and `?status=` |
 | `upload/+server.js` | POST | Upload a ZIP bundle to Auth Hub; returns `{ ticket }` (admin only) |
 | `upload/+server.js` | GET | Poll upload ticket status (`?ticket=…`) (admin only) |
+| `upload-from-repo/+server.js` | GET | Pack preview: `?serviceId=&source=dev\|release[&commit=]` → manifest name, version, commit, file list; `&download=1` returns the ZIP (admin only) |
+| `upload-from-repo/+server.js` | POST | `{serviceId, source, commitSha}` → pack that commit and upload it; returns `{ ticket, …info, size }` (admin only) |
 
 ### Database Tables
 
-- **`authhub_status`** — Per-connector verification status and notes: `service_id`, `status`, `notes`, `updated_at`.
+- **`authhub_env_status`** — Per-environment verification status and notes: `env`, `service_id` (primary key together), `status`, `notes`, `updated_at`. Replaces **`authhub_status`** (prod only, keyed by `service_id`), which is kept: on every startup its rows are copied in as `prod` when newer than the new table's, so a deployment still running the old code loses nothing during the switch.
 - **`github_oauth_connectors`** — Cached GitHub scan results: `service_id`, `path`, `github_version`, `is_oauth2`, `updated_at`. Populated by `github-oauth` POST, read by GET.
 
 ### DB Helpers (`src/lib/db/authhub.js`)
 
-- `getAuthHubStatuses()` — Returns `Record<serviceId, status>` for all connectors
-- `setAuthHubStatus(serviceId, status)` — Upserts verification status
-- `getAuthHubNotes()` — Returns `Record<serviceId, notes>` (non-empty only)
-- `setAuthHubNotes(serviceId, notes)` — Upserts notes
+- `getAuthHubStatuses(env)` — Returns `Record<serviceId, status>` for all connectors of the environment
+- `setAuthHubStatus(env, serviceId, status)` — Upserts verification status
+- `getAuthHubNotes(env)` — Returns `Record<serviceId, notes>` (non-empty only)
+- `setAuthHubNotes(env, serviceId, notes)` — Upserts notes
 - `getGithubOAuthConnectors()` — Returns `{ oauth2: [{serviceId, path}], versions: {serviceId: version} }` from DB
 - `setGithubOAuthConnectors(connectors)` — Replaces all cached GitHub connector data
 
 ### Admin Gating
 
-Admin features (edit service config, whitelist keys, upload bundle, delete connector — and releasing connectors on `/releases`) are gated by `isAdmin(email)` from `src/lib/admin.js`. It reads `ADMIN_EMAILS` (comma-separated) from env and checks if the session user's email is in the list.
+Admin features (edit service config, whitelist keys, upload bundle, upload from the repository, delete connector — and releasing connectors on `/releases`) are gated by `isAdmin(email)` from `src/lib/admin.js`. It reads `ADMIN_EMAILS` (comma-separated) from env and checks if the session user's email is in the list.
 
 ### Environment Variables
 
-- `AUTH_HUB_URL_PROD` — Base URL of the Auth Hub API
-- `AUTH_HUB_API_TOKEN_PROD` — Bearer token for Auth Hub API
+- `AUTH_HUB_URL_PROD` / `AUTH_HUB_API_TOKEN_PROD` — production Auth Hub (`https://auth-hub.appmixer.com`) and its bearer token
+- `AUTH_HUB_URL_QA` / `AUTH_HUB_API_TOKEN_QA` — QA Auth Hub (`https://auth-hub.dev.appmixer.ai`, deployed from app-config `env/dev-ec1/system/authhub`); optional. `https://authhub.eks.appmixer.co` (an old commented-out value) no longer serves the API.
 - `ADMIN_EMAILS` — Comma-separated list of admin email addresses
+- Upload from the repository uses the GitHub token (Settings or `SANITY_GITHUB_TOKEN`) — read access to both source repos — and `RELEASE_TARGET_REPO` / `RELEASE_TARGET_BRANCH` for the `release` source.
+
+### Testing locally
+
+A worktree with `node_modules` symlinked to the main checkout needs Vite's `server.fs.allow` to include the main checkout, otherwise the client entry is refused (403) and the page never hydrates. To exercise uploads without touching a real Auth Hub, point `AUTH_HUB_URL_QA` at a local mock of `/service-config`, `POST /components` and `/components/uploader/<ticket>` (shell variables win over `.env`).
 
 ## Automation Hub (`/automation-hub`)
 

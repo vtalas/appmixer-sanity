@@ -1,8 +1,11 @@
 import { json } from '@sveltejs/kit';
-import { env } from '$env/dynamic/private';
 import { isAdmin } from '$lib/admin.js';
+import { authHubFetch, resolveAuthHubFromUrl } from '$lib/server/authhub/hub.js';
 
-export async function DELETE({ request, locals }) {
+/**
+ * DELETE — remove a connector's service config and bundle from the `?env=` Auth Hub.
+ */
+export async function DELETE({ request, url, locals }) {
     const session = await locals.auth();
     const userId = session?.user?.email;
 
@@ -15,21 +18,17 @@ export async function DELETE({ request, locals }) {
         return json({ error: 'serviceId is required' }, { status: 400 });
     }
 
-    const baseUrl = env.AUTH_HUB_URL_PROD;
-    const token = env.AUTH_HUB_API_TOKEN_PROD;
-
-    if (!baseUrl || !token) {
-        return json({ error: 'AUTH_HUB_URL_PROD and AUTH_HUB_API_TOKEN_PROD must be configured' }, { status: 500 });
+    const { hub, error, status } = resolveAuthHubFromUrl(url);
+    if (!hub) {
+        return json({ error }, { status });
     }
 
-    const headers = { 'Authorization': `Bearer ${token}` };
     const selector = serviceId.replaceAll(':', '.');
     const errors = [];
 
     // Delete service config
-    const configRes = await fetch(`${baseUrl}/service-config/${encodeURIComponent(serviceId)}`, {
-        method: 'DELETE',
-        headers
+    const configRes = await authHubFetch(hub, `/service-config/${encodeURIComponent(serviceId)}`, {
+        method: 'DELETE'
     });
     if (!configRes.ok && configRes.status !== 404) {
         const text = await configRes.text();
@@ -37,9 +36,8 @@ export async function DELETE({ request, locals }) {
     }
 
     // Delete bundle
-    const bundleRes = await fetch(`${baseUrl}/components/${encodeURIComponent(selector)}`, {
-        method: 'DELETE',
-        headers
+    const bundleRes = await authHubFetch(hub, `/components/${encodeURIComponent(selector)}`, {
+        method: 'DELETE'
     });
     if (!bundleRes.ok && bundleRes.status !== 404) {
         const text = await bundleRes.text();

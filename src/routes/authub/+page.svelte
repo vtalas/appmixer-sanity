@@ -7,15 +7,187 @@
 
   let { data } = $props();
 
+  const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
+
   let search = $state('');
   /** @type {Set<string>} */
   let statusFilter = $state(new Set());
+  // Per-environment data: derived from the load result (so switching ?env=
+  // replaces it) and overwritten locally as the page updates it
   /** @type {Record<string, {version?: string, icon?: string, label?: string}>} */
-  let cachedInfo = $state(data.cachedInfo || {});
+  let cachedInfo = $derived(data.cachedInfo || {});
   /** @type {Record<string, string>} */
-  let statuses = $state(data.statuses || {});
+  let statuses = $derived(data.statuses || {});
   /** @type {Record<string, string>} */
-  let notes = $state(data.notes || {});
+  let notes = $derived(data.notes || {});
+  // `data` isn't deeply reactive — assigning data.connectors wouldn't re-render
+  /** @type {Array<{serviceId: string, source: string}>} */
+  let connectors = $derived(data.connectors || []);
+
+  /**
+   * API URL for the Auth Hub environment shown on the page
+   * @param {string} path
+   * @param {Record<string, string>} [params]
+   */
+  function api(path, params = {}) {
+    return `${path}?${new URLSearchParams({ env: data.env.id, ...params })}`;
+  }
+
+  /** @param {number} bytes */
+  function formatSize(bytes) {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  /**
+   * Wait until Auth Hub has processed an upload. Its ticket holds `{started}`
+   * while it unpacks, tests and installs the bundle, then `{finished, installed}`
+   * or `{finished, err, data}` — `finished` is set on failure too.
+   * @param {string} ticket
+   * @param {(message: string) => void} onProgress
+   * @returns {Promise<{ok: boolean, message: string}>}
+   */
+  async function waitForUpload(ticket, onProgress) {
+    const url = api('/api/auth-hub/upload', { ticket });
+    const started = Date.now();
+    while (Date.now() - started < UPLOAD_TIMEOUT_MS) {
+      await new Promise((r) => setTimeout(r, 2000));
+      // 404 until Auth Hub has registered the ticket
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const status = await res.json();
+      if (status.err) {
+        const detail = status.data ? ` ${JSON.stringify(status.data)}` : '';
+        return { ok: false, message: `Auth Hub rejected the bundle: ${status.err}${detail}` };
+      }
+      if (status.finished) return { ok: true, message: 'Upload complete!' };
+      onProgress(`Auth Hub is processing the bundle… ${Math.round((Date.now() - started) / 1000)} s`);
+    }
+    return { ok: false, message: 'Timed out waiting for Auth Hub to process the bundle' };
+  }
+
+  /**
+   * After a successful upload: show the connector and its new bundle version.
+   * @param {string} serviceId
+   */
+  async function afterUpload(serviceId) {
+    const existing = connectors.find((c) => c.serviceId === serviceId);
+    if (!existing) {
+      connectors = [...connectors, { serviceId, source: 'authhub' }]
+        .sort((a, b) => (a.serviceId || '').localeCompare(b.serviceId || ''));
+    } else if (existing.source === 'github') {
+      connectors = connectors.map((c) => (c.serviceId === serviceId ? { ...c, source: 'both' } : c));
+    }
+    try {
+      const res = await fetch(api('/api/auth-hub/bundle'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ serviceId })
+      });
+      const result = await res.json();
+      if (res.ok && result.version) {
+        cachedInfo = { ...cachedInfo, [serviceId]: { ...cachedInfo[serviceId], version: result.version } };
+      }
+    } catch { /* ignore */ }
+  }
+
+  // Bundle packed from GitHub (Upload Bundle / Upload New → From repository)
+  /** @type {'repo'|'file'} */
+  let bundleMode = $state('repo');
+  let repoSource = $state('dev');
+  /** @type {any} */
+  let repoPreview = $state(null);
+  let repoPreviewLoading = $state(false);
+  let repoPreviewError = $state('');
+  let repoFilesOpen = $state(false);
+  let repoPreviewSeq = 0;
+
+  /** Production gets what's released, QA what's in development */
+  function defaultRepoSource() {
+    const preferred = data.env.id === 'prod' ? 'release' : 'dev';
+    const sources = data.packSources || [];
+    return sources.some((s) => s.id === preferred) ? preferred : sources[0]?.id || 'dev';
+  }
+
+  /** @param {'repo'|'file'} mode */
+  function resetBundleSource(mode) {
+    bundleMode = mode;
+    repoSource = defaultRepoSource();
+    repoPreview = null;
+    repoPreviewError = '';
+    repoPreviewLoading = false;
+    repoFilesOpen = false;
+    repoPreviewSeq++;
+  }
+
+  /** @param {string} serviceId */
+  async function loadRepoPreview(serviceId) {
+    const seq = ++repoPreviewSeq;
+    repoPreview = null;
+    repoPreviewError = '';
+    repoFilesOpen = false;
+    if (!serviceId) return;
+    repoPreviewLoading = true;
+    try {
+      const res = await fetch(api('/api/auth-hub/upload-from-repo', { serviceId, source: repoSource }));
+      const result = await res.json();
+      if (seq !== repoPreviewSeq) return;
+      if (res.ok) repoPreview = result;
+      else repoPreviewError = result.error || `Error ${res.status}`;
+    } catch (err) {
+      if (seq === repoPreviewSeq) repoPreviewError = /** @type {Error} */ (err).message;
+    } finally {
+      if (seq === repoPreviewSeq) repoPreviewLoading = false;
+    }
+  }
+
+  function downloadRepoPack() {
+    if (!repoPreview) return;
+    window.open(api('/api/auth-hub/upload-from-repo', {
+      serviceId: repoPreview.serviceId,
+      source: repoSource,
+      commit: repoPreview.commitSha,
+      download: '1'
+    }), '_blank');
+  }
+
+  /**
+   * Pack the previewed commit on the server and upload it.
+   * @param {(message: string) => void} onProgress
+   * @returns {Promise<{ok: boolean, message: string}>}
+   */
+  async function uploadRepoPack(onProgress) {
+    const preview = repoPreview;
+    onProgress(`Packing ${preview.name} v${preview.version} and uploading…`);
+    const res = await fetch(api('/api/auth-hub/upload-from-repo'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ serviceId: preview.serviceId, source: repoSource, commitSha: preview.commitSha })
+    });
+    const result = await res.json();
+    if (!res.ok) return { ok: false, message: result.error || 'Upload failed' };
+    onProgress(`Uploaded ${formatSize(result.size)} (${result.fileCount} files), waiting for Auth Hub…`);
+    const outcome = await waitForUpload(result.ticket, onProgress);
+    return outcome.ok
+      ? { ok: true, message: `${preview.name} v${preview.version} uploaded from ${preview.source.repo}@${preview.commitSha.slice(0, 7)}` }
+      : outcome;
+  }
+
+  // Close dialogs of the previous environment when ?env= changes
+  let shownEnv = '';
+  $effect.pre(() => {
+    const envId = data.env.id;
+    if (shownEnv && envId !== shownEnv) {
+      viewDialogOpen = false;
+      uploadDialogOpen = false;
+      uploadNewDialogOpen = false;
+      notesDialogOpen = false;
+      deleteDialogOpen = false;
+      bundleLoading = {};
+    }
+    shownEnv = envId;
+  });
   /** @type {string|null} */
   let notesServiceId = $state(null);
   let notesDialogOpen = $state(false);
@@ -33,7 +205,7 @@
     if (!notesServiceId) return;
     notesSaving = true;
     try {
-      await fetch('/api/auth-hub/notes', {
+      await fetch(api('/api/auth-hub/notes'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ serviceId: notesServiceId, notes: notesDraft })
@@ -71,69 +243,34 @@
   }
 
   async function doUpload() {
-    if (!uploadFile) return;
+    const serviceId = viewServiceId;
+    if (bundleMode === 'file' ? !uploadFile : !repoPreview) return;
     uploading = true;
     uploadStatus = 'uploading';
-    uploadMessage = `Uploading ${uploadFile.name}...`;
+    /** @param {string} message */
+    const progress = (message) => { uploadStatus = 'polling'; uploadMessage = message; };
 
     try {
-      const res = await fetch('/api/auth-hub/upload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/octet-stream' },
-        body: uploadFile
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        uploadStatus = 'error';
-        uploadMessage = data.error || 'Upload failed';
-        uploading = false;
-        return;
+      let outcome;
+      if (bundleMode === 'repo') {
+        outcome = await uploadRepoPack(progress);
+      } else {
+        const file = /** @type {File} */ (uploadFile);
+        uploadMessage = `Uploading ${file.name}...`;
+        const res = await fetch(api('/api/auth-hub/upload'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: file
+        });
+        const result = await res.json();
+        outcome = res.ok
+          ? await waitForUpload(result.ticket, progress)
+          : { ok: false, message: result.error || 'Upload failed' };
       }
 
-      const { ticket } = data;
-      uploadStatus = 'polling';
-      uploadMessage = 'Processing...';
-
-      // Poll for completion
-      for (let i = 0; i < 60; i++) {
-        await new Promise(r => setTimeout(r, 2000));
-        const pollRes = await fetch(`/api/auth-hub/upload?ticket=${encodeURIComponent(ticket)}`);
-        if (!pollRes.ok) continue;
-        const status = await pollRes.json();
-        console.log(`[upload poll ${i + 1}]`, status);
-
-        if (status.finished || status.status === 'finished' || status.status === 'done' || status.completed) {
-          uploadStatus = 'done';
-          uploadMessage = 'Upload complete!';
-          uploading = false;
-          if (viewServiceId) {
-            try {
-              const refreshRes = await fetch('/api/auth-hub/bundle', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ serviceId: viewServiceId })
-              });
-              const refreshResult = await refreshRes.json();
-              if (refreshRes.ok && refreshResult.version) {
-                cachedInfo = { ...cachedInfo, [viewServiceId]: { ...cachedInfo[viewServiceId], version: refreshResult.version } };
-              }
-            } catch { /* ignore */ }
-          }
-          return;
-        }
-        if (status.status === 'error' || status.error) {
-          uploadStatus = 'error';
-          uploadMessage = status.error || status.message || 'Upload processing failed';
-          uploading = false;
-          return;
-        }
-        if (status.progress !== undefined) {
-          uploadMessage = `Processing... ${status.progress || ''}`;
-        }
-      }
-
-      uploadStatus = 'error';
-      uploadMessage = 'Timed out waiting for upload to complete';
+      uploadStatus = outcome.ok ? 'done' : 'error';
+      uploadMessage = outcome.message;
+      if (outcome.ok && serviceId) await afterUpload(serviceId);
     } catch (err) {
       uploadStatus = 'error';
       uploadMessage = /** @type {Error} */ (err).message;
@@ -147,6 +284,7 @@
     uploadStatus = 'idle';
     uploadMessage = '';
     uploadDragOver = false;
+    resetBundleSource('repo');
   }
 
   // Upload New (admin only) — service name + config + bundle
@@ -163,8 +301,9 @@
   let uploadNewStep = $state('form');
   let uploadNewMessage = $state('');
 
-  function resetUploadNew() {
-    uploadNewServiceId = '';
+  /** @param {string} [serviceId] - prefill (a connector not in Auth Hub yet) */
+  function resetUploadNew(serviceId = '') {
+    uploadNewServiceId = serviceId;
     uploadNewConfig = {};
     uploadNewConfigKey = '';
     uploadNewConfigValue = '';
@@ -172,6 +311,8 @@
     uploadNewDragOver = false;
     uploadNewStep = 'form';
     uploadNewMessage = '';
+    resetBundleSource(serviceId ? 'repo' : 'file');
+    if (serviceId) loadRepoPreview(serviceId);
   }
 
   /** @param {File} file */
@@ -184,13 +325,17 @@
   async function doUploadNew(force = false) {
     const sid = uploadNewServiceId.trim();
     if (!sid) { uploadNewMessage = 'Service name is required'; return; }
+    if (bundleMode === 'repo' && repoPreview?.serviceId !== sid) {
+      uploadNewMessage = 'Load the repository preview for this service name first';
+      return;
+    }
 
     if (!force) {
       // Check if config already exists
       uploadNewStep = 'checking';
       uploadNewMessage = '';
       try {
-        const res = await fetch(`/api/auth-hub/service-config?serviceId=${encodeURIComponent(sid)}`);
+        const res = await fetch(api('/api/auth-hub/service-config', { serviceId: sid }));
         if (res.ok) {
           // Exists — ask to confirm
           uploadNewStep = 'confirm';
@@ -208,7 +353,7 @@
       );
       // Always include serviceId in config
       if (!body.serviceId) body.serviceId = sid;
-      const res = await fetch('/api/auth-hub/service-config', {
+      const res = await fetch(api('/api/auth-hub/service-config'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ serviceId: sid, config: body })
@@ -221,36 +366,35 @@
       }
     }
 
-    // Upload bundle (if file selected)
-    if (uploadNewFile) {
+    // Upload bundle (packed from the repository or the selected file)
+    let doneMessage = 'Done!';
+    if (bundleMode === 'repo' ? repoPreview : uploadNewFile) {
       uploadNewStep = 'uploading';
-      uploadNewMessage = `Uploading ${uploadNewFile.name}...`;
+      /** @param {string} message */
+      const progress = (message) => { uploadNewStep = 'polling'; uploadNewMessage = message; };
       try {
-        const res = await fetch('/api/auth-hub/upload', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/octet-stream' },
-          body: uploadNewFile
-        });
-        const result = await res.json();
-        if (!res.ok) { uploadNewStep = 'error'; uploadNewMessage = result.error || 'Upload failed'; return; }
-
-        const { ticket } = result;
-        uploadNewStep = 'polling';
-        uploadNewMessage = 'Processing...';
-        for (let i = 0; i < 60; i++) {
-          await new Promise(r => setTimeout(r, 2000));
-          const pollRes = await fetch(`/api/auth-hub/upload?ticket=${encodeURIComponent(ticket)}`);
-          if (!pollRes.ok) continue;
-          const status = await pollRes.json();
-          console.log(`[upload-new poll ${i + 1}]`, status);
-          if (status.finished || status.status === 'finished' || status.status === 'done' || status.completed) break;
-          if (status.status === 'error' || status.error) {
-            uploadNewStep = 'error';
-            uploadNewMessage = status.error || status.message || 'Upload processing failed';
-            return;
-          }
-          if (status.progress !== undefined) uploadNewMessage = `Processing... ${status.progress || ''}`;
+        let outcome;
+        if (bundleMode === 'repo') {
+          outcome = await uploadRepoPack(progress);
+        } else {
+          const file = /** @type {File} */ (uploadNewFile);
+          uploadNewMessage = `Uploading ${file.name}...`;
+          const res = await fetch(api('/api/auth-hub/upload'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/octet-stream' },
+            body: file
+          });
+          const result = await res.json();
+          outcome = res.ok
+            ? await waitForUpload(result.ticket, progress)
+            : { ok: false, message: result.error || 'Upload failed' };
         }
+        if (!outcome.ok) {
+          uploadNewStep = 'error';
+          uploadNewMessage = outcome.message;
+          return;
+        }
+        doneMessage = outcome.message;
       } catch (err) {
         uploadNewStep = 'error';
         uploadNewMessage = /** @type {Error} */ (err).message;
@@ -259,21 +403,8 @@
     }
 
     uploadNewStep = 'done';
-    uploadNewMessage = 'Done!';
-    // Add to connector list if not already there
-    if (!data.connectors.find(c => c.serviceId === sid)) {
-      data.connectors = [...data.connectors, { serviceId: sid }];
-    }
-    // Refresh bundle info
-    try {
-      const r = await fetch('/api/auth-hub/bundle', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ serviceId: sid })
-      });
-      const result = await r.json();
-      if (r.ok && result.version) cachedInfo = { ...cachedInfo, [sid]: { ...cachedInfo[sid], version: result.version } };
-    } catch { /* ignore */ }
+    uploadNewMessage = doneMessage;
+    await afterUpload(sid);
   }
 
   // View connector details popup
@@ -321,9 +452,9 @@
   async function refreshView(serviceId) {
     try {
       const [configRes, whitelistRes, bundleRes] = await Promise.all([
-        fetch(`/api/auth-hub/service-config?serviceId=${encodeURIComponent(serviceId)}`),
-        fetch(`/api/auth-hub/service-config?serviceId=${encodeURIComponent(serviceId)}&whitelist=1`),
-        fetch('/api/auth-hub/bundle', {
+        fetch(api('/api/auth-hub/service-config', { serviceId })),
+        fetch(api('/api/auth-hub/service-config', { serviceId, whitelist: '1' })),
+        fetch(api('/api/auth-hub/bundle'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ serviceId })
@@ -407,7 +538,7 @@
         // Key-value mode — values are already strings
         body = Object.fromEntries(Object.entries(viewEditConfig));
       }
-      const res = await fetch(`/api/auth-hub/service-config`, {
+      const res = await fetch(api('/api/auth-hub/service-config'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ serviceId: viewServiceId, config: body })
@@ -431,7 +562,7 @@
     if (!viewServiceId) return;
     whitelistAdding = { ...whitelistAdding, [key]: true };
     try {
-      const res = await fetch(`/api/auth-hub/service-config/whitelist-key`, {
+      const res = await fetch(api('/api/auth-hub/service-config/whitelist-key'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ serviceId: viewServiceId, key, value: null })
@@ -447,7 +578,7 @@
     if (!viewServiceId) return;
     whitelistRemoving = { ...whitelistRemoving, [key]: true };
     try {
-      const res = await fetch(`/api/auth-hub/service-config/whitelist-key`, {
+      const res = await fetch(api('/api/auth-hub/service-config/whitelist-key'), {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ serviceId: viewServiceId, key })
@@ -460,7 +591,7 @@
 
   /** @param {string} serviceId */
   function downloadBundle(serviceId) {
-    window.open(`/api/auth-hub/bundle-download?serviceId=${encodeURIComponent(serviceId)}`, '_blank');
+    window.open(api('/api/auth-hub/bundle-download', { serviceId }), '_blank');
   }
 
   // Delete confirm (admin only)
@@ -472,13 +603,13 @@
 
   // GitHub versions (admin only)
   /** @type {Record<string, {version: string, path: string}>} */
-  let githubVersions = $state(
+  let githubVersions = $derived(
     Object.fromEntries(Object.entries(data.githubVersions || {}).map(([k, v]) => [k, { version: v, path: '' }]))
   );
   let showNotInAuthHub = $state(false);
 
   let filteredConnectors = $derived(
-    data.connectors.filter((c) => {
+    connectors.filter((c) => {
       if (search) {
         const q = search.toLowerCase();
         if (!(c.serviceId || '').toLowerCase().includes(q)) return false;
@@ -504,13 +635,13 @@
   async function fetchAll() {
     fetchAllRunning = true;
     fetchAllPhase = 'bundles';
-    const ids = data.connectors.filter(c => c.source !== 'github').map(c => c.serviceId).filter(Boolean);
+    const ids = connectors.filter(c => c.source !== 'github').map(c => c.serviceId).filter(Boolean);
     fetchAllProgress = { done: 0, total: ids.length };
 
     for (const serviceId of ids) {
       bundleLoading = { ...bundleLoading, [serviceId]: true };
       try {
-        const res = await fetch('/api/auth-hub/bundle', {
+        const res = await fetch(api('/api/auth-hub/bundle'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ serviceId })
@@ -525,7 +656,7 @@
     }
 
     try {
-      const cacheRes = await fetch('/api/auth-hub/bundle?env=prod');
+      const cacheRes = await fetch(api('/api/auth-hub/bundle'));
       if (cacheRes.ok) {
         cachedInfo = await cacheRes.json();
       }
@@ -547,20 +678,20 @@
           Object.entries(rawVersions).map(([k, v]) => [k, { version: v, path: '' }])
         );
 
-        const authhubIds = new Set(data.connectors.filter(c => c.source !== 'github').map(c => c.serviceId));
+        const authhubIds = new Set(connectors.filter(c => c.source !== 'github').map(c => c.serviceId));
         const githubIds = new Set(githubOAuth.map(c => c.serviceId));
 
-        data.connectors = data.connectors
+        connectors = connectors
           .filter(c => c.source !== 'github' || githubIds.has(c.serviceId))
           .map(c => ({ ...c, source: githubIds.has(c.serviceId) ? (c.source === 'github' ? 'github' : 'both') : c.source }));
 
         for (const c of githubOAuth) {
-          if (!authhubIds.has(c.serviceId) && !data.connectors.find(x => x.serviceId === c.serviceId)) {
-            data.connectors = [...data.connectors, { serviceId: c.serviceId, source: 'github' }];
+          if (!authhubIds.has(c.serviceId) && !connectors.find(x => x.serviceId === c.serviceId)) {
+            connectors = [...connectors, { serviceId: c.serviceId, source: 'github' }];
           }
         }
 
-        data.connectors = [...data.connectors].sort((a, b) => (a.serviceId || '').localeCompare(b.serviceId || ''));
+        connectors = [...connectors].sort((a, b) => (a.serviceId || '').localeCompare(b.serviceId || ''));
       }
     } catch { /* ignore */ }
 
@@ -575,7 +706,7 @@
   async function updateStatus(serviceId, status) {
     statuses = { ...statuses, [serviceId]: status };
     try {
-      await fetch('/api/auth-hub/status', {
+      await fetch(api('/api/auth-hub/status'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ serviceId, status })
@@ -588,7 +719,7 @@
     deleting = true;
     deleteError = '';
     try {
-      const res = await fetch('/api/auth-hub/connector', {
+      const res = await fetch(api('/api/auth-hub/connector'), {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ serviceId: deleteServiceId })
@@ -599,7 +730,11 @@
         return;
       }
       // Remove from local state
-      data.connectors = data.connectors.filter(c => c.serviceId !== deleteServiceId);
+      // A connector the repository has stays listed as "not in Auth Hub"
+      connectors = connectors.flatMap((c) => {
+        if (c.serviceId !== deleteServiceId) return [c];
+        return c.source === 'both' ? [{ ...c, source: 'github' }] : [];
+      });
       cachedInfo = Object.fromEntries(Object.entries(cachedInfo).filter(([k]) => k !== deleteServiceId));
       deleteServiceId = null;
       deleteDialogOpen = false;
@@ -627,13 +762,120 @@
     }
     return 'match';
   }
+
+  // Switching the environment mid-operation would mix up the two Auth Hubs
+  let busy = $derived(
+    fetchAllRunning || uploading || deleting || configSaving ||
+      ['checking', 'saving', 'uploading', 'polling'].includes(uploadNewStep)
+  );
 </script>
 
+{#snippet envTarget()}
+  <p class="rounded-md px-3 py-2 text-xs {data.env.id === 'prod' ? 'bg-destructive/10 text-destructive' : 'bg-yellow-500/10 text-yellow-700 dark:text-yellow-400'}">
+    Target: <strong>{data.env.label}</strong> Auth Hub{#if data.env.host}{' '}(<span class="font-mono">{data.env.host}</span>){/if}
+  </p>
+{/snippet}
+
+{#snippet bundleModeToggle(/** @type {() => void} */ onRepo)}
+  <div class="flex gap-1">
+    {#each [{ mode: 'repo', label: 'From repository' }, { mode: 'file', label: 'ZIP file' }] as opt}
+      <button
+        class="rounded px-2 py-0.5 text-xs border transition-colors {bundleMode === opt.mode ? 'bg-primary text-primary-foreground border-primary' : 'border-input text-muted-foreground hover:bg-muted'}"
+        onclick={() => {
+          if (bundleMode === opt.mode) return;
+          bundleMode = /** @type {'repo'|'file'} */ (opt.mode);
+          if (opt.mode === 'repo') onRepo();
+        }}
+      >{opt.label}</button>
+    {/each}
+  </div>
+{/snippet}
+
+{#snippet repoPanel(/** @type {string} */ serviceId)}
+  <div class="min-w-0 space-y-2">
+    <div class="flex items-center gap-2">
+      <label class="shrink-0 text-xs font-medium text-muted-foreground" for="repo-source">Source</label>
+      <select
+        id="repo-source"
+        class="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+        bind:value={repoSource}
+        onchange={() => loadRepoPreview(serviceId)}
+        disabled={repoPreviewLoading}
+      >
+        {#each data.packSources || [] as src}
+          <option value={src.id}>{src.label} — {src.repo}@{src.branch}</option>
+        {/each}
+      </select>
+    </div>
+    {#if repoPreviewLoading}
+      <div class="flex items-center gap-2 rounded-md border p-3 text-xs text-muted-foreground">
+        <div class="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent"></div>
+        Reading {serviceId} from GitHub…
+      </div>
+    {:else if repoPreviewError}
+      <p class="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-xs text-destructive">{repoPreviewError}</p>
+    {:else if repoPreview}
+      {@const current = cachedInfo[repoPreview.serviceId]?.version}
+      {@const cmp = compareVersions(current, repoPreview.version)}
+      <div class="min-w-0 space-y-1 rounded-md border p-3">
+        <div class="flex items-baseline justify-between gap-2">
+          <span class="min-w-0 truncate font-mono text-sm font-medium">{repoPreview.name}</span>
+          <span class="text-sm font-semibold tabular-nums">v{repoPreview.version ?? '?'}</span>
+        </div>
+        <p class="text-xs {cmp === 'newer' ? 'font-medium text-destructive' : cmp === 'match' ? 'text-muted-foreground' : ''}">
+          {#if !current}
+            Not in {data.env.label} Auth Hub yet (or its version isn't loaded)
+          {:else if cmp === 'outdated'}
+            {data.env.label} Auth Hub has v{current} — this upgrades it
+          {:else if cmp === 'match'}
+            {data.env.label} Auth Hub already has v{current} — the files may still differ
+          {:else if cmp === 'newer'}
+            ⚠ {data.env.label} Auth Hub has a newer v{current} — this is a downgrade
+          {/if}
+        </p>
+        <p class="text-xs text-muted-foreground">
+          <a href={repoPreview.pathUrl} target="_blank" rel="noreferrer" class="underline hover:text-foreground">{repoPreview.path}</a>
+          at <a href={repoPreview.commitUrl} target="_blank" rel="noreferrer" class="font-mono underline hover:text-foreground">{repoPreview.commitSha.slice(0, 7)}</a>
+          {#if repoPreview.committedAt}({new Date(repoPreview.committedAt).toLocaleString()}){/if}
+        </p>
+        <p class="text-xs text-muted-foreground">
+          {repoPreview.kind === 'module' ? 'Module, with the shared files of its service' : 'Service'} ·
+          <button class="underline hover:text-foreground" onclick={() => { repoFilesOpen = !repoFilesOpen; }}>{repoPreview.files.length} files</button>,
+          {formatSize(repoPreview.totalSize)} ·
+          <button class="underline hover:text-foreground" onclick={downloadRepoPack}>Download ZIP</button>
+        </p>
+        {#if repoFilesOpen}
+          <ul class="mt-1 max-h-40 overflow-y-auto rounded bg-muted/50 p-2 font-mono text-xs">
+            {#each repoPreview.files as f}
+              <li class="flex justify-between gap-2">
+                <span class="min-w-0 truncate" title={f.name}>{f.name}</span>
+                <span class="shrink-0 text-muted-foreground">{formatSize(f.size)}</span>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+    {:else}
+      <p class="rounded-md border p-3 text-xs text-muted-foreground">
+        {serviceId ? 'Pick a source to read the connector from GitHub.' : 'Enter the service name to read it from GitHub.'}
+      </p>
+    {/if}
+  </div>
+{/snippet}
+
 <div class="space-y-6">
-  <div class="flex items-center justify-between">
+  <div class="flex flex-wrap items-center justify-between gap-4">
     <div>
-      <h1 class="text-2xl font-bold">Auth Hub</h1>
-      <p class="text-muted-foreground">Browse connectors registered in Auth Hub</p>
+      <div class="flex items-center gap-2">
+        <h1 class="text-2xl font-bold">Auth Hub</h1>
+        {#if data.env.id !== 'prod'}
+          <Badge variant="warning">{data.env.label}</Badge>
+        {/if}
+      </div>
+      <p class="text-muted-foreground">
+        Browse connectors registered in {data.env.label} Auth Hub
+        {#if data.env.host}<span class="font-mono text-xs">· {data.env.host}</span>{/if}
+      </p>
       {#if data.isAdmin && data.githubInfo}
         <p class="text-xs text-muted-foreground mt-1">
           GitHub: <a href={data.githubInfo.url} target="_blank" class="underline hover:text-foreground">{data.githubInfo.owner}/{data.githubInfo.repo}</a> ({data.githubInfo.branch})
@@ -641,7 +883,25 @@
         </p>
       {/if}
     </div>
-    <div class="flex items-center gap-3">
+    <div class="flex flex-wrap items-center gap-3">
+      <nav class="inline-flex rounded-md border p-0.5" aria-label="Auth Hub environment">
+        {#each data.envs as e (e.id)}
+          {#if e.configured || e.id === data.env.id}
+            <a
+              href="?env={e.id}"
+              data-sveltekit-noscroll
+              aria-current={e.id === data.env.id ? 'page' : undefined}
+              aria-disabled={busy}
+              class="rounded px-3 py-1 text-xs font-medium transition-colors {e.id === data.env.id ? (e.id === 'prod' ? 'bg-primary text-primary-foreground' : 'bg-yellow-500 text-white') : 'text-muted-foreground hover:bg-muted'} {busy ? 'pointer-events-none opacity-50' : ''}"
+            >{e.label}</a>
+          {:else}
+            <span
+              class="cursor-not-allowed rounded px-3 py-1 text-xs text-muted-foreground/50"
+              title="Not configured — set {e.requires.join(' and ')}"
+            >{e.label}</span>
+          {/if}
+        {/each}
+      </nav>
       <Badge variant="secondary">{filteredConnectors.length} connectors</Badge>
       {#if githubOnlyCount > 0}
         <Badge variant="outline" class="text-orange-600 border-orange-300">{githubOnlyCount} not in Auth Hub</Badge>
@@ -668,6 +928,7 @@
             variant="outline"
             size="sm"
             onclick={() => { resetUploadNew(); uploadNewDialogOpen = true; }}
+            disabled={busy}
           >
             Upload New
           </Button>
@@ -809,6 +1070,14 @@
                     >
                       Details
                     </button>
+                  {:else if data.isAdmin}
+                    <button
+                      class="text-xs text-muted-foreground hover:text-foreground transition-colors underline"
+                      title="Add to {data.env.label} Auth Hub: service config + bundle from the repository"
+                      onclick={() => { resetUploadNew(connector.serviceId); uploadNewDialogOpen = true; }}
+                    >
+                      Add
+                    </button>
                   {/if}
                 </TableCell>
               </TableRow>
@@ -827,6 +1096,7 @@
       <DialogTitle>Upload New Connector</DialogTitle>
       <DialogDescription>Define service name, config properties, and optionally upload a bundle.</DialogDescription>
     </DialogHeader>
+    {@render envTarget()}
 
     {#if uploadNewStep === 'confirm'}
       <p class="text-sm">Service config for <strong>{uploadNewServiceId}</strong> already exists. Do you want to overwrite it?</p>
@@ -855,7 +1125,7 @@
       </div>
     {:else}
       <!-- Form -->
-      <div class="space-y-4">
+      <div class="min-w-0 space-y-4">
         <!-- Service name -->
         <div>
           <label class="mb-1 block text-xs font-medium text-muted-foreground">Service name</label>
@@ -863,6 +1133,7 @@
             class="h-9 w-full rounded-md border border-input bg-background px-3 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring"
             placeholder="e.g. appmixer:box"
             bind:value={uploadNewServiceId}
+            onchange={() => { if (bundleMode === 'repo') loadRepoPreview(uploadNewServiceId.trim()); }}
           />
         </div>
 
@@ -891,7 +1162,7 @@
                 bind:value={uploadNewConfigKey}
               />
               <input
-                class="h-7 flex-1 rounded border border-input bg-background px-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+                class="h-7 min-w-0 flex-1 rounded border border-input bg-background px-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-ring"
                 placeholder="value"
                 bind:value={uploadNewConfigValue}
               />
@@ -904,9 +1175,15 @@
           </div>
         </div>
 
-        <!-- Bundle drop zone -->
+        <!-- Bundle: packed from the repository or a .zip -->
         <div>
-          <label class="mb-1 block text-xs font-medium text-muted-foreground">Bundle (.zip) — optional</label>
+          <div class="mb-1 flex items-center justify-between gap-2">
+            <span class="text-xs font-medium text-muted-foreground">Bundle — optional</span>
+            {@render bundleModeToggle(() => loadRepoPreview(uploadNewServiceId.trim()))}
+          </div>
+          {#if bundleMode === 'repo'}
+            {@render repoPanel(uploadNewServiceId.trim())}
+          {:else}
           <div
             class="flex flex-col items-center justify-center rounded-lg border-2 border-dashed p-6 transition-colors {uploadNewDragOver ? 'border-primary bg-primary/5' : 'border-input bg-muted/30'}"
             role="region"
@@ -927,6 +1204,7 @@
               </label>
             {/if}
           </div>
+          {/if}
           {#if uploadNewMessage}
             <p class="mt-1 text-xs text-destructive">{uploadNewMessage}</p>
           {/if}
@@ -935,7 +1213,7 @@
 
       <DialogFooter>
         <Button variant="outline" onclick={() => { uploadNewDialogOpen = false; }}>Cancel</Button>
-        <Button onclick={() => doUploadNew(false)} disabled={!uploadNewServiceId.trim()}>Upload</Button>
+        <Button onclick={() => doUploadNew(false)} disabled={!uploadNewServiceId.trim() || (bundleMode === 'repo' && repoPreviewLoading)}>Upload</Button>
       </DialogFooter>
     {/if}
   </DialogContent>
@@ -966,7 +1244,7 @@
   <DialogContent class="max-w-2xl">
     <DialogHeader>
       <DialogTitle>{viewServiceId}</DialogTitle>
-      <DialogDescription>Service config from Auth Hub</DialogDescription>
+      <DialogDescription>Service config from {data.env.label} Auth Hub</DialogDescription>
     </DialogHeader>
 
     {#if viewLoading}
@@ -1106,7 +1384,7 @@
         {/if}
         <Button
           variant="outline"
-          onclick={() => { resetUpload(); viewDialogOpen = false; uploadDialogOpen = true; }}
+          onclick={() => { resetUpload(); viewDialogOpen = false; uploadDialogOpen = true; if (viewServiceId) loadRepoPreview(viewServiceId); }}
           disabled={viewLoading}
         >
           Upload Bundle
@@ -1133,8 +1411,13 @@
         {viewServiceId ? `Uploading bundle for ${viewServiceId}` : 'Drop a .zip connector bundle or click to select a file.'}
       </DialogDescription>
     </DialogHeader>
+    {@render envTarget()}
 
     {#if uploadStatus === 'idle' || uploadStatus === 'error'}
+      {@render bundleModeToggle(() => { if (viewServiceId && !repoPreview) loadRepoPreview(viewServiceId); })}
+      {#if bundleMode === 'repo'}
+        {@render repoPanel(viewServiceId || '')}
+      {:else}
       <!-- Drop zone -->
       <div
         class="mt-2 flex flex-col items-center justify-center rounded-lg border-2 border-dashed p-10 transition-colors {uploadDragOver ? 'border-primary bg-primary/5' : 'border-input bg-muted/30'}"
@@ -1171,6 +1454,7 @@
           </label>
         {/if}
       </div>
+      {/if}
       {#if uploadMessage}
         <p class="text-sm {uploadStatus === 'error' ? 'text-destructive' : 'text-muted-foreground'}">{uploadMessage}</p>
       {/if}
@@ -1192,8 +1476,11 @@
         {uploadStatus === 'done' ? 'Close' : 'Cancel'}
       </Button>
       {#if uploadStatus === 'idle' || uploadStatus === 'error'}
-        <Button onclick={doUpload} disabled={!uploadFile || uploading}>
-          Upload
+        <Button
+          onclick={doUpload}
+          disabled={uploading || (bundleMode === 'file' ? !uploadFile : !repoPreview || repoPreviewLoading)}
+        >
+          Upload{bundleMode === 'repo' && repoPreview ? ` v${repoPreview.version}` : ''}
         </Button>
       {/if}
     </DialogFooter>
@@ -1206,7 +1493,7 @@
     <DialogHeader>
       <DialogTitle>Delete Connector</DialogTitle>
       <DialogDescription>
-        This will permanently delete the service config and bundle for <strong>{deleteServiceId}</strong> from Auth Hub. This action cannot be undone.
+        This will permanently delete the service config and bundle for <strong>{deleteServiceId}</strong> from the <strong>{data.env.label}</strong> Auth Hub. This action cannot be undone.
       </DialogDescription>
     </DialogHeader>
     {#if deleteError}

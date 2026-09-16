@@ -1,21 +1,20 @@
 import { json } from '@sveltejs/kit';
-import { env } from '$env/dynamic/private';
 import { isAdmin } from '$lib/admin.js';
+import { authHubFetch, resolveAuthHubFromUrl } from '$lib/server/authhub/hub.js';
 
 /**
- * PUT — update a single whitelist key for a connector.
+ * PUT — update a single whitelist key for a connector in the `?env=` Auth Hub.
  * Proxies PUT /service-config/{serviceId}/whitelist/key/{key}
  */
-export async function PUT({ request, locals }) {
+export async function PUT({ request, url, locals }) {
     const session = await locals.auth();
     if (!isAdmin(session?.user?.email)) {
         return json({ error: 'Forbidden' }, { status: 403 });
     }
 
-    const baseUrl = env.AUTH_HUB_URL_PROD;
-    const token = env.AUTH_HUB_API_TOKEN_PROD;
-    if (!baseUrl || !token) {
-        return json({ error: 'AUTH_HUB_URL_PROD and AUTH_HUB_API_TOKEN_PROD must be configured' }, { status: 500 });
+    const { hub, error, status } = resolveAuthHubFromUrl(url);
+    if (!hub) {
+        return json({ error }, { status });
     }
 
     const { serviceId, key, value } = await request.json();
@@ -24,11 +23,12 @@ export async function PUT({ request, locals }) {
     }
 
     try {
-        const res = await fetch(
-            `${baseUrl}/service-config/${encodeURIComponent(serviceId)}/whitelist/key/${encodeURIComponent(key)}`,
+        const res = await authHubFetch(
+            hub,
+            `/service-config/${encodeURIComponent(serviceId)}/whitelist/key/${encodeURIComponent(key)}`,
             {
                 method: 'PUT',
-                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(value)
             }
         );
@@ -43,19 +43,18 @@ export async function PUT({ request, locals }) {
 }
 
 /**
- * DELETE — remove a single whitelist key for a connector.
+ * DELETE — remove a single whitelist key for a connector in the `?env=` Auth Hub.
  * Proxies DELETE /service-config/{serviceId}/whitelist/key/{key}
  */
-export async function DELETE({ request, locals }) {
+export async function DELETE({ request, url, locals }) {
     const session = await locals.auth();
     if (!isAdmin(session?.user?.email)) {
         return json({ error: 'Forbidden' }, { status: 403 });
     }
 
-    const baseUrl = env.AUTH_HUB_URL_PROD;
-    const token = env.AUTH_HUB_API_TOKEN_PROD;
-    if (!baseUrl || !token) {
-        return json({ error: 'AUTH_HUB_URL_PROD and AUTH_HUB_API_TOKEN_PROD must be configured' }, { status: 500 });
+    const { hub, error, status } = resolveAuthHubFromUrl(url);
+    if (!hub) {
+        return json({ error }, { status });
     }
 
     const { serviceId, key } = await request.json();
@@ -64,12 +63,10 @@ export async function DELETE({ request, locals }) {
     }
 
     try {
-        const res = await fetch(
-            `${baseUrl}/service-config/${encodeURIComponent(serviceId)}/whitelist/key/${encodeURIComponent(key)}`,
-            {
-                method: 'DELETE',
-                headers: { 'Authorization': `Bearer ${token}` }
-            }
+        const res = await authHubFetch(
+            hub,
+            `/service-config/${encodeURIComponent(serviceId)}/whitelist/key/${encodeURIComponent(key)}`,
+            { method: 'DELETE' }
         );
         if (!res.ok) {
             const data = await res.json().catch(() => ({}));
