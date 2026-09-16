@@ -9,6 +9,7 @@ import {
     resolveAuthHub
 } from '$lib/server/authhub/hub.js';
 import { describeSource, getPackSources } from '$lib/server/authhub/pack.js';
+import { configKeysOf } from '$lib/authhub-config.js';
 
 /** @type {import('./$types').PageServerLoad} */
 export async function load({ fetch, locals, url, cookies }) {
@@ -70,7 +71,7 @@ export async function load({ fetch, locals, url, cookies }) {
         }
 
         const data = await listRes.json();
-        /** @type {Array<{serviceId: string, source: string}>} */
+        /** @type {Array<{serviceId: string, [key: string]: unknown}>} */
         let authhubConnectors = [];
         if (Array.isArray(data)) {
             authhubConnectors = data;
@@ -100,9 +101,10 @@ export async function load({ fetch, locals, url, cookies }) {
         const connectorMap = new Map();
         for (const c of authhubConnectors) {
             connectorMap.set(c.serviceId, {
-                // never ship client secrets to the browser
+                // never ship client secrets to the browser — key names only
                 serviceId: c.serviceId,
-                source: githubIds.has(c.serviceId) ? 'both' : 'authhub'
+                source: githubIds.has(c.serviceId) ? 'both' : 'authhub',
+                configKeys: configKeysOf(c)
             });
         }
 

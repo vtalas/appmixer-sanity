@@ -178,7 +178,8 @@ Auth Hub is a separate page for browsing and managing OAuth connector configs/bu
 ### Key Features
 
 - **Environments** — a Production / QA switcher in the header (`?env=prod|qa`, remembered in the `authhub_env` cookie). Every Auth Hub API route takes `?env=` (default `prod`); an environment whose variables are missing is shown disabled. Non-production is marked with a yellow badge, and every upload/delete dialog names its target.
-- **Status tracking** — per-connector verification status (`not_verified` | `in_progress` | `verified`) stored in DB **per environment** and updated inline
+- **Status tracking** — per-connector verification status (`not_verified` | `in_progress` | `verified`) stored in DB **per environment** and updated inline. **Production only** — QA shows a config check in that column instead.
+- **Config check (QA)** — ✅ Configured when the service config has any key besides `serviceId` (the list response already carries the configs; the loader sends only the key names, `configKeys`), ❌ Not configured when it's the bare `{serviceId}` uploads create. Filterable; updated after Details → Edit, Upload New and uploads that register a connector. Shared definition: `src/lib/authhub-config.js`.
 - **Notes** — free-text notes per connector and environment, stored in DB, edited via dialog
 - **Whitelist management** — add/remove individual service-config keys to the Auth Hub whitelist (admin only)
 - **Bundle download** — proxy-download a connector's ZIP bundle from Auth Hub
@@ -206,7 +207,8 @@ Auth Hub is a separate page for browsing and managing OAuth connector configs/bu
 ### Service config = listed
 
 `GET /service-config` (the page's list) returns only connectors with a service config — a bundle uploaded alone stays invisible and the row keeps offering **Add**. `GET /service-config/<id>` answers **200 `{}`** for a missing config (`ServiceConfig.load`), so "does it exist" means a non-empty object; the old `res.ok` check asked to overwrite a config that didn't exist. Therefore:
-- Upload New always saves a config — `{serviceId}` when no keys were entered (PUT upserts and only `$set`s, so it never wipes existing keys).
+- Upload New always saves a config — `{serviceId}` when no keys were entered.
+- **PUT replaces the whole config** (`ServiceConfig.update` = `findOneAndReplace` with upsert, appmixer-core `engine/src/auth/ServiceConfig.js`), so Details → Edit sends every key, and Upload New's **Overwrite** of an existing config drops the keys not entered in the dialog (clientId/clientSecret included).
 - After any successful upload of a connector the list doesn't have yet (Add, Upload New, batch), `ensureServiceConfig()` creates `{serviceId}` if it's missing. clientId/clientSecret are added later via Details → Edit.
 - A row the repo has, with a cached bundle but no config, is badged **bundle only, no service config** (the state a bundle-only upload used to leave behind); **Add** fixes it — a ZIP-file upload with no file saves just the config.
 - Tenants aren't affected by a config without credentials: a tenant goes to Auth Hub only when its own config says so (`authHubUrl`) or via the automatic fallback, and Auth Hub validates the credentials either way (`engine/src/auth/ServiceFactory.js`).

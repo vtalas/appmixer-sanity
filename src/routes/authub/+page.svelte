@@ -5,6 +5,7 @@
   import { Badge } from '$lib/components/ui/badge';
   import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '$lib/components/ui/dialog';
   import { Checkbox } from '$lib/components/ui/checkbox';
+  import { configKeysOf } from '$lib/authhub-config.js';
 
   let { data } = $props();
 
@@ -13,6 +14,30 @@
   let search = $state('');
   /** @type {Set<string>} */
   let statusFilter = $state(new Set());
+  // QA isn't verified connector by connector — it shows whether each one has
+  // its config (keys besides serviceId) instead of the verification status
+  let showConfigCheck = $derived(data.env.id === 'qa');
+  /** @type {Set<string>} */
+  let configFilter = $state(new Set());
+  const STATUS_FILTERS = [
+    { value: 'not_verified', label: '\u274c Not Verified' },
+    { value: 'in_progress', label: '\u23f3 In Progress' },
+    { value: 'verified', label: '\u2705 Verified' }
+  ];
+  const CONFIG_FILTERS = [
+    { value: 'configured', label: '\u2705 Configured' },
+    { value: 'not_configured', label: '\u274c Not Configured' }
+  ];
+
+  /**
+   * @param {Set<string>} set
+   * @param {string} value
+   */
+  function toggled(set, value) {
+    const next = new Set(set);
+    next.has(value) ? next.delete(value) : next.add(value);
+    return next;
+  }
   // Per-environment data: derived from the load result (so switching ?env=
   // replaces it) and overwritten locally as the page updates it
   /** @type {Record<string, {version?: string, icon?: string, label?: string}>} */
@@ -22,8 +47,17 @@
   /** @type {Record<string, string>} */
   let notes = $derived(data.notes || {});
   // `data` isn't deeply reactive — assigning data.connectors wouldn't re-render
-  /** @type {Array<{serviceId: string, source: string}>} */
+  /** @type {Array<{serviceId: string, source: string, configKeys?: string[]}>} */
   let connectors = $derived(data.connectors || []);
+
+  /**
+   * Show the config keys a connector has now
+   * @param {string} serviceId
+   * @param {string[]} configKeys
+   */
+  function setConfigKeys(serviceId, configKeys) {
+    connectors = connectors.map((c) => (c.serviceId === serviceId ? { ...c, configKeys } : c));
+  }
 
   /**
    * API URL for the Auth Hub environment shown on the page
@@ -74,11 +108,12 @@
    * config — a bundle alone stays invisible. GET answers `{}` for a missing one.
    * @param {string} serviceId
    * @param {string} envId
+   * @returns {Promise<string[]>} keys of the config besides serviceId
    */
   async function ensureServiceConfig(serviceId, envId) {
     const res = await fetch(api('/api/auth-hub/service-config', { serviceId, env: envId }));
     const config = res.ok ? await res.json() : {};
-    if (Object.keys(config).length > 0) return;
+    if (Object.keys(config).length > 0) return configKeysOf(config);
     const put = await fetch(api('/api/auth-hub/service-config', { env: envId }), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -88,6 +123,7 @@
       const result = await put.json().catch(() => ({}));
       throw new Error(`The bundle is uploaded, but creating its service config failed: ${result.error || put.status}`);
     }
+    return [];
   }
 
   /**
@@ -98,14 +134,13 @@
    */
   async function afterUpload(serviceId, envId = data.env.id) {
     const existing = connectors.find((c) => c.serviceId === serviceId);
-    if (!existing || existing.source === 'github') {
-      await ensureServiceConfig(serviceId, envId);
-    }
     if (!existing) {
-      connectors = [...connectors, { serviceId, source: 'authhub' }]
+      const configKeys = await ensureServiceConfig(serviceId, envId);
+      connectors = [...connectors, { serviceId, source: 'authhub', configKeys }]
         .sort((a, b) => (a.serviceId || '').localeCompare(b.serviceId || ''));
     } else if (existing.source === 'github') {
-      connectors = connectors.map((c) => (c.serviceId === serviceId ? { ...c, source: 'both' } : c));
+      const configKeys = await ensureServiceConfig(serviceId, envId);
+      connectors = connectors.map((c) => (c.serviceId === serviceId ? { ...c, source: 'both', configKeys } : c));
     }
     try {
       const res = await fetch(api('/api/auth-hub/bundle'), {
@@ -548,6 +583,8 @@
       uploadNewMessage = r.error || 'Failed to save config';
       return;
     }
+    // PUT replaces the whole config
+    setConfigKeys(sid, configKeysOf(configBody));
 
     // Upload bundle (packed from the repository or the selected file)
     let doneMessage = 'Done!';
@@ -654,6 +691,7 @@
         viewError = configResult.error || `Error ${configRes.status}`;
       } else {
         viewServiceConfig = configResult;
+        setConfigKeys(serviceId, configKeysOf(configResult));
       }
       if (whitelistRes.ok) {
         const wl = await whitelistRes.json();
@@ -737,6 +775,7 @@
         configSaveError = result.error || `Error ${res.status}`;
       } else {
         viewServiceConfig = body;
+        setConfigKeys(viewServiceId, configKeysOf(body));
         viewEditMode = false;
       }
     } catch (err) {
@@ -803,7 +842,12 @@
         const q = search.toLowerCase();
         if (!(c.serviceId || '').toLowerCase().includes(q)) return false;
       }
-      if (statusFilter.size > 0) {
+      if (showConfigCheck && configFilter.size > 0) {
+        // Only connectors in the Auth Hub have a config to check
+        if (c.source === 'github') return false;
+        if (!configFilter.has(c.configKeys?.length ? 'configured' : 'not_configured')) return false;
+      }
+      if (!showConfigCheck && statusFilter.size > 0) {
         const s = statuses[c.serviceId] || 'not_verified';
         if (!statusFilter.has(s)) return false;
       }
@@ -1156,13 +1200,13 @@
         >
           Not in Auth Hub
         </button>
-        {#each [{ value: 'not_verified', label: '\u274c Not Verified' }, { value: 'in_progress', label: '\u23f3 In Progress' }, { value: 'verified', label: '\u2705 Verified' }] as opt}
+        {#each showConfigCheck ? CONFIG_FILTERS : STATUS_FILTERS as opt (opt.value)}
+          {@const active = (showConfigCheck ? configFilter : statusFilter).has(opt.value)}
           <button
-            class="h-8 px-3 rounded-md border text-xs transition-colors {statusFilter.has(opt.value) ? 'bg-primary text-primary-foreground border-primary' : 'bg-background border-input text-muted-foreground hover:bg-muted'}"
+            class="h-8 px-3 rounded-md border text-xs transition-colors {active ? 'bg-primary text-primary-foreground border-primary' : 'bg-background border-input text-muted-foreground hover:bg-muted'}"
             onclick={() => {
-              const next = new Set(statusFilter);
-              next.has(opt.value) ? next.delete(opt.value) : next.add(opt.value);
-              statusFilter = next;
+              if (showConfigCheck) configFilter = toggled(configFilter, opt.value);
+              else statusFilter = toggled(statusFilter, opt.value);
             }}
           >
             {opt.label}
@@ -1219,7 +1263,7 @@
               <TableHead class="w-10"><span></span></TableHead>
               <TableHead>Connector</TableHead>
               <TableHead class="w-28">Auth Hub</TableHead>
-              <TableHead class="w-40">Status</TableHead>
+              <TableHead class="w-40">{showConfigCheck ? 'Config' : 'Status'}</TableHead>
               <TableHead>Notes</TableHead>
               <TableHead class="w-20"><span></span></TableHead>
             </TableRow>
@@ -1288,6 +1332,12 @@
                 <TableCell>
                   {#if githubOnly}
                     <span class="text-muted-foreground">—</span>
+                  {:else if showConfigCheck}
+                    {#if connector.configKeys?.length}
+                      <span class="text-xs" title="Config keys: {connector.configKeys.join(', ')}">{'\u2705'} Configured</span>
+                    {:else}
+                      <span class="text-xs text-muted-foreground" title="The service config has only serviceId — add clientId / clientSecret via Details → Edit">{'\u274c'} Not configured</span>
+                    {/if}
                   {:else}
                     <select
                       class="h-8 rounded-md border border-input bg-background px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
