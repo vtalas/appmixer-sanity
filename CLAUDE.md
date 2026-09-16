@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Appmixer Sanity Check - A SvelteKit application for tracking sanity checks of Appmixer connectors. It creates snapshots of connector versions, allows testing and documenting component status, and tracks progress with visual dashboards.
+Appmixer Sanity Check - A SvelteKit application for tracking sanity checks of Appmixer connectors. It creates snapshots of connector versions, allows testing and documenting component status, and tracks progress with visual dashboards. It also runs the E2E test flows, shows the merge readiness of connector PRs, manages Auth Hub bundles, and releases connectors from appmixer-connectors `dev` to appmixer-components `master` (`/releases`).
 
 ## Commands
 
@@ -158,6 +158,7 @@ Compares the **release repo** (`Appmixer-ai/appmixer-components` `master` — ev
   - With an open PR the commits build on its branch, which is fast-forwarded (`force: false`; a branch that moved meanwhile → 409, nothing published), and the commit list in the PR body is updated.
   - The branch moves once at the end, so either every commit lands or none does. The request carries the `devVersion` the admin reviewed and is refused when dev has moved since. `dryRun: true` returns the planned commits for the confirmation dialog.
 - **Merging** happens by hand on GitHub with **Rebase and merge**, which keeps one commit per connector on master (a squash merge folds them into one). The merge starts Marketplace PRD.
+- **In use** since 2026-09-15: the first page-made `[RELEASE]` PRs, Appmixer-ai/appmixer-components #2861 (37 commits) and #2862 (63 commits), were rebase-merged and Marketplace PRD ran green. `vtalas:release` is not deleted after a merge; the next release without an open PR resets it — its merged commits pass `assertNothingUnmerged` because rebase merging keeps the messages.
 - **GitHub calls** — `githubRequest()` retries reads (network errors, 5xx) with a 30 s timeout per request: GitHub occasionally closes the connection halfway through a 3 MB tree download, which used to hang a page load for minutes.
 - **Token** — the caller's GitHub token (Settings) or `SANITY_GITHUB_TOKEN`: read access to both repos (appmixer-components is private), push access to the head repo; the PR is opened in the target repo. Commits and the PR are authored by the token's owner. With a fork as the head repo the token also needs the **`workflow` scope**: the release branch is built on upstream master, so it brings `.github/workflows/` changes the fork's branches don't have yet (vtalas' fork master is hundreds of commits behind), and without the scope GitHub answers the ref update with **404** while blobs, trees and commits go through. `publish.js` turns that 404 into an explanatory 403.
 - **Admin gating** — the page is open to every signed-in user; checkboxes, the Release buttons and `POST /api/releases` require `isAdmin`.
@@ -227,7 +228,7 @@ Auth Hub is a separate page for browsing and managing OAuth connector configs/bu
 
 ### Admin Gating
 
-Admin features (edit service config, whitelist keys, upload bundle, delete connector) are gated by `isAdmin(email)` from `src/lib/admin.js`. It reads `ADMIN_EMAILS` (comma-separated) from env and checks if the session user's email is in the list.
+Admin features (edit service config, whitelist keys, upload bundle, delete connector — and releasing connectors on `/releases`) are gated by `isAdmin(email)` from `src/lib/admin.js`. It reads `ADMIN_EMAILS` (comma-separated) from env and checks if the session user's email is in the list.
 
 ### Environment Variables
 
