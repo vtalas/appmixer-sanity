@@ -13,6 +13,8 @@
 import { env } from '$env/dynamic/private';
 import { getGitHubConfig } from '$lib/api/github.js';
 import { getBundleBlobs, saveBundleBlobs } from '$lib/db/release.js';
+import { parseVersion, compareParsed } from './version.js';
+import { loadReadiness } from './readiness.js';
 
 const GITHUB_API_BASE = 'https://api.github.com';
 export const CONNECTORS_ROOT = 'src/appmixer/';
@@ -37,9 +39,12 @@ const RELEASABLE = new Set(['new', 'major', 'minor', 'patch']);
  * Source (development), target (the release branch a PR goes into) and head
  * (the branch the release commits are pushed to — by default the `release`
  * branch of vtalas's fork, the head of every "[RELEASE]" PR so far).
- * @returns {{source: RepoRef, target: RepoRef, head: RepoRef}}
+ * `project` is the GitHub project the work is tracked on and `readyStatuses`
+ * the values of its Status field that mean "ready to release".
+ * @returns {{source: RepoRef, target: RepoRef, head: RepoRef, project: ProjectRef, readyStatuses: string[]}}
  *
  * @typedef {{owner: string, name: string, fullName: string, branch: string, url: string}} RepoRef
+ * @typedef {{owner: string, number: number, url: string}} ProjectRef
  */
 export function getReleaseConfig() {
   return {
@@ -54,7 +59,12 @@ export function getReleaseConfig() {
     head: repoRef(
       env.RELEASE_HEAD_REPO || 'vtalas/appmixer-components',
       env.RELEASE_HEAD_BRANCH || 'release'
-    )
+    ),
+    project: projectRef(env.RELEASE_PROJECT || 'Appmixer-ai/7'),
+    readyStatuses: (env.RELEASE_READY_STATUSES || 'Done')
+      .split(',')
+      .map((status) => status.trim())
+      .filter(Boolean)
   };
 }
 
@@ -73,6 +83,16 @@ async function findReleasePr(token, { target, head }) {
   );
   const pr = prs[0];
   return pr ? { number: pr.number, url: pr.html_url, title: pr.title } : null;
+}
+
+/** @param {string} value - "<organization>/<project number>" */
+function projectRef(value) {
+  const [owner, number] = value.split('/');
+  return {
+    owner,
+    number: Number(number),
+    url: `https://github.com/orgs/${owner}/projects/${number}`
+  };
 }
 
 function repoRef(fullName, branch) {
@@ -286,25 +306,6 @@ export function diffPaths(paths, sourceFiles, targetFiles) {
     else if (src && dst && (src.sha !== dst.sha || src.mode !== dst.mode)) modified.push(path);
   }
   return { added: added.sort(), modified: modified.sort(), removed: removed.sort() };
-}
-
-function parseVersion(value) {
-  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+.*)?$/.exec(
-    String(value ?? '').trim()
-  );
-  if (!match) return null;
-  return { major: +match[1], minor: +match[2], patch: +match[3], pre: match[4] || null };
-}
-
-/** Semver comparison of two parsed versions: -1 | 0 | 1 (a prerelease sorts before its release) */
-function compareParsed(a, b) {
-  for (const part of ['major', 'minor', 'patch']) {
-    if (a[part] !== b[part]) return a[part] > b[part] ? 1 : -1;
-  }
-  if (a.pre === b.pre) return 0;
-  if (!a.pre) return 1;
-  if (!b.pre) return -1;
-  return Math.sign(a.pre.localeCompare(b.pre, undefined, { numeric: true }));
 }
 
 /**
@@ -521,19 +522,58 @@ function headInfo(head) {
 }
 
 /**
+ * Project status of the work each releasable connector would ship (see
+ * readiness.js). Never rejects — the comparison is useful without it, so a
+ * failure (typically a token without `read:project`) comes back as `error`.
+ * @param {string} token
+ * @param {any[]} connectors
+ * @returns {Promise<{connectors: Record<string, any>, error: string | null, code?: string}>}
+ */
+async function releaseReadiness(token, connectors) {
+  const { source, target, project, readyStatuses } = getReleaseConfig();
+  try {
+    return {
+      connectors: await loadReadiness({
+        graphql: (query) => githubRequest(token, 'POST', '/graphql', { query }),
+        source,
+        target,
+        project,
+        readyStatuses,
+        connectors: connectors.filter((c) => RELEASABLE.has(c.status)),
+        roots: connectors.map((c) => c.name)
+      }),
+      error: null
+    };
+  } catch (e) {
+    console.error('Release readiness failed:', e);
+    return {
+      connectors: {},
+      error: /** @type {any} */ (e)?.message || 'Release readiness failed',
+      code: /** @type {any} */ (e)?.code
+    };
+  }
+}
+
+/**
  * Comparison for the /releases page and GET /api/releases.
  * @param {string} userId - User ID (email); their GitHub token overrides the env token
+ * @param {{readiness?: boolean}} [options] - `readiness` adds a **promise** of
+ *   the release readiness: the page streams it in after the comparison (it
+ *   costs several seconds of GitHub GraphQL calls), the API awaits it
  */
-export async function compareReleases(userId) {
+export async function compareReleases(userId, { readiness = false } = {}) {
   const { token } = await getGitHubConfig(userId);
   const state = await loadReleaseState(token);
+  const { project, readyStatuses } = getReleaseConfig();
   return {
     source: snapshotInfo(state.source),
     target: snapshotInfo(state.target),
     head: headInfo(state.head),
     pr: state.pr,
+    project: { ...project, readyStatuses },
     connectors: state.connectors,
-    namespaces: state.namespaces
+    namespaces: state.namespaces,
+    ...(readiness ? { readiness: releaseReadiness(token, state.connectors) } : {})
   };
 }
 

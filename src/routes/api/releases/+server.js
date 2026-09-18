@@ -6,7 +6,8 @@ import { releaseConnectors, ReleaseError } from '$lib/server/release/publish.js'
 /**
  * GET /api/releases
  * Release branch (appmixer-components master) vs dev (appmixer-connectors):
- * per connector both versions, the release status and the changed files.
+ * per connector both versions, the release status and the changed files, plus
+ * `readiness` — the project status of the PRs each releasable connector ships.
  */
 export async function GET({ locals }) {
   const session = await locals.auth();
@@ -15,7 +16,8 @@ export async function GET({ locals }) {
   }
 
   try {
-    return json(await compareReleases(session.user.email));
+    const comparison = await compareReleases(session.user.email, { readiness: true });
+    return json({ ...comparison, readiness: await comparison.readiness });
   } catch (e) {
     console.error('Release comparison failed:', e);
     throw error(500, /** @type {any} */ (e)?.message || 'Release comparison failed');

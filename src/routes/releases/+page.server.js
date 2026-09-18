@@ -8,7 +8,9 @@ export async function load({ locals }) {
   const admin = isAdmin(userId);
 
   try {
-    return { ...(await compareReleases(userId)), isAdmin: admin, error: null };
+    // `readiness` stays a promise — SvelteKit streams it to the page once the
+    // project statuses are in, the comparison renders right away
+    return { ...(await compareReleases(userId, { readiness: true })), isAdmin: admin, error: null };
   } catch (e) {
     console.error('Release comparison failed:', e);
     return {
@@ -16,6 +18,7 @@ export async function load({ locals }) {
       target: null,
       connectors: [],
       namespaces: [],
+      readiness: null,
       isAdmin: admin,
       error: /** @type {any} */ (e)?.message || 'Release comparison failed'
     };

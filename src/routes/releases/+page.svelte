@@ -19,7 +19,9 @@
     ExternalLink,
     TriangleAlert,
     GitCommitHorizontal,
-    GitPullRequest
+    GitPullRequest,
+    CircleCheck,
+    CircleDot
   } from 'lucide-svelte';
 
   let { data } = $props();
@@ -72,9 +74,34 @@
     }
   };
 
+  // Project status of the PRs a release would ship (see readiness.js)
+  const READINESS = {
+    ready: {
+      label: 'Ready',
+      class: 'bg-emerald-100 text-emerald-800 border-emerald-200',
+      title: 'Every tracked pull request since the last release is ready on the project'
+    },
+    'not-ready': {
+      label: 'Not ready',
+      class: 'bg-orange-100 text-orange-800 border-orange-200',
+      title: 'A pull request since the last release is not ready on the project yet'
+    },
+    untracked: {
+      label: 'Untracked',
+      class: 'bg-gray-100 text-gray-600 border-gray-200',
+      title: 'None of the pull requests since the last release is on the project — neither itself nor through an issue'
+    },
+    unknown: {
+      label: 'No PR',
+      class: 'bg-gray-50 text-gray-500 border-gray-200',
+      title: 'No pull request found for the unreleased changes'
+    }
+  };
+
   // Stat tiles double as filters; `release` = everything releasable
   const TILES = [
     { key: 'release', label: 'To release', title: 'New, major, minor and patch — not in the open release PR yet', box: 'bg-slate-50 hover:bg-slate-100', num: 'text-slate-900', text: 'text-slate-700 font-medium', ring: 'ring-slate-500' },
+    { key: 'ready', label: 'Ready', title: 'To release, and every tracked pull request is ready on the project', box: 'bg-emerald-50 hover:bg-emerald-100', num: 'text-emerald-700', text: 'text-emerald-700 font-medium', ring: 'ring-emerald-500' },
     { key: 'pending', label: 'In release PR', title: 'Already in the open release PR', box: 'bg-indigo-50 hover:bg-indigo-100', num: 'text-indigo-700', text: 'text-indigo-600 font-medium', ring: 'ring-indigo-500', hideEmpty: true },
     { key: 'new', label: 'New', box: 'bg-blue-50 hover:bg-blue-100', num: 'text-blue-700', text: 'text-blue-600 font-medium', ring: 'ring-blue-500' },
     { key: 'major', label: 'Major', box: 'bg-red-50 hover:bg-red-100', num: 'text-red-700', text: 'text-red-600 font-medium', ring: 'ring-red-500' },
@@ -112,14 +139,44 @@
   });
 
   const connectors = $derived(data.connectors || []);
+
+  // Release readiness is streamed in after the comparison (data.readiness is a promise)
+  // (`loading` from the start, so the server-rendered page shows it as pending)
+  let readiness = $state({ loading: !!data.readiness, connectors: {}, error: null });
+  $effect(() => {
+    const pending = data.readiness;
+    if (!pending) {
+      readiness = { loading: false, connectors: {}, error: null };
+      return;
+    }
+    let stale = false;
+    readiness = { loading: true, connectors: {}, error: null };
+    Promise.resolve(pending)
+      .then((r) => {
+        if (!stale) readiness = { loading: false, connectors: r.connectors || {}, error: r.error };
+      })
+      .catch((e) => {
+        if (!stale) readiness = { loading: false, connectors: {}, error: e?.message || 'Release readiness failed' };
+      });
+    return () => {
+      stale = true;
+    };
+  });
+  const isReady = (c) => c.releasable && readiness.connectors[c.name]?.state === 'ready';
+
+  function statusSummary(pr) {
+    if (!pr.via) return 'not on the project';
+    return pr.statuses.map((status) => status || 'No status').join(', ');
+  }
   const namespaceChanges = $derived(
     Object.fromEntries((data.namespaces || []).map((ns) => [ns.name, ns]))
   );
   const counts = $derived.by(() => {
-    const result = { all: connectors.length, release: 0, pending: 0 };
+    const result = { all: connectors.length, release: 0, pending: 0, ready: 0 };
     for (const c of connectors) {
       result[c.status] = (result[c.status] || 0) + 1;
       if (c.releasable) result.release++;
+      if (isReady(c)) result.ready++;
       if (c.inPr) result.pending++;
     }
     return result;
@@ -129,7 +186,13 @@
     connectors.filter((c) => {
       const inView =
         view === 'all' ||
-        (view === 'release' ? c.releasable : view === 'pending' ? !!c.inPr : c.status === view);
+        (view === 'release'
+          ? c.releasable
+          : view === 'ready'
+            ? isReady(c)
+            : view === 'pending'
+              ? !!c.inPr
+              : c.status === view);
       const q = searchQuery.trim().toLowerCase();
       return inView && (!q || c.name.toLowerCase().includes(q));
     })
@@ -346,8 +409,19 @@
       {/if}
     </div>
 
+    {#if readiness.error}
+      <div class="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-sm text-amber-800">
+        <p class="font-medium">Release readiness is unavailable: {readiness.error}</p>
+        <p class="text-xs text-amber-800/80">
+          The project status is read with the GitHub token (<code>SANITY_GITHUB_TOKEN</code> or your
+          token in Settings), which needs the <code>read:project</code> scope on top of the read access
+          to both repositories.
+        </p>
+      </div>
+    {/if}
+
     <!-- Stats / filters -->
-    <div class="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-9 gap-3">
+    <div class="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-10 gap-3">
       {#each TILES.filter((t) => !t.hideEmpty || counts[t.key]) as tile (tile.key)}
         <button
           type="button"
@@ -371,6 +445,7 @@
       </div>
       <select bind:value={view} class="h-10 rounded-md border border-input bg-background px-3 text-sm">
         <option value="release">To release ({counts.release})</option>
+        <option value="ready">Ready ({counts.ready})</option>
         <option value="all">All connectors ({counts.all})</option>
         {#if counts.pending}
           <option value="pending">In release PR ({counts.pending})</option>
@@ -449,6 +524,15 @@
               <th class="px-3 py-2 font-medium">{data.target.branch}</th>
               <th class="px-3 py-2 font-medium">{data.source.branch}</th>
               <th class="px-3 py-2 font-medium">Status</th>
+              <th class="px-3 py-2 font-medium">
+                <a
+                  href={data.project.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="hover:underline"
+                  title="Status of the pull requests since the last release on the GitHub project — ready means {data.project.readyStatuses.join(' / ')}"
+                >Project</a>
+              </th>
               <th class="px-3 py-2 font-medium">Files</th>
               <th class="px-3 py-2 font-medium">Changelog</th>
               <th class="px-3 py-2"></th>
@@ -458,6 +542,7 @@
             {#each filtered as c (c.name)}
               {@const status = STATUS[c.status]}
               {@const shared = c.releasable && c.namespace ? namespaceChanges[c.namespace] : null}
+              {@const ready = readiness.connectors[c.name]}
               <tr class="border-b last:border-b-0 hover:bg-muted/30 {selected[c.name] ? 'bg-blue-50/50' : ''}">
                 <td class="px-3 py-2">
                   {#if data.isAdmin && c.releasable}
@@ -503,6 +588,34 @@
                     </a>
                   {/if}
                 </td>
+                <td class="px-3 py-2 whitespace-nowrap">
+                  {#if ready}
+                    {@const untracked = ready.prs.filter((pr) => !pr.via).length}
+                    <button
+                      type="button"
+                      class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border {READINESS[ready.state].class}"
+                      title="{READINESS[ready.state].title}{ready.prs.length ? '\n' + ready.prs.map((pr) => `#${pr.number}: ${statusSummary(pr)}`).join('\n') : ''}"
+                      onclick={() => (expanded[c.name] = true)}
+                    >
+                      {#if ready.state === 'ready'}
+                        <CircleCheck size={11} />
+                      {:else if ready.state === 'not-ready'}
+                        <CircleDot size={11} />
+                      {/if}
+                      {READINESS[ready.state].label}
+                    </button>
+                    {#if untracked > 0 && ready.state !== 'untracked'}
+                      <span
+                        class="ml-1 text-xs text-muted-foreground"
+                        title="{untracked} pull request{untracked !== 1 ? 's' : ''} not on the project — listed in the details, not counted"
+                      >+{untracked}</span>
+                    {/if}
+                  {:else if c.releasable && readiness.loading}
+                    <RefreshCw size={12} class="animate-spin text-muted-foreground" />
+                  {:else}
+                    <span class="text-xs text-muted-foreground">—</span>
+                  {/if}
+                </td>
                 <td class="px-3 py-2 font-mono text-xs whitespace-nowrap">
                   {#if c.changes.added.length + c.changes.modified.length + c.changes.removed.length > 0}
                     <span class="text-green-700">+{c.changes.added.length}</span>
@@ -540,7 +653,7 @@
               {#if expanded[c.name]}
                 <tr class="border-b bg-muted/20">
                   <td></td>
-                  <td colspan="7" class="px-3 py-3 space-y-3 text-xs">
+                  <td colspan="8" class="px-3 py-3 space-y-3 text-xs">
                     <div class="flex flex-wrap items-center gap-3">
                       {#if c.message}
                         <span class="flex items-center gap-1.5">
@@ -571,6 +684,64 @@
                     {/if}
                     {#if c.addedComponents.length > 0}
                       <p class="text-green-700">New components: {c.addedComponents.join(', ')}</p>
+                    {/if}
+
+                    {#if ready && (ready.prs.length > 0 || ready.directCommits.length > 0)}
+                      <div>
+                        <p class="font-medium mb-1">
+                          Pull requests since {c.masterVersion ?? 'the beginning'}
+                          <span class="font-normal text-muted-foreground">
+                            · ready = {data.project.readyStatuses.join(' / ')} on the
+                            <a href={data.project.url} target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">project</a>
+                          </span>
+                        </p>
+                        <ul class="space-y-1.5">
+                          {#each ready.prs as pr (pr.number)}
+                            <li>
+                              <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                                <GitPullRequest size={12} class="shrink-0 {pr.merged ? 'text-purple-600' : 'text-green-600'}" />
+                                <a href={pr.url} target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">#{pr.number}</a>
+                                <span class="text-foreground">{pr.title}</span>
+                                {#if pr.via === 'pr'}
+                                  <span
+                                    class="inline-flex items-center px-1.5 py-0.5 rounded-full border font-semibold {pr.ready ? READINESS.ready.class : READINESS['not-ready'].class}"
+                                    title="The pull request itself is on the project"
+                                  >{pr.status || 'No status'}</span>
+                                {:else if !pr.via}
+                                  <span class="inline-flex items-center px-1.5 py-0.5 rounded-full border {READINESS.untracked.class}" title="Neither the pull request nor an issue it closes is on the project — not counted">
+                                    not on the project
+                                  </span>
+                                {/if}
+                              </div>
+                              {#each pr.issues as issue (issue.url)}
+                                <div class="ml-5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-muted-foreground">
+                                  <span>↳</span>
+                                  <a href={issue.url} target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">{issue.repo}#{issue.number}</a>
+                                  <span>{issue.title}</span>
+                                  {#if issue.tracked}
+                                    <span class="inline-flex items-center px-1.5 py-0.5 rounded-full border font-semibold {issue.ready ? READINESS.ready.class : READINESS['not-ready'].class}">
+                                      {issue.status || 'No status'}
+                                    </span>
+                                  {:else}
+                                    <span class="inline-flex items-center px-1.5 py-0.5 rounded-full border {READINESS.untracked.class}">not on the project</span>
+                                  {/if}
+                                </div>
+                              {/each}
+                            </li>
+                          {/each}
+                          {#each ready.directCommits as commit (commit.sha)}
+                            <li class="flex flex-wrap items-center gap-x-2 text-muted-foreground">
+                              <GitCommitHorizontal size={12} class="shrink-0" />
+                              <a href={commit.url} target="_blank" rel="noopener noreferrer" class="font-mono text-blue-600 hover:underline">{commit.sha.slice(0, 7)}</a>
+                              <span>{commit.message}</span>
+                              <span class="italic">no pull request</span>
+                            </li>
+                          {/each}
+                        </ul>
+                        {#if ready.truncated}
+                          <p class="text-muted-foreground mt-1">Only the latest unreleased commits were checked — older pull requests may be missing.</p>
+                        {/if}
+                      </div>
                     {/if}
 
                     {#if c.changelog.length > 0}
