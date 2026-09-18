@@ -184,7 +184,7 @@ Auth Hub is a separate page for browsing and managing OAuth connector configs/bu
 - **Whitelist management** — add/remove individual service-config keys to the Auth Hub whitelist (admin only)
 - **Bundle download** — proxy-download a connector's ZIP bundle from Auth Hub
 - **Bundle upload** — upload a new or replacement bundle, either a ZIP file or **packed from the repository** (below); polls a ticket until processing completes (admin only)
-- **Service config edit** — view and edit connector config in field mode or raw JSON mode (admin only)
+- **Service config edit** — view and edit connector config in field mode or raw JSON mode (admin only). A click anywhere in the read-only config (Enter/Space too; not its whitelist buttons) opens it as JSON, focused; **Save & Close** saves and closes Details, footer **Edit** opens field mode. Values are saved as strings, objects as their JSON.
 - **Batch upload** (admin only) — row checkboxes (select all shown, **Select outdated** = the ⚠️ rows), a sticky bar and **Upload from repository…**: one preview of every selected connector at one commit, then sequential uploads (below).
 - **GitHub oauth2 connector cache** — scans the GitHub repo for oauth2 connectors + `bundle.json` versions and caches results in DB; surfaced as a merged connector list. Connectors the repo has but the Auth Hub doesn't get an **Add** action (Upload New, prefilled, bundle from the repository).
 - **Version comparison** — compares the Auth Hub bundle version against the cached GitHub version and highlights outdated/matching/newer connectors

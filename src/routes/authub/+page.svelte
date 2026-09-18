@@ -1,4 +1,5 @@
 <script>
+  import { tick } from 'svelte';
   import { Input } from '$lib/components/ui/input';
   import { Button } from '$lib/components/ui/button';
   import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '$lib/components/ui/table';
@@ -653,7 +654,10 @@
   /** @type {Record<string, string>} */
   let viewEditConfig = $state({});
   let configSaving = $state(false);
+  let configClosing = $state(false);
   let configSaveError = $state('');
+  /** @type {HTMLTextAreaElement|undefined} */
+  let configJsonTextarea = $state();
   let newConfigKey = $state('');
   let newConfigValue = $state('');
   /** @type {Record<string, boolean>} */
@@ -708,19 +712,46 @@
     }
   }
 
-  function enterEditMode() {
+  /**
+   * Config values are saved as strings; objects as their JSON
+   * @param {unknown} v
+   */
+  function configValueString(v) {
+    return v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v ?? '');
+  }
+
+  /** @param {boolean} [json] - start in JSON mode, focused */
+  async function enterEditMode(json = false) {
     if (viewServiceConfig) {
       viewEditConfig = Object.fromEntries(
-        Object.entries(viewServiceConfig).map(([k, v]) => [k, typeof v === 'object' ? JSON.stringify(v) : String(v ?? '')])
+        Object.entries(viewServiceConfig).map(([k, v]) => [k, configValueString(v)])
       );
       configJsonDraft = JSON.stringify(viewServiceConfig, null, 2);
     }
     configSaveError = '';
     configJsonError = '';
-    configJsonMode = false;
+    configJsonMode = json;
     newConfigKey = '';
     newConfigValue = '';
     viewEditMode = true;
+    if (json) {
+      await tick();
+      configJsonTextarea?.focus();
+    }
+  }
+
+  /**
+   * A click (or Enter/Space) anywhere in the read-only config starts editing it
+   * as JSON — except on its own buttons (whitelist). Details is admin-only.
+   * @param {MouseEvent|KeyboardEvent} e
+   */
+  function editConfigFrom(e) {
+    if (!data.isAdmin || /** @type {HTMLElement} */ (e.target).closest('button')) return;
+    if ('key' in e) {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+    }
+    enterEditMode(true);
   }
 
   function switchToJsonMode() {
@@ -735,7 +766,7 @@
     try {
       const parsed = JSON.parse(configJsonDraft);
       viewEditConfig = Object.fromEntries(
-        Object.entries(parsed).map(([k, v]) => [k, typeof v === 'object' ? JSON.stringify(v) : String(v ?? '')])
+        Object.entries(parsed).map(([k, v]) => [k, configValueString(v)])
       );
       configJsonError = '';
       configJsonMode = false;
@@ -744,8 +775,9 @@
     }
   }
 
+  /** @returns {Promise<boolean>} saved */
   async function saveServiceConfig() {
-    if (!viewServiceId) return;
+    if (!viewServiceId) return false;
     configSaving = true;
     configSaveError = '';
     configJsonError = '';
@@ -757,10 +789,10 @@
         } catch {
           configJsonError = 'Invalid JSON';
           configSaving = false;
-          return;
+          return false;
         }
         // Ensure all values are strings
-        body = Object.fromEntries(Object.entries(body).map(([k, v]) => [k, String(v ?? '')]));
+        body = Object.fromEntries(Object.entries(body).map(([k, v]) => [k, configValueString(v)]));
       } else {
         // Key-value mode — values are already strings
         body = Object.fromEntries(Object.entries(viewEditConfig));
@@ -777,12 +809,20 @@
         viewServiceConfig = body;
         setConfigKeys(viewServiceId, configKeysOf(body));
         viewEditMode = false;
+        return true;
       }
     } catch (err) {
       configSaveError = /** @type {Error} */ (err).message;
     } finally {
       configSaving = false;
     }
+    return false;
+  }
+
+  async function saveServiceConfigAndClose() {
+    configClosing = true;
+    if (await saveServiceConfig()) viewDialogOpen = false;
+    configClosing = false;
   }
 
   /** @param {string} key */
@@ -1712,6 +1752,7 @@
               <textarea
                 class="w-full rounded-md border border-input bg-background px-3 py-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-ring resize-none"
                 rows="12"
+                bind:this={configJsonTextarea}
                 bind:value={configJsonDraft}
               ></textarea>
               {#if configJsonError}
@@ -1757,12 +1798,24 @@
             {#if configSaveError}
               <p class="mt-1 text-xs text-destructive">{configSaveError}</p>
             {/if}
-            <Button size="sm" class="mt-2" onclick={saveServiceConfig} disabled={configSaving}>
-              {configSaving ? 'Saving...' : 'Save Config'}
-            </Button>
+            <div class="mt-2 flex gap-2">
+              <Button size="sm" variant="outline" onclick={saveServiceConfig} disabled={configSaving}>
+                {configSaving && !configClosing ? 'Saving...' : 'Save Config'}
+              </Button>
+              <Button size="sm" onclick={saveServiceConfigAndClose} disabled={configSaving}>
+                {configClosing ? 'Saving...' : 'Save & Close'}
+              </Button>
+            </div>
           {:else}
-            <!-- Read-only view with Add to Whitelist buttons -->
-            <div class="space-y-1 rounded-md border p-3">
+            <!-- Read-only view with Add to Whitelist buttons; a click elsewhere edits it -->
+            <div
+              class="space-y-1 rounded-md border p-3 cursor-pointer transition-colors hover:border-ring hover:bg-muted/50 focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              role="button"
+              tabindex="0"
+              title="Click to edit as JSON"
+              onclick={editConfigFrom}
+              onkeydown={editConfigFrom}
+            >
               {#each Object.entries(viewServiceConfig) as [key, val]}
                 <div class="flex items-center gap-2">
                   <span class="w-36 shrink-0 text-xs text-muted-foreground truncate" title={key}>{key}</span>
@@ -1786,6 +1839,7 @@
                 </div>
               {/each}
             </div>
+            <p class="mt-1 text-xs text-muted-foreground">Click anywhere in the config to edit it as JSON.</p>
           {/if}
         </div>
 
@@ -1815,7 +1869,7 @@
       </Button>
       {#if data.isAdmin}
         {#if !viewEditMode}
-          <Button variant="outline" onclick={enterEditMode} disabled={viewLoading}>Edit</Button>
+          <Button variant="outline" onclick={() => enterEditMode()} disabled={viewLoading}>Edit</Button>
         {:else}
           <Button variant="outline" onclick={() => { viewEditMode = false; }} disabled={configSaving}>Cancel Edit</Button>
         {/if}
