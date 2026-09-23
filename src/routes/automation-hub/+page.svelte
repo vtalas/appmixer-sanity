@@ -1,11 +1,19 @@
 <script>
   import { onMount } from 'svelte';
-  import { ExternalLink } from 'lucide-svelte';
+  import { invalidateAll } from '$app/navigation';
+  import { ExternalLink, Pencil } from 'lucide-svelte';
 
   let { data } = $props();
 
   let status = $state('loading');
   let message = $state('');
+  /** The template whose draft is open in the embedded Designer. */
+  let editing = $state(/** @type {{name: string, draftId: string} | null} */ (null));
+
+  /** The SDK instance, set once the script has loaded. */
+  let appmixer = /** @type {any} */ (null);
+  /** The embedded Designer, created on the first Edit and reused. */
+  let designer = /** @type {any} */ (null);
 
   /**
    * The SDK script defines a global `Appmixer` constructor; it has no type declarations.
@@ -147,6 +155,112 @@
   }
 
   /**
+   * Designer options — Studio's integration designer (`integrationTemplateMode`: Wizard
+   * Builder, Create/Edit Test and Publish instead of Start/Stop), trimmed to what the page
+   * handles. `flow:clone`, `flow:insights` and `flow:turn-into-automation` have no default
+   * action in the SDK and `flow:remove` would delete the draft the template is published
+   * from, so the menu leaves them out. No `shareTypes`: the Publish dialog has its own.
+   */
+  const DESIGNER_OPTIONS = {
+    integrationTemplateMode: true,
+    menu: [
+      { event: 'flow:rename', label: 'Rename' },
+      { event: 'flow:change-description', label: 'Change description' },
+      { event: 'flow:export-svg', label: 'Export SVG' },
+      { event: 'flow:export-png', label: 'Export PNG' },
+      { event: 'flow:print', label: 'Print' }
+    ],
+    showButtonClose: true,
+    autoOpenLogs: true,
+    toolbar: [
+      ['undo', 'redo'],
+      ['zoom-to-fit', 'zoom-in', 'zoom-out'],
+      ['logs', 'integration-test-logs']
+    ]
+  };
+
+  /**
+   * Open the end-user Wizard on an integration test; `onClose` runs after it unmounts.
+   * @param {string} flowId
+   * @param {() => void} onClose
+   */
+  function openTestWizard(flowId, onClose) {
+    const wizard = appmixer.ui.Wizard({ flowId });
+    wizard.on('close', (/** @type {any} */ event) => {
+      event?.next?.();
+      onClose();
+    });
+    wizard.open();
+  }
+
+  /**
+   * Create/Edit Test has no default action: like Studio, clone the draft into an
+   * `integration-test` flow and open the Wizard on it, then let the Designer continue
+   * (`next`) — it then lists the test and its logs.
+   * @param {{data: {flowId: string}, next: () => void}} event
+   */
+  async function createIntegrationTest({ data: { flowId }, next }) {
+    designer.state('integrationTest/error', null);
+    designer.state('integrationTest/loader', true);
+    try {
+      const testFlowId = await appmixer.api.cloneFlow(flowId, {
+        projection: '-sharedWith',
+        connectAccounts: true,
+        setOriginFlowId: true,
+        additional: { type: 'integration-test' }
+      });
+      openTestWizard(testFlowId, next);
+    } catch (err) {
+      designer.state('integrationTest/error', err);
+    } finally {
+      designer.state('integrationTest/loader', false);
+    }
+  }
+
+  /**
+   * Edit a template: open its draft (`originFlowId`) in the embedded Designer. The draft
+   * is what gets edited — Publish there updates the existing template (remapped component
+   * IDs, `revision` + 1), the same as publish-integration.js. Opened on the template
+   * itself, Publish would find no template published from it and clone a new one.
+   *
+   * The Designer covers the page (a fixed overlay under the SDK's own modals, z-index
+   * 101+, so the test Wizard opens on top of it). Its × emits `close`: the default
+   * unmounts it, then the page hides the overlay and reloads the template list (revision).
+   * @param {{name: string, originFlowId?: string}} template
+   */
+  function editTemplate(template) {
+    if (!appmixer || !template.originFlowId) return;
+    editing = { name: template.name, draftId: template.originFlowId };
+    document.body.style.overflow = 'hidden';
+    if (designer) {
+      designer.set('componentId', null);
+      designer.set('flowId', template.originFlowId);
+      designer.open();
+      return;
+    }
+    designer = appmixer.ui.Designer({
+      el: '#template-designer',
+      flowId: template.originFlowId,
+      options: DESIGNER_OPTIONS,
+      state: { stencilLayout: 'collapsed' }
+    });
+    designer.on('close', (/** @type {any} */ event) => {
+      event?.next?.();
+      editing = null;
+      document.body.style.overflow = '';
+      invalidateAll();
+    });
+    designer.on('integration-test:create', createIntegrationTest);
+    designer.on('integration-test:edit', (/** @type {any} */ event) =>
+      openTestWizard(event.data.flowId, event.next)
+    );
+    designer.on('integration-test:insights', (/** @type {any} */ event) =>
+      window.open(`${data.uiUrl}/insights/logs/${event.data.flowId}`, '_blank', 'noopener')
+    );
+    designer.open();
+  }
+
+  /**
    * Dev only: drop Svelte's `state_proxy_equality_mismatch` warnings while this page is
    * open. They are false positives. Svelte's dev build patches Array.prototype.includes /
    * indexOf and treats any object that answers `in` for its internal symbol as a $state
@@ -177,7 +291,7 @@
     try {
       await loadSdk(`${data.uiUrl}/appmixer/package/appmixer.js`);
       const Appmixer = sdkGlobal();
-      const appmixer = new Appmixer({ baseUrl: data.baseUrl });
+      appmixer = new Appmixer({ baseUrl: data.baseUrl });
       appmixer.set('accessToken', data.token);
       const hub = appmixer.ui.AutomationHub({ el: '#automation-hub', options: hubOptions(data.category) });
       hub.on('flow:open-wizard', (/** @type {any} */ event) => openWizard(appmixer, hub, event.data.flow));
@@ -189,6 +303,13 @@
       status = 'error';
       message = err instanceof Error ? err.message : String(err);
     }
+  });
+
+  // Leaving the page with the Designer open: unmount it and give the page its scroll back.
+  // An effect, not onDestroy — that also runs in SSR, where there is no document.
+  $effect(() => () => {
+    designer?.close();
+    document.body.style.overflow = '';
   });
 </script>
 
@@ -229,9 +350,23 @@
       <ul class="divide-y">
         {#each data.templates as template (template.flowId)}
           <li class="flex flex-wrap items-center justify-between gap-2 px-4 py-2">
-            <span>{template.name}</span>
+            <span>
+              {template.name}
+              {#if template.revision}
+                <span class="text-xs text-muted-foreground">rev {template.revision}</span>
+              {/if}
+            </span>
             <div class="flex items-center gap-3 text-xs">
               {#if template.originFlowId}
+                <button
+                  type="button"
+                  onclick={() => editTemplate(template)}
+                  disabled={status !== 'ready'}
+                  class="inline-flex items-center gap-1 text-blue-600 hover:underline disabled:opacity-50 disabled:no-underline"
+                  title="Edit the draft here in the SDK Designer; Publish updates this template"
+                >
+                  Edit <Pencil size={13} />
+                </button>
                 <a
                   href={`${data.uiUrl}/integration-designer/${template.originFlowId}`}
                   target="_blank"
@@ -260,6 +395,15 @@
   {/if}
 
   <div id="automation-hub" class="rounded-lg border"></div>
+</div>
+
+<!-- The embedded Designer (editTemplate). Always in the DOM so the widget keeps its element. -->
+<div
+  class="fixed inset-0 z-[100] bg-background"
+  class:hidden={!editing}
+  aria-label={editing ? `Designer: ${editing.name}` : undefined}
+>
+  <div id="template-designer" class="relative h-full w-full"></div>
 </div>
 
 <style>

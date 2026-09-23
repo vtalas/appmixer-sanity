@@ -136,15 +136,19 @@ export async function findCategoryByName(userId, name) {
 
 /**
  * Integration templates in one category, each with the draft it was published from
- * (`originFlowId`). The Automation Hub page links both into the Designer.
+ * (`originFlowId`) and its publish `revision`. The Automation Hub page links both into
+ * the Designer and edits the draft in an embedded one.
  * @param {string} userId - User ID (email)
  * @param {string} categoryId - Category ID
- * @returns {Promise<Array<{flowId: string, name: string, originFlowId?: string}>>}
+ * @returns {Promise<Array<{flowId: string, name: string, originFlowId?: string, revision?: number}>>}
  */
 export async function listCategoryTemplates(userId, categoryId) {
   const config = await getAppmixerConfig(userId);
   const token = await getAccessToken(userId);
-  const params = new URLSearchParams({ projection: 'flowId,name,originFlowId', limit: '500' });
+  const params = new URLSearchParams({
+    projection: 'flowId,name,originFlowId,revision',
+    limit: '500'
+  });
   params.append('filter', 'type:integration-template');
   params.append('filter', `categories:${categoryId}`);
   const response = await fetch(`${config.baseUrl}/flows?${params}`, {
