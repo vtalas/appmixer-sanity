@@ -39,6 +39,37 @@
   }
 
   /**
+   * API overrides for the hub widget (widget option `api`: methods there replace
+   * `appmixer.api`'s for that widget only). "My automations" lists every integration
+   * instance of the configured Appmixer user, and that user is shared on the instance, so
+   * other people's test instances showed up next to the CI responders. The widget cannot
+   * narrow instances by category (its instance query knows only type, user, search and
+   * running), so the queries it sends are narrowed here: an instance query (list and
+   * count alike) gets a `templateId` clause per template in the hub category, which the
+   * engine turns into `$in`. A category without templates hides every instance rather
+   * than all of them. Template queries pass through untouched.
+   * @param {any} api - the SDK's `appmixer.api`
+   * @param {Array<{flowId: string}>} templates - templates in the hub category
+   */
+  function hubApi(api, templates) {
+    const templateIds = templates.length
+      ? templates.map((t) => `templateId:${t.flowId}`)
+      : ['templateId:00000000-0000-0000-0000-000000000000'];
+    /** @param {any} params */
+    const narrow = (params) => {
+      const filter = Array.isArray(params?.filter) ? params.filter : params?.filter ? [params.filter] : [];
+      if (!filter.includes('type:integration-instance')) return params;
+      return { ...params, filter: [...filter, ...templateIds] };
+    };
+    return {
+      /** @param {any} params */
+      getFlows: (params) => api.getFlows(narrow(params)),
+      /** @param {any} params */
+      getFlowsCount: (params) => api.getFlowsCount(narrow(params))
+    };
+  }
+
+  /**
    * Widget options, deep-merged over the widget's defaults.
    * - "Browse available" is narrowed to one template category: the widget offers only
    *   that category next to "All".
@@ -293,7 +324,12 @@
       const Appmixer = sdkGlobal();
       appmixer = new Appmixer({ baseUrl: data.baseUrl });
       appmixer.set('accessToken', data.token);
-      const hub = appmixer.ui.AutomationHub({ el: '#automation-hub', options: hubOptions(data.category) });
+      const hub = appmixer.ui.AutomationHub({
+        el: '#automation-hub',
+        options: hubOptions(data.category),
+        // No category (another instance) means the unfiltered hub, instances included.
+        ...(data.category ? { api: hubApi(appmixer.api, data.templates) } : {})
+      });
       hub.on('flow:open-wizard', (/** @type {any} */ event) => openWizard(appmixer, hub, event.data.flow));
       // Preselect the category before the first load; without it the list starts on "All".
       if (data.category) hub.state('flows/query/templates/categoryIds', [data.category.id]);
@@ -323,7 +359,8 @@
     <p class="text-sm text-muted-foreground">
       Integrations published on the configured Appmixer instance. It opens on <strong>appmixer-sanity-hub</strong> — the
       Copilot review and <code>@apx-vero</code> mention responders, activate one per repository; <em>All</em> lists
-      every template shared on the instance.
+      every template shared on the instance. <strong>My automations</strong> shows only instances of this category's
+      templates; the configured Appmixer user is shared, and its other instances are left out.
     </p>
   </div>
 
