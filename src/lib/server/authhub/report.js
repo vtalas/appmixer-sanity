@@ -3,7 +3,10 @@
  */
 
 import { getAuthHubConnectorInfo, getAuthHubStatuses } from '$lib/db/authhub.js';
+import { cache } from '$lib/cache.js';
 import { authHubFetch, resolveAuthHub } from './hub.js';
+
+const REPORT_TTL_MS = 60 * 1000;
 
 /**
  * `appmixer:google:drive` → `Google Drive`, `appmixer:googleAds` → `Google Ads`.
@@ -35,6 +38,13 @@ export async function getVerifiedServices(envId) {
     throw new Error(error);
   }
 
+  // Anyone can request the report: don't let each hit call the Auth Hub and the DB
+  const cacheKey = `authhub-report:${hub.id}`;
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const [res, statuses, info] = await Promise.all([
     authHubFetch(hub, '/service-config'),
     getAuthHubStatuses(hub.id),
@@ -47,13 +57,25 @@ export async function getVerifiedServices(envId) {
   const data = await res.json();
   const list = Array.isArray(data) ? data : Object.values(data || {});
 
-  return list
+  const services = list
     .map((c) => c?.serviceId)
     .filter((serviceId) => typeof serviceId === 'string' && statuses[serviceId] === 'verified')
     .map((serviceId) => ({
       serviceId,
       label: info[serviceId]?.label || labelFromServiceId(serviceId),
-      icon: info[serviceId]?.icon || null
+      icon: embeddedImage(info[serviceId]?.icon)
     }))
     .sort((a, b) => a.label.localeCompare(b.label, 'en', { sensitivity: 'base' }));
+
+  cache.set(cacheKey, services, REPORT_TTL_MS);
+  return services;
+}
+
+/**
+ * Icons come from bundle manifests. Only embedded images reach the public page —
+ * a remote URL there would make every visitor's browser call a third party.
+ * @param {string|null|undefined} icon
+ */
+function embeddedImage(icon) {
+  return typeof icon === 'string' && icon.startsWith('data:image/') ? icon : null;
 }

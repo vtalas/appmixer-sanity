@@ -5,26 +5,28 @@
 
   /** @param {string} value */
   function csvCell(value) {
-    return `"${value.replaceAll('"', '""')}"`;
+    // A leading = + - @ would run as a formula when the file is opened in a spreadsheet
+    const text = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+    return `"${text.replaceAll('"', '""')}"`;
   }
 
   function downloadCsv() {
     const rows = [
-      ['Service', 'Service ID', 'Status'],
-      ...data.services.map((s) => [s.label, s.serviceId, 'Verified'])
+      ['Service', 'Service ID'],
+      ...data.services.map((s) => [s.label, s.serviceId])
     ];
     const csv = rows.map((row) => row.map(csvCell).join(',')).join('\r\n');
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
     const link = document.createElement('a');
     link.href = url;
-    link.download = 'appmixer-auth-hub-verified-services.csv';
+    link.download = 'appmixer-auth-hub-services.csv';
     link.click();
     URL.revokeObjectURL(url);
   }
 </script>
 
 <svelte:head>
-  <title>Appmixer Auth Hub — Verified Services</title>
+  <title>Appmixer Auth Hub</title>
   <meta name="robots" content="noindex" />
 </svelte:head>
 
@@ -32,7 +34,6 @@
   <header class="flex flex-wrap items-end justify-between gap-4 border-b pb-5">
     <div>
       <p class="text-sm font-medium uppercase tracking-wide text-muted-foreground">Appmixer Auth Hub</p>
-      <h1 class="mt-1 text-3xl font-bold">Verified Services</h1>
       <p class="mt-2 text-sm text-muted-foreground">
         {data.failed ? '' : `${data.services.length} ${data.services.length === 1 ? 'service' : 'services'} · `}{data.generatedAt}
       </p>
@@ -48,7 +49,7 @@
   {#if data.failed}
     <p class="mt-8 text-muted-foreground">The report is temporarily unavailable. Please try again later.</p>
   {:else if data.services.length === 0}
-    <p class="mt-8 text-muted-foreground">No verified services yet.</p>
+    <p class="mt-8 text-muted-foreground">No services yet.</p>
   {:else}
     <ul class="mt-6 grid grid-cols-1 gap-x-8 sm:grid-cols-2 print:grid-cols-2">
       {#each data.services as service (service.serviceId)}
@@ -64,9 +65,6 @@
             <div class="truncate text-sm font-medium">{service.label}</div>
             <div class="truncate font-mono text-xs text-muted-foreground">{service.serviceId}</div>
           </div>
-          <span class="verified shrink-0 rounded-full border border-green-600/30 bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700">
-            ✓ Verified
-          </span>
         </li>
       {/each}
     </ul>

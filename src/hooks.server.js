@@ -12,8 +12,12 @@ async function protectionHandle({ event, resolve }) {
 
 	// Allow access to login page, auth routes, and static assets
 	// /public/* pages are customer-facing reports — they must whitelist what they show
-	const unprotectedPaths = ['/login', '/auth', '/api/public', '/public/'];
-	const isUnprotected = unprotectedPaths.some((path) => event.url.pathname.startsWith(path));
+	// Whole path segments: a bare prefix match on '/auth' also let '/authub' through
+	const unprotectedPaths = ['/login', '/auth', '/api/public', '/public'];
+	const { pathname } = event.url;
+	const isUnprotected = unprotectedPaths.some(
+		(path) => pathname === path || pathname.startsWith(`${path}/`)
+	);
 
 	if (!session && !isUnprotected) {
 		throw redirect(303, '/login');
