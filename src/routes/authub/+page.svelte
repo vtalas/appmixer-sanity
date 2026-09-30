@@ -1207,6 +1207,17 @@
             Refresh
           {/if}
         </Button>
+        {#if data.env.id === 'prod'}
+          <a
+            href="/public/authhub"
+            target="_blank"
+            rel="noopener"
+            title="Public page listing the verified services — print it or save it as PDF for a customer"
+            class="inline-flex h-9 items-center justify-center whitespace-nowrap rounded-md border border-input bg-background px-3 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground"
+          >
+            Customer report
+          </a>
+        {/if}
         {#if data.isAdmin}
           <Button
             variant="outline"

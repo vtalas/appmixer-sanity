@@ -102,3 +102,56 @@ export async function setAuthHubStatus(env, serviceId, status) {
     args: [env, serviceId, status]
   });
 }
+
+/**
+ * Get label, icon and version of every connector bundle of one Auth Hub environment
+ * @param {string} env - Auth Hub environment id (prod, qa)
+ * @returns {Promise<Record<string, {label: string|null, icon: string|null, version: string|null}>>}
+ */
+export async function getAuthHubConnectorInfo(env) {
+  const result = await getDb().execute({
+    sql: 'SELECT service_id, label, icon, version FROM authhub_connector_info WHERE env = ?',
+    args: [env]
+  });
+  /** @type {Record<string, {label: string|null, icon: string|null, version: string|null}>} */
+  const info = {};
+  for (const row of result.rows) {
+    info[/** @type {string} */ (row.service_id)] = {
+      label: /** @type {string|null} */ (row.label),
+      icon: /** @type {string|null} */ (row.icon),
+      version: /** @type {string|null} */ (row.version)
+    };
+  }
+  return info;
+}
+
+/**
+ * Store label, icon and version of a connector bundle
+ * @param {string} env - Auth Hub environment id (prod, qa)
+ * @param {string} serviceId
+ * @param {{label?: string|null, icon?: string|null, version?: string|null}} info
+ */
+export async function setAuthHubConnectorInfo(env, serviceId, info) {
+  await getDb().execute({
+    sql: `INSERT INTO authhub_connector_info (env, service_id, label, icon, version, updated_at)
+          VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+          ON CONFLICT(env, service_id) DO UPDATE SET
+            label = excluded.label,
+            icon = excluded.icon,
+            version = excluded.version,
+            updated_at = CURRENT_TIMESTAMP`,
+    args: [env, serviceId, info.label || null, info.icon || null, info.version || null]
+  });
+}
+
+/**
+ * Remove the stored bundle info of a connector
+ * @param {string} env - Auth Hub environment id (prod, qa)
+ * @param {string} serviceId
+ */
+export async function deleteAuthHubConnectorInfo(env, serviceId) {
+  await getDb().execute({
+    sql: 'DELETE FROM authhub_connector_info WHERE env = ? AND service_id = ?',
+    args: [env, serviceId]
+  });
+}
