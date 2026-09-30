@@ -2,9 +2,12 @@
   import '../app.css';
   import { signOut } from '@auth/sveltekit/client';
   import { Button } from '$lib/components/ui/button';
-  import { navigating } from '$app/stores';
+  import { navigating, page } from '$app/stores';
 
   let { children, data } = $props();
+
+  // /public/* pages are customer-facing: no app header, navigation or footer
+  let bare = $derived($page.url.pathname.startsWith('/public/'));
 </script>
 
 <style>
@@ -21,6 +24,9 @@
   }
 </style>
 
+{#if bare}
+  {@render children?.()}
+{:else}
 <div class="min-h-screen flex flex-col">
   <header class="border-b bg-background">
     <div class="container mx-auto px-4 py-4 flex items-center justify-between">
@@ -58,3 +64,4 @@
     Appmixer Sanity Check Tracker
   </footer>
 </div>
+{/if}

@@ -3,8 +3,13 @@ import { authHubFetch, isAuthHubEnv, resolveAuthHubFromUrl } from '$lib/server/a
 import { writeFile, mkdir, readFile, readdir, rm, access } from 'fs/promises';
 import { join, resolve } from 'path';
 import { inflateRawSync } from 'zlib';
+import { setAuthHubConnectorInfo } from '$lib/db/authhub.js';
 
 const CACHE_BASE = join(process.env.VERCEL ? '/tmp' : resolve('cache'), 'authhub');
+
+// Icons are data URIs; a few manifests embed multi-megabyte PNGs, which the
+// report renders as an initial instead
+const MAX_STORED_ICON_LENGTH = 200_000;
 
 console.log('[auth-hub/bundle] CACHE_BASE:', CACHE_BASE, 'VERCEL:', process.env.VERCEL || 'not set');
 
@@ -84,6 +89,60 @@ async function findFileRecursive(dir, fileName) {
 }
 
 /**
+ * Every service.json / module.json under a directory, parsed.
+ * @param {string} dir
+ * @returns {Promise<Array<{file: string, name?: string, label?: string, icon?: string}>>}
+ */
+async function readManifests(dir) {
+    const manifests = [];
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+        const fullPath = join(dir, entry.name);
+        if (entry.isDirectory()) {
+            manifests.push(...await readManifests(fullPath));
+        } else if (entry.name === 'service.json' || entry.name === 'module.json') {
+            try {
+                const { name, label, icon } = JSON.parse(await readFile(fullPath, 'utf-8'));
+                manifests.push({ file: entry.name, name, label, icon });
+            } catch { /* skip malformed */ }
+        }
+    }
+    return manifests;
+}
+
+/**
+ * Version, label and icon of an extracted bundle.
+ * @param {string} serviceDir
+ * @param {string} serviceId
+ * @returns {Promise<{version?: string|null, label?: string, icon?: string}>}
+ */
+async function readBundleInfo(serviceDir, serviceId) {
+    /** @type {{version?: string|null, label?: string, icon?: string}} */
+    const info = {};
+
+    const bundlePath = await findFileRecursive(serviceDir, 'bundle.json');
+    if (bundlePath) {
+        try {
+            const bundleJson = JSON.parse(await readFile(bundlePath, 'utf-8'));
+            info.version = bundleJson.version || null;
+        } catch { /* skip malformed */ }
+    }
+
+    // The manifest named like the connector describes it. A module bundle also
+    // carries its parent's service.json ("Google" for every Google module), so
+    // any service.json is only the fallback.
+    const manifests = await readManifests(serviceDir);
+    const own = manifests.find((m) => m.name === serviceId.replaceAll(':', '.'));
+    const fallback = manifests.find((m) => m.file === 'service.json');
+    const label = own?.label || fallback?.label;
+    const icon = own?.icon || fallback?.icon;
+    if (icon) info.icon = icon;
+    if (label) info.label = label;
+
+    return info;
+}
+
+/**
  * GET — read cached versions for all connectors in a given environment (`?env=`).
  */
 export async function GET({ url }) {
@@ -106,24 +165,7 @@ export async function GET({ url }) {
             if (!entry.isDirectory()) continue;
             const serviceDir = join(envDir, entry.name);
             const serviceId = entry.name.replace(/_/g, ':');
-            const info = {};
-
-            const bundlePath = await findFileRecursive(serviceDir, 'bundle.json');
-            if (bundlePath) {
-                try {
-                    const bundleJson = JSON.parse(await readFile(bundlePath, 'utf-8'));
-                    info.version = bundleJson.version || null;
-                } catch { /* skip malformed */ }
-            }
-
-            const servicePath = await findFileRecursive(serviceDir, 'service.json');
-            if (servicePath) {
-                try {
-                    const serviceJson = JSON.parse(await readFile(servicePath, 'utf-8'));
-                    if (serviceJson.icon) info.icon = serviceJson.icon;
-                    if (serviceJson.label) info.label = serviceJson.label;
-                } catch { /* skip */ }
-            }
+            const info = await readBundleInfo(serviceDir, serviceId);
 
             if (Object.keys(info).length > 0) {
                 result[serviceId] = info;
@@ -189,6 +231,18 @@ export async function POST({ request, url }) {
         const bundleJson = JSON.parse(await readFile(bundlePath, 'utf-8'));
         const version = bundleJson.version || null;
         console.log('[auth-hub/bundle] Success, version:', version);
+
+        // Keep label, icon and version in the DB — the public report can't rely
+        // on this instance's file cache
+        try {
+            const info = await readBundleInfo(cacheDir, serviceId);
+            await setAuthHubConnectorInfo(environment, serviceId, {
+                ...info,
+                icon: info.icon && info.icon.length <= MAX_STORED_ICON_LENGTH ? info.icon : null
+            });
+        } catch (err) {
+            console.error('[auth-hub/bundle] Failed to store bundle info:', err.message);
+        }
 
         return json({ version, serviceId, cacheDir });
     } catch (err) {

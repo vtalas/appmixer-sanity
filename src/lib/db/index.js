@@ -169,6 +169,21 @@ export async function initializeDatabase() {
     WHERE excluded.updated_at > authhub_env_status.updated_at
   `);
 
+  // Label, icon and version of the bundle an Auth Hub holds per connector —
+  // written when the bundle is downloaded. The file cache those come from is
+  // per serverless instance, so the public report reads them from here.
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS authhub_connector_info (
+      env TEXT NOT NULL,
+      service_id TEXT NOT NULL,
+      label TEXT,
+      icon TEXT,
+      version TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (env, service_id)
+    )
+  `);
+
   // E2E test flows cache (GitHub dev branch merged with instance state),
   // scoped per Appmixer instance — different users may target different instances.
   const E2E_FLOWS_SCHEMA = `

@@ -91,6 +91,12 @@ curl "https://<host>/api/public/e2e-runner/tick?prs=1" \
 
 The runner never starts more than `E2E_MAX_CONCURRENT` flows at once — the Appmixer instance must not run everything in parallel.
 
+## Public pages
+
+### `/public/authhub`
+
+Customer report: the services of the production Auth Hub that are marked **Verified** on `/authub` — name, service id and icon, with **Print / Save as PDF** and **Download CSV**. No sign-in needed, so the link can be sent to a customer. Names and icons appear once the connector's bundle has been loaded on `/authub` (Refresh).
+
 ## Public API
 
 Unauthenticated read-only endpoints. Both serve cached data only (no live GitHub/instance calls), respond with `Cache-Control: public, max-age=60`, and return `{ "error": "..." }` with a `5xx` status on failure.

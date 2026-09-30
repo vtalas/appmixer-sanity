@@ -1,6 +1,7 @@
 import { json } from '@sveltejs/kit';
 import { isAdmin } from '$lib/admin.js';
 import { authHubFetch, resolveAuthHubFromUrl } from '$lib/server/authhub/hub.js';
+import { deleteAuthHubConnectorInfo } from '$lib/db/authhub.js';
 
 /**
  * DELETE — remove a connector's service config and bundle from the `?env=` Auth Hub.
@@ -47,6 +48,8 @@ export async function DELETE({ request, url, locals }) {
     if (errors.length > 0) {
         return json({ error: errors.join('; ') }, { status: 500 });
     }
+
+    await deleteAuthHubConnectorInfo(hub.id, serviceId).catch(() => {});
 
     return json({ ok: true, serviceId });
 }
