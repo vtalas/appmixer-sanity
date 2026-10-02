@@ -2,7 +2,7 @@
   import { Badge } from '$lib/components/ui/badge';
   import { Button } from '$lib/components/ui/button';
   import { invalidateAll } from '$app/navigation';
-  import { ExternalLink, RefreshCw } from 'lucide-svelte';
+  import { ChevronDown, ChevronRight, ExternalLink, RefreshCw, ScrollText } from 'lucide-svelte';
 
   let { data } = $props();
 
@@ -25,6 +25,49 @@
     workflowsFailing: activeWorkflows.filter((w) => w.last?.conclusion === 'failure').length,
     workflowsWaiting: activeWorkflows.reduce((n, w) => n + (w.recent?.waiting || 0), 0)
   });
+
+  // Log panels, one per instance, loaded on demand from /api/ops/logs
+  /** @type {Record<string, { errorsOnly: boolean, loading: boolean, error: string | null, logs: any[], open: Record<string, boolean> }>} */
+  let logPanels = $state({});
+
+  /** @param {string} flowId @param {boolean} errorsOnly */
+  async function loadLogs(flowId, errorsOnly) {
+    logPanels[flowId] = {
+      errorsOnly,
+      loading: true,
+      error: null,
+      logs: logPanels[flowId]?.logs || [],
+      open: {}
+    };
+    try {
+      const response = await fetch(
+        `/api/ops/logs?flowId=${flowId}${errorsOnly ? '&errors=1' : ''}`
+      );
+      const body = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(body?.message || `HTTP ${response.status}`);
+      if (logPanels[flowId]) logPanels[flowId].logs = body.logs;
+    } catch (e) {
+      if (logPanels[flowId]) logPanels[flowId].error = /** @type {Error} */ (e).message;
+    } finally {
+      if (logPanels[flowId]) logPanels[flowId].loading = false;
+    }
+  }
+
+  /** @param {string} flowId @param {boolean} [errorsOnly] */
+  function toggleLogs(flowId, errorsOnly = false) {
+    if (logPanels[flowId] && logPanels[flowId].errorsOnly === errorsOnly) {
+      delete logPanels[flowId];
+    } else {
+      loadLogs(flowId, errorsOnly);
+    }
+  }
+
+  /** @type {Record<string, string>} */
+  const severityClass = {
+    error: 'bg-red-50 text-red-700 border-red-200',
+    warn: 'bg-amber-50 text-amber-800 border-amber-200',
+    info: 'bg-muted text-muted-foreground border-border'
+  };
 
   let refreshing = $state(false);
   async function refresh() {
@@ -67,7 +110,8 @@
 
   /** @param {Array<{count: number}>} buckets */
 
-  const maxBucket = (buckets) => Math.max(1, ...(buckets || []).map((/** @type {{count: number}} */ b) => b.count));
+  const maxBucket = (buckets) =>
+    Math.max(1, ...(buckets || []).map((/** @type {{count: number}} */ b) => b.count));
 </script>
 
 <svelte:head>
@@ -219,7 +263,12 @@
                       ></span>
                     {/each}
                   </span>
-                  <span class="text-xs text-red-700">{instance.errors.total} errors / 7 d</span>
+                  <button
+                    type="button"
+                    class="text-xs text-red-700 underline decoration-dotted hover:decoration-solid"
+                    onclick={() => toggleLogs(instance.flowId, true)}
+                    >{instance.errors.total} errors / 7 d</button
+                  >
                   {#if instance.errors.last}
                     <span
                       class="text-xs text-muted-foreground truncate max-w-xl"
@@ -232,9 +281,20 @@
                 {:else}
                   <span class="text-xs text-green-700">no errors / 7 d</span>
                 {/if}
+                <button
+                  type="button"
+                  class="ml-auto inline-flex items-center gap-1 text-xs hover:text-foreground {logPanels[
+                    instance.flowId
+                  ]
+                    ? 'text-foreground font-medium'
+                    : 'text-muted-foreground'}"
+                  onclick={() => toggleLogs(instance.flowId)}
+                >
+                  <ScrollText size={12} /> logs
+                </button>
                 {#if designer(instance.flowId)}
                   <a
-                    class="ml-auto inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                    class="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
                     href={designer(instance.flowId)}
                     target="_blank"
                     rel="noreferrer"
@@ -243,6 +303,94 @@
                   </a>
                 {/if}
               </div>
+              {#if logPanels[instance.flowId]}
+                {@const panel = logPanels[instance.flowId]}
+                <div class="ml-3 border rounded-md bg-muted/30">
+                  <div class="flex items-center gap-2 px-3 py-2 border-b text-xs">
+                    <span class="font-medium"
+                      >{panel.loading ? 'Loading…' : `Last ${panel.logs.length} log entries`}</span
+                    >
+                    <button
+                      type="button"
+                      class="px-2 py-0.5 rounded border {!panel.errorsOnly
+                        ? 'bg-background font-medium'
+                        : 'text-muted-foreground'}"
+                      onclick={() => loadLogs(instance.flowId, false)}>All</button
+                    >
+                    <button
+                      type="button"
+                      class="px-2 py-0.5 rounded border {panel.errorsOnly
+                        ? 'bg-background font-medium'
+                        : 'text-muted-foreground'}"
+                      onclick={() => loadLogs(instance.flowId, true)}>Errors only</button
+                    >
+                    <button
+                      type="button"
+                      class="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
+                      onclick={() => loadLogs(instance.flowId, panel.errorsOnly)}
+                      disabled={panel.loading}
+                    >
+                      <RefreshCw size={12} class={panel.loading ? 'animate-spin' : ''} /> reload
+                    </button>
+                    <button
+                      type="button"
+                      class="ml-auto text-muted-foreground hover:text-foreground"
+                      onclick={() => delete logPanels[instance.flowId]}>✕</button
+                    >
+                  </div>
+                  {#if panel.error}
+                    <div class="px-3 py-2 text-xs text-red-700">{panel.error}</div>
+                  {:else if panel.loading && !panel.logs.length}
+                    <div class="px-3 py-2 text-xs text-muted-foreground">Loading…</div>
+                  {:else if !panel.logs.length}
+                    <div class="px-3 py-2 text-xs text-muted-foreground">No log entries.</div>
+                  {:else}
+                    <div
+                      class="max-h-96 overflow-auto divide-y {panel.loading ? 'opacity-50' : ''}"
+                    >
+                      {#each panel.logs as log (log.id)}
+                        <div class="px-3 py-1.5 text-xs">
+                          <button
+                            type="button"
+                            class="w-full flex items-center gap-2 text-left"
+                            onclick={() => (panel.open[log.id] = !panel.open[log.id])}
+                          >
+                            {#if panel.open[log.id]}
+                              <ChevronDown size={12} />
+                            {:else}
+                              <ChevronRight size={12} />
+                            {/if}
+                            <span class="text-muted-foreground whitespace-nowrap" title={log.at}
+                              >{new Date(log.at).toLocaleString()}</span
+                            >
+                            <span
+                              class="px-1.5 rounded border {severityClass[log.severity] ||
+                                severityClass.info}">{log.severity}</span
+                            >
+                            <span class="font-medium whitespace-nowrap" title={log.componentType}
+                              >{log.component}</span
+                            >
+                            {#if log.port}
+                              <span class="text-muted-foreground whitespace-nowrap"
+                                >{log.direction === 'in' ? '→' : '←'} {log.port}</span
+                              >
+                            {/if}
+                            <span
+                              class="truncate {log.severity === 'error'
+                                ? 'text-red-700'
+                                : 'text-muted-foreground'}">{log.summary}</span
+                            >
+                          </button>
+                          {#if panel.open[log.id]}
+                            <pre
+                              class="mt-1 ml-5 p-2 bg-background border rounded text-[11px] whitespace-pre-wrap break-all max-h-80 overflow-auto">{log.detail}</pre>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              {/if}
             {/each}
           </div>
         {/each}

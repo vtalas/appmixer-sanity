@@ -64,7 +64,10 @@ async function flowErrors(baseUrl, token, flowId) {
   }));
   const last = (data.hits || [])[0];
   return {
-    total: buckets.reduce((/** @type {number} */ sum, /** @type {{count: number}} */ b) => sum + b.count, 0),
+    total: buckets.reduce(
+      (/** @type {number} */ sum, /** @type {{count: number}} */ b) => sum + b.count,
+      0
+    ),
     buckets,
     last: last
       ? {
@@ -93,6 +96,85 @@ async function lastActivity(baseUrl, token, flowId) {
     size: '1'
   });
   return (data.hits || [])[0]?.gridTimestamp || null;
+}
+
+/**
+ * Recent log entries of one integration instance, newest first, for the log panel on /ops.
+ * @param {string} userId - caller's email, or '' for the env configuration
+ * @param {string} flowId
+ * @param {{ errorsOnly?: boolean, size?: number }} [options]
+ */
+export async function listFlowLogs(userId, flowId, { errorsOnly = false, size = 50 } = {}) {
+  const { baseUrl, token } = await getAppmixerSession(userId);
+  const [data, definition] = await Promise.all([
+    appmixerGet(baseUrl, token, '/logs', {
+      flowId,
+      ...(errorsOnly ? { query: 'severity:error' } : {}),
+      sort: 'gridTimestamp:desc',
+      size: String(size)
+    }),
+    // Error entries carry no component label, so the labels come from the flow itself
+    appmixerGet(baseUrl, token, `/flows/${flowId}`, { projection: 'flow' }).catch(() => null)
+  ]);
+  /** @type {Record<string, any>} */
+  const components = definition?.flow || {};
+  return (data.hits || []).map((/** @type {any} */ hit) => {
+    const error = firstLine(hit.err);
+    return {
+      id: hit._id,
+      at: hit.gridTimestamp,
+      severity: hit.severity || 'info',
+      component:
+        hit.tgtComponentLabel ||
+        hit.srcComponentLabel ||
+        components[hit.componentId]?.label ||
+        String(hit.componentType || '')
+          .split('.')
+          .pop() ||
+        'flow',
+      componentType: hit.componentType || null,
+      // in = message delivered to the component, out = message it sent from a port
+      direction: hit.portType || null,
+      port: hit.port || null,
+      summary: error ? redact(error) : summarize(hit.msg),
+      // The full payload or error stack, shown when a row is expanded
+      detail: redact(pretty(hit.err) || pretty(hit.msg))
+    };
+  });
+}
+
+/**
+ * Masks credentials in log text. Appmixer logs messages verbatim, so an HTTP component's
+ * input carries its Authorization header (the OpenClaw hook token, for one). Keys may sit
+ * in escaped JSON strings nested in the payload, hence the optional backslashes.
+ * @param {string} text
+ */
+function redact(text) {
+  return text
+    .replace(/(Bearer|Basic|token)\s+[A-Za-z0-9._~+/=-]{8,}/gi, '$1 ***')
+    .replace(
+      /(\\*"[\w-]*(?:authorization|token|secret|password|passwd|api[-_]?key|cookie)[\w-]*\\*"\s*:\s*\\*")[^"\\]+/gi,
+      '$1***'
+    )
+    .replace(/([?&](?:access_token|token|api_?key|key|secret|signature)=)[^&\s"\\]+/gi, '$1***');
+}
+
+/** One-line preview of a log message, which is usually a JSON string. */
+function summarize(/** @type {unknown} */ msg) {
+  const text = typeof msg === 'string' ? msg : JSON.stringify(msg ?? '');
+  // Redact before cutting, so a credential split by the cut is still masked
+  return redact(text.replace(/\s+/g, ' ')).slice(0, 200);
+}
+
+/** Pretty-prints a JSON-string log field; other values are returned as they are. */
+function pretty(/** @type {unknown} */ value) {
+  if (!value) return '';
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    return typeof parsed === 'object' ? JSON.stringify(parsed, null, 2) : String(parsed);
+  } catch {
+    return String(value);
+  }
 }
 
 /** First line of an error stack stored as a JSON string. */
