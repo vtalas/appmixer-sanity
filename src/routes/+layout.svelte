@@ -38,6 +38,7 @@
         <a href="/releases" class="text-sm text-muted-foreground hover:text-foreground">Release</a>
         <a href="/authub" class="text-sm text-muted-foreground hover:text-foreground">Auth Hub</a>
         <a href="/automation-hub" class="text-sm text-muted-foreground hover:text-foreground">Automation Hub</a>
+        <a href="/ops" class="text-sm text-muted-foreground hover:text-foreground">Operations</a>
         <a href="/settings" class="text-sm text-muted-foreground hover:text-foreground">Settings</a>
         {#if data.session?.user}
           <span class="text-sm text-muted-foreground">{data.session.user.email}</span>
