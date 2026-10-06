@@ -26,8 +26,9 @@
     workflowsWaiting: activeWorkflows.reduce((n, w) => n + (w.recent?.waiting || 0), 0)
   });
 
-  // Log panels, one per instance, loaded on demand from /api/ops/logs
-  /** @type {Record<string, { errorsOnly: boolean, loading: boolean, error: string | null, logs: any[], open: Record<string, boolean> }>} */
+  // Run panels, one per instance, loaded on demand from /api/ops/runs. `open` holds what is
+  // expanded in the tree, by path: a run, a component, one of its ports, its data, an entry.
+  /** @type {Record<string, { errorsOnly: boolean, loading: boolean, error: string | null, runs: any[], open: Record<string, boolean> }>} */
   let logPanels = $state({});
 
   /** @param {string} flowId @param {boolean} errorsOnly */
@@ -36,16 +37,16 @@
       errorsOnly,
       loading: true,
       error: null,
-      logs: logPanels[flowId]?.logs || [],
-      open: {}
+      runs: logPanels[flowId]?.runs || [],
+      open: logPanels[flowId]?.open || {}
     };
     try {
       const response = await fetch(
-        `/api/ops/logs?flowId=${flowId}${errorsOnly ? '&errors=1' : ''}`
+        `/api/ops/runs?flowId=${flowId}${errorsOnly ? '&errors=1' : ''}`
       );
       const body = await response.json().catch(() => null);
       if (!response.ok) throw new Error(body?.message || `HTTP ${response.status}`);
-      if (logPanels[flowId]) logPanels[flowId].logs = body.logs;
+      if (logPanels[flowId]) logPanels[flowId].runs = body.runs;
     } catch (e) {
       if (logPanels[flowId]) logPanels[flowId].error = /** @type {Error} */ (e).message;
     } finally {
@@ -68,6 +69,46 @@
     warn: 'bg-amber-50 text-amber-800 border-amber-200',
     info: 'bg-muted text-muted-foreground border-border'
   };
+
+  /** @type {Record<string, string>} */
+  const statusClass = {
+    ok: 'bg-green-50 text-green-700 border-green-200',
+    error: severityClass.error,
+    retried: severityClass.warn,
+    info: severityClass.info
+  };
+
+  /**
+   * How many calendar days ago a date was, in words.
+   * @param {string} value
+   */
+  function day(value) {
+    /** @param {Date} d */
+    const midnight = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    const days = Math.round((midnight(new Date()) - midnight(new Date(value))) / 86400000);
+    if (days <= 0) return 'Today';
+    return days === 1 ? 'Yesterday' : `${days} days ago`;
+  }
+
+  /** @param {number} ms */
+  function duration(ms) {
+    if (ms < 1000) return `${ms} ms`;
+    if (ms < 60000) return `${(ms / 1000).toFixed(1)} s`;
+    return `${Math.floor(ms / 60000)} min ${Math.round((ms % 60000) / 1000)} s`;
+  }
+
+  /**
+   * What a component of a run has to say for itself on its row.
+   * @param {any} node
+   */
+  function outcome(node) {
+    if (node.error) return node.error;
+    if (node.retries) {
+      return `succeeded after ${node.retries} failed attempt${node.retries === 1 ? '' : 's'}`;
+    }
+    const output = node.entries.findLast((/** @type {any} */ e) => e.direction === 'out');
+    return output && output.summary !== '{}' ? output.summary : '';
+  }
 
   let refreshing = $state(false);
   async function refresh() {
@@ -117,6 +158,154 @@
 <svelte:head>
   <title>Operations - Appmixer Sanity Check</title>
 </svelte:head>
+
+{#snippet chevron(/** @type {boolean} */ open)}
+  {#if open}
+    <ChevronDown size={12} class="shrink-0" />
+  {:else}
+    <ChevronRight size={12} class="shrink-0" />
+  {/if}
+{/snippet}
+
+<!-- One component of a run with what its output set off below it. The root (the trigger)
+     is the run's own row and carries `run`. -->
+{#snippet treeNode(
+  /** @type {any} */ panel,
+  /** @type {string} */ path,
+  /** @type {any} */ node,
+  /** @type {any} */ run
+)}
+  {@const key = `${path}/${node.id}`}
+  {@const dataKey = `${key}:data`}
+  {@const expandable = (node.ports?.length || node.children.length) > 0}
+  <!-- A run opens on a click; below it, the way to a failure is already open -->
+  {@const expanded = expandable && (panel.open[key] ?? (!run && node.failing))}
+  {@const status = run ? run.status : node.retries ? 'retried' : node.status}
+  {@const text = run ? run.summary : outcome(node)}
+  <div>
+    <div class="flex items-center gap-2 py-1">
+      <button
+        type="button"
+        class="flex-1 min-w-0 flex items-center gap-2 text-left"
+        onclick={() =>
+          expandable ? (panel.open[key] = !expanded) : (panel.open[dataKey] = !panel.open[dataKey])}
+      >
+        {@render chevron(expandable ? expanded : !!panel.open[dataKey])}
+        {#if run}
+          <span class="text-muted-foreground whitespace-nowrap" title={run.at}>
+            <span class="text-foreground">{day(run.at)}</span> · {new Date(run.at).toLocaleString()}
+          </span>
+        {/if}
+        <span class="px-1.5 rounded border whitespace-nowrap {statusClass[status]}">{status}</span>
+        <span class="font-medium whitespace-nowrap" title={node.type}>{node.label}</span>
+        <span
+          class="truncate {status === 'error' ? 'text-red-700' : 'text-muted-foreground'}"
+          title={text}>{text}</span
+        >
+      </button>
+      {#if run && node.id !== 'flow'}
+        <span class="text-muted-foreground whitespace-nowrap">
+          {run.steps}
+          {run.steps === 1 ? 'step' : 'steps'} · {duration(run.durationMs)}
+        </span>
+      {/if}
+      {#if expandable}
+        <button
+          type="button"
+          class="px-1.5 rounded border whitespace-nowrap {panel.open[dataKey]
+            ? 'bg-background text-foreground'
+            : 'text-muted-foreground hover:text-foreground'}"
+          title="What this component received and sent"
+          onclick={() => (panel.open[dataKey] = !panel.open[dataKey])}>data</button
+        >
+      {/if}
+    </div>
+    {#if panel.open[dataKey]}
+      <div class="ml-5 mb-1 border rounded bg-background divide-y">
+        {#each node.entries as entry (entry.id)}
+          {@const entryKey = `${key}#${entry.id}`}
+          <div class="px-2 py-1">
+            <button
+              type="button"
+              class="w-full flex items-center gap-2 text-left"
+              onclick={() => (panel.open[entryKey] = !panel.open[entryKey])}
+            >
+              {@render chevron(!!panel.open[entryKey])}
+              <span class="text-muted-foreground whitespace-nowrap" title={entry.at}
+                >{new Date(entry.at).toLocaleTimeString()}</span
+              >
+              {#if entry.severity !== 'info'}
+                <span
+                  class="px-1.5 rounded border {severityClass[entry.severity] ||
+                    severityClass.info}">{entry.severity}</span
+                >
+              {/if}
+              {#if entry.port}
+                <span class="text-muted-foreground whitespace-nowrap"
+                  >{entry.direction === 'in' ? 'input' : 'output'}
+                  <code>{entry.port}</code></span
+                >
+              {/if}
+              <span
+                class="truncate {entry.severity === 'error'
+                  ? 'text-red-700'
+                  : 'text-muted-foreground'}">{entry.summary}</span
+              >
+            </button>
+            {#if panel.open[entryKey]}
+              <pre
+                class="mt-1 ml-5 p-2 bg-muted/30 border rounded text-[11px] whitespace-pre-wrap break-all max-h-80 overflow-auto">{entry.detail}</pre>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
+    {#if expanded}
+      <div class="ml-[5px] pl-4 border-l">
+        {#each node.ports || [] as port (port.name)}
+          {@const portKey = `${key}>${port.name}`}
+          {@const portOpen = port.children.length > 0 && (panel.open[portKey] ?? true)}
+          <div>
+            <button
+              type="button"
+              class="flex items-center gap-2 py-1 text-left"
+              disabled={!port.children.length}
+              onclick={() => (panel.open[portKey] = !portOpen)}
+            >
+              {#if port.children.length}
+                {@render chevron(portOpen)}
+              {:else}
+                <span class="w-3 shrink-0"></span>
+              {/if}
+              <code
+                class="px-1.5 rounded border {port.fired
+                  ? 'bg-background'
+                  : 'text-muted-foreground'}">{port.name}</code
+              >
+              <span class="text-muted-foreground">
+                {#if port.children.length}
+                  {port.children.length} {port.children.length === 1 ? 'item' : 'items'}
+                {:else}
+                  {port.fired ? 'nothing connected' : 'nothing'}
+                {/if}
+              </span>
+            </button>
+            {#if portOpen}
+              <div class="ml-[5px] pl-4 border-l">
+                {#each port.children as child (child.id)}
+                  {@render treeNode(panel, portKey, child, null)}
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/each}
+        {#each node.children as child (child.id)}
+          {@render treeNode(panel, key, child, null)}
+        {/each}
+      </div>
+    {/if}
+  </div>
+{/snippet}
 
 <div class="space-y-8">
   <div class="flex items-center justify-between">
@@ -290,7 +479,7 @@
                     : 'text-muted-foreground'}"
                   onclick={() => toggleLogs(instance.flowId)}
                 >
-                  <ScrollText size={12} /> logs
+                  <ScrollText size={12} /> runs
                 </button>
                 {#if designer(instance.flowId)}
                   <a
@@ -308,7 +497,9 @@
                 <div class="ml-3 border rounded-md bg-muted/30">
                   <div class="flex items-center gap-2 px-3 py-2 border-b text-xs">
                     <span class="font-medium"
-                      >{panel.loading ? 'Loading…' : `Last ${panel.logs.length} log entries`}</span
+                      >{panel.loading
+                        ? 'Loading…'
+                        : `Last ${panel.runs.length} runs${panel.errorsOnly ? ' with errors' : ''}`}</span
                     >
                     <button
                       type="button"
@@ -340,51 +531,21 @@
                   </div>
                   {#if panel.error}
                     <div class="px-3 py-2 text-xs text-red-700">{panel.error}</div>
-                  {:else if panel.loading && !panel.logs.length}
+                  {:else if panel.loading && !panel.runs.length}
                     <div class="px-3 py-2 text-xs text-muted-foreground">Loading…</div>
-                  {:else if !panel.logs.length}
-                    <div class="px-3 py-2 text-xs text-muted-foreground">No log entries.</div>
+                  {:else if !panel.runs.length}
+                    <div class="px-3 py-2 text-xs text-muted-foreground">
+                      {panel.errorsOnly ? 'No runs with errors.' : 'No runs.'}
+                    </div>
                   {:else}
                     <div
-                      class="max-h-96 overflow-auto divide-y {panel.loading ? 'opacity-50' : ''}"
+                      class="max-h-[70vh] overflow-auto divide-y text-xs {panel.loading
+                        ? 'opacity-50'
+                        : ''}"
                     >
-                      {#each panel.logs as log (log.id)}
-                        <div class="px-3 py-1.5 text-xs">
-                          <button
-                            type="button"
-                            class="w-full flex items-center gap-2 text-left"
-                            onclick={() => (panel.open[log.id] = !panel.open[log.id])}
-                          >
-                            {#if panel.open[log.id]}
-                              <ChevronDown size={12} />
-                            {:else}
-                              <ChevronRight size={12} />
-                            {/if}
-                            <span class="text-muted-foreground whitespace-nowrap" title={log.at}
-                              >{new Date(log.at).toLocaleString()}</span
-                            >
-                            <span
-                              class="px-1.5 rounded border {severityClass[log.severity] ||
-                                severityClass.info}">{log.severity}</span
-                            >
-                            <span class="font-medium whitespace-nowrap" title={log.componentType}
-                              >{log.component}</span
-                            >
-                            {#if log.port}
-                              <span class="text-muted-foreground whitespace-nowrap"
-                                >{log.direction === 'in' ? '→' : '←'} {log.port}</span
-                              >
-                            {/if}
-                            <span
-                              class="truncate {log.severity === 'error'
-                                ? 'text-red-700'
-                                : 'text-muted-foreground'}">{log.summary}</span
-                            >
-                          </button>
-                          {#if panel.open[log.id]}
-                            <pre
-                              class="mt-1 ml-5 p-2 bg-background border rounded text-[11px] whitespace-pre-wrap break-all max-h-80 overflow-auto">{log.detail}</pre>
-                          {/if}
+                      {#each panel.runs as run (run.id)}
+                        <div class="px-3 py-0.5">
+                          {@render treeNode(panel, run.id, run.root, run)}
                         </div>
                       {/each}
                     </div>

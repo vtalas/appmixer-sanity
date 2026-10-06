@@ -22,6 +22,13 @@ import { getGitHubConfig } from '$lib/api/github.js';
 export const HUB_CATEGORY = 'appmixer-sanity-hub';
 const ERROR_WINDOW_DAYS = 7;
 const INACTIVE_DAYS = 30;
+// Run tree of an instance: log entries read per request, and how much of one is sent
+const LOG_ENTRIES = 300;
+const ERROR_ENTRIES = 100;
+const ERROR_RUNS = 20;
+const DETAIL_LIMIT = 20000;
+/** Node of the entries that belong to no component: the flow was started or stopped. */
+const FLOW_NODE = 'flow';
 
 /** @param {unknown} err */
 const message = (err) => (err instanceof Error ? err.message : String(err));
@@ -98,49 +105,281 @@ async function lastActivity(baseUrl, token, flowId) {
   return (data.hits || [])[0]?.gridTimestamp || null;
 }
 
+/** Out port names per component type, kept for the life of the server process. */
+const outPortCache = new Map();
+
 /**
- * Recent log entries of one integration instance, newest first, for the log panel on /ops.
+ * The out ports a component declares — the branches it could have taken, so a run can show
+ * the ones it did not take (Condition's `false`) next to the ones it did.
+ * @param {string} baseUrl
+ * @param {string} token
+ * @param {string} type
+ * @returns {Promise<string[]>}
+ */
+function outPortNames(baseUrl, token, type) {
+  const key = `${baseUrl}|${type}`;
+  if (!outPortCache.has(key)) {
+    outPortCache.set(
+      key,
+      appmixerGet(baseUrl, token, '/components', { selector: type })
+        .then((list) =>
+          (list.find((/** @type {any} */ c) => c.name === type)?.outPorts || []).map(
+            (/** @type {any} */ port) => (typeof port === 'string' ? port : port.name)
+          )
+        )
+        .catch(() => {
+          outPortCache.delete(key);
+          return [];
+        })
+    );
+  }
+  return outPortCache.get(key);
+}
+
+/**
+ * Runs of one integration instance, newest first, for the run tree on /ops. A run is one
+ * firing of the trigger with everything it set off; each run is a tree of the components it
+ * went through.
  * @param {string} userId - caller's email, or '' for the env configuration
  * @param {string} flowId
- * @param {{ errorsOnly?: boolean, size?: number }} [options]
+ * @param {{ errorsOnly?: boolean }} [options]
  */
-export async function listFlowLogs(userId, flowId, { errorsOnly = false, size = 50 } = {}) {
+export async function listFlowRuns(userId, flowId, { errorsOnly = false } = {}) {
   const { baseUrl, token } = await getAppmixerSession(userId);
-  const [data, definition] = await Promise.all([
-    appmixerGet(baseUrl, token, '/logs', {
+  /** @param {string} query @param {number} size */
+  const search = async (query, size) => {
+    const data = await appmixerGet(baseUrl, token, '/logs', {
       flowId,
-      ...(errorsOnly ? { query: 'severity:error' } : {}),
+      ...(query ? { query } : {}),
       sort: 'gridTimestamp:desc',
       size: String(size)
-    }),
-    // Error entries carry no component label, so the labels come from the flow itself
+    });
+    return /** @type {any[]} */ (data.hits || []);
+  };
+
+  const [found, definition] = await Promise.all([
+    search(errorsOnly ? 'severity:error' : '', errorsOnly ? ERROR_ENTRIES : LOG_ENTRIES),
+    // Error entries carry neither a label nor a sender, so both come from the flow itself
     appmixerGet(baseUrl, token, `/flows/${flowId}`, { projection: 'flow' }).catch(() => null)
   ]);
+
+  let hits = found;
+  if (errorsOnly) {
+    // An error entry is one line of its run; the rest of the run comes by correlation id
+    const ids = [...new Set(found.map((hit) => hit.correlationId).filter(Boolean))].slice(
+      0,
+      ERROR_RUNS
+    );
+    const correlated = ids.length
+      ? await search(`correlationId:(${ids.map((id) => `"${id}"`).join(' OR ')})`, LOG_ENTRIES)
+      : [];
+    hits = [...correlated, ...found.filter((hit) => !hit.correlationId)];
+  }
+
+  const groups = groupRuns(hits);
+  // A full page cuts its oldest run somewhere in the middle
+  if (!errorsOnly && found.length === LOG_ENTRIES && groups.length > 1) groups.shift();
+
   /** @type {Record<string, any>} */
   const components = definition?.flow || {};
-  return (data.hits || []).map((/** @type {any} */ hit) => {
+  const types = [
+    ...new Set(
+      hits.map((hit) => hit.componentType || components[hit.componentId]?.type).filter(Boolean)
+    )
+  ];
+  const ports = Object.fromEntries(
+    await Promise.all(types.map(async (type) => [type, await outPortNames(baseUrl, token, type)]))
+  );
+
+  return groups.map((group) => buildRun(group, components, ports)).reverse();
+}
+
+/**
+ * Splits log entries into runs, oldest first. Entries of one run share a correlationId. A
+ * failed poll of a trigger has none — nothing was triggered yet — and is logged twice within
+ * a few ms (by the component and by the scheduler), so uncorrelated entries of one component
+ * that close together are one run.
+ * @param {any[]} hits
+ */
+function groupRuns(hits) {
+  const time = (/** @type {any} */ hit) => new Date(hit.gridTimestamp).getTime();
+  /** @type {Array<{ id: string, hits: any[] }>} */
+  const groups = [];
+  const correlated = new Map();
+  /** @type {{ componentId: string, at: number, group: { hits: any[] } } | null} */
+  let loose = null;
+  for (const hit of [...hits].sort((a, b) => time(a) - time(b))) {
+    if (hit.correlationId) {
+      let group = correlated.get(hit.correlationId);
+      if (!group) {
+        group = { id: hit.correlationId, hits: [] };
+        correlated.set(hit.correlationId, group);
+        groups.push(group);
+      }
+      group.hits.push(hit);
+    } else if (loose && loose.componentId === hit.componentId && time(hit) - loose.at < 1000) {
+      loose.group.hits.push(hit);
+    } else {
+      const group = { id: hit._id, hits: [hit] };
+      groups.push(group);
+      loose = { componentId: hit.componentId, at: time(hit), group };
+    }
+  }
+  return groups;
+}
+
+/**
+ * One run as a tree: the trigger at the root, under each component the components its output
+ * went to.
+ * @param {{ id: string, hits: any[] }} group - entries of the run, oldest first
+ * @param {Record<string, any>} components - the flow definition, by component id
+ * @param {Record<string, string[]>} ports - declared out ports, by component type
+ */
+function buildRun(group, components, ports) {
+  /** @type {Map<string, any>} */
+  const nodes = new Map();
+  for (const hit of group.hits) {
+    const id = hit.componentId || FLOW_NODE;
+    if (!nodes.has(id)) {
+      nodes.set(id, {
+        id,
+        type: hit.componentType || components[id]?.type || null,
+        label: components[id]?.label || null,
+        parent: null,
+        viaPort: null,
+        fired: /** @type {Record<string, number>} */ ({}),
+        errors: 0,
+        error: '',
+        lastOutput: 0,
+        lastError: 0,
+        entries: []
+      });
+    }
+    const node = nodes.get(id);
+    const at = new Date(hit.gridTimestamp).getTime();
     const error = firstLine(hit.err);
-    return {
+    node.type ||= hit.componentType || null;
+    node.label ||= hit.tgtComponentLabel || hit.srcComponentLabel || null;
+    if (hit.portType === 'in' && !node.parent && hit.senderId && hit.senderId !== id) {
+      node.parent = hit.senderId;
+      node.viaPort = hit.senderPort || null;
+    }
+    if (hit.portType === 'out' && hit.port) {
+      node.fired[hit.port] = (node.fired[hit.port] || 0) + 1;
+      node.lastOutput = at;
+    }
+    if (hit.severity === 'error') {
+      node.errors += 1;
+      node.error = redact(error || String(hit.msg || ''));
+      node.lastError = at;
+    }
+    node.entries.push({
       id: hit._id,
       at: hit.gridTimestamp,
       severity: hit.severity || 'info',
-      component:
-        hit.tgtComponentLabel ||
-        hit.srcComponentLabel ||
-        components[hit.componentId]?.label ||
-        String(hit.componentType || '')
-          .split('.')
-          .pop() ||
-        'flow',
-      componentType: hit.componentType || null,
       // in = message delivered to the component, out = message it sent from a port
       direction: hit.portType || null,
       port: hit.port || null,
       summary: error ? redact(error) : summarize(hit.msg),
-      // The full payload or error stack, shown when a row is expanded
-      detail: redact(pretty(hit.err) || pretty(hit.msg))
+      // The full payload or error stack, shown when the entry is expanded
+      detail: redact(pretty(hit.err) || pretty(hit.msg)).slice(0, DETAIL_LIMIT)
+    });
+  }
+
+  for (const node of nodes.values()) {
+    node.label ||=
+      String(node.type || '')
+        .split('.')
+        .pop() || 'Flow';
+    // An error followed by an output is a failed attempt that a retry made good
+    node.failed = node.errors > 0 && node.lastOutput <= node.lastError;
+    if (node.parent && nodes.has(node.parent)) continue;
+    node.parent = null;
+    // A component that failed logged no input, which is where the sender is named; the
+    // flow's own wiring tells what it hangs on.
+    for (const sources of Object.values(components[node.id]?.source || {})) {
+      const from = Object.keys(sources).find((id) => id !== node.id && nodes.has(id));
+      if (from) {
+        const wired = /** @type {string[]} */ (sources[from] || []);
+        node.parent = from;
+        node.viaPort = wired.find((port) => nodes.get(from).fired[port]) ?? wired[0] ?? null;
+        break;
+      }
+    }
+  }
+
+  const all = [...nodes.values()];
+  const root = all.find((node) => !node.parent) || all[0];
+  const placed = new Set([root.id]);
+
+  /** @param {any} node @returns {any} */
+  const view = (node) => {
+    const below = all.filter(
+      (child) =>
+        !placed.has(child.id) &&
+        // Whatever else has no parent in this run hangs on the root, so nothing gets lost
+        (child.parent === node.id || (node === root && !child.parent))
+    );
+    below.forEach((child) => placed.add(child.id));
+    const children = below.map((child) => ({
+      port: child.parent === node.id ? child.viaPort : null,
+      node: view(child)
+    }));
+    const names = [
+      ...new Set([
+        ...(ports[node.type] || []),
+        ...Object.keys(node.fired),
+        ...children.map((child) => child.port).filter(Boolean)
+      ])
+    ];
+    // A component with one out port has no branches to show: its children hang on it directly
+    const branches = names.length > 1;
+    return {
+      id: node.id,
+      label: node.label,
+      type: node.type,
+      status: node.failed ? 'error' : node.id === FLOW_NODE ? 'info' : 'ok',
+      retries: node.failed ? 0 : node.errors,
+      error: node.failed ? node.error : '',
+      failing: node.failed || children.some((child) => child.node.failing),
+      entries: node.entries,
+      ports: branches
+        ? names.map((name) => ({
+            name,
+            fired: node.fired[name] || 0,
+            children: children.filter((child) => child.port === name).map((child) => child.node)
+          }))
+        : null,
+      children: children.filter((child) => !branches || !child.port).map((child) => child.node)
     };
-  });
+  };
+  const tree = view(root);
+  // Components caught in a cycle are reachable from no root; hang them on it as well
+  for (const node of all) {
+    if (!placed.has(node.id)) {
+      placed.add(node.id);
+      tree.children.push(view(node));
+    }
+  }
+
+  const failed = all.find((node) => node.failed);
+  const first = group.hits[0];
+  const last = group.hits[group.hits.length - 1];
+  const output = root.entries.find((/** @type {any} */ entry) => entry.direction === 'out');
+  return {
+    id: group.id,
+    at: first.gridTimestamp,
+    durationMs: new Date(last.gridTimestamp).getTime() - new Date(first.gridTimestamp).getTime(),
+    status: failed ? 'error' : all.some((node) => node.errors) ? 'retried' : tree.status,
+    steps: all.length,
+    // What went wrong and where, or what the trigger delivered
+    summary: failed
+      ? failed === root
+        ? failed.error
+        : `${failed.label}: ${failed.error}`
+      : (output || root.entries[0]).summary,
+    root: tree
+  };
 }
 
 /**
