@@ -282,17 +282,45 @@ function buildRun(group, components, ports) {
         lastOutput: 0,
         lastError: 0,
         output: null,
+        received: new Set(),
         entries: []
       });
     }
     const node = nodes.get(id);
     const at = new Date(hit.gridTimestamp).getTime();
-    const error = firstLine(hit.err);
+    const error = errorLine(hit.err);
     node.type ||= hit.componentType || null;
     node.label ||= hit.tgtComponentLabel || hit.srcComponentLabel || null;
     if (hit.portType === 'in' && !node.parent && hit.senderId && hit.senderId !== id) {
       node.parent = hit.senderId;
       node.viaPort = hit.senderPort || null;
+    }
+    // A component that fails logs no input: its error entry brings the messages it was
+    // processing, and with them who sent them.
+    for (const [port, messages] of Object.entries(inputMessages(hit))) {
+      for (const message of messages) {
+        const { messageId, sender } = message?.properties || {};
+        if (!node.parent && sender?.componentId && sender.componentId !== id) {
+          node.parent = sender.componentId;
+          node.viaPort = sender.outputPort || null;
+        }
+        // Every attempt repeats the message it failed on
+        if (!messageId || node.received.has(messageId)) continue;
+        node.received.add(messageId);
+        // What it received goes before what went wrong with it
+        const firstError = node.entries.findIndex(
+          (/** @type {any} */ entry) => entry.severity === 'error'
+        );
+        node.entries.splice(firstError < 0 ? node.entries.length : firstError, 0, {
+          id: `${hit._id}:${messageId}`,
+          at: hit.gridTimestamp,
+          severity: 'info',
+          direction: 'in',
+          port,
+          summary: summarize(message.content),
+          detail: redact(pretty(message.content)).slice(0, DETAIL_LIMIT)
+        });
+      }
     }
     if (hit.portType === 'out' && hit.port) {
       node.fired[hit.port] = (node.fired[hit.port] || 0) + 1;
@@ -301,8 +329,15 @@ function buildRun(group, components, ports) {
     }
     if (hit.severity === 'error') {
       node.errors += 1;
-      node.error = redact(error || String(hit.msg || ''));
+      const text = redact(error || String(hit.msg || ''));
+      // The same failure is logged again without the remote API's reason; keep the fuller one
+      if (!node.error.startsWith(text)) node.error = text;
       node.lastError = at;
+    }
+    // A retry that goes through logs the input its failed attempts have already shown
+    if (hit.portType === 'in' && hit.messageId) {
+      if (node.received.has(hit.messageId)) continue;
+      node.received.add(hit.messageId);
     }
     node.entries.push({
       id: hit._id,
@@ -464,6 +499,41 @@ function pretty(/** @type {unknown} */ value) {
     return typeof parsed === 'object' ? JSON.stringify(parsed, null, 2) : String(parsed);
   } catch {
     return String(value);
+  }
+}
+
+/**
+ * The messages a component was processing when it failed, by input port, as its error entry
+ * carries them.
+ * @param {any} hit
+ * @returns {Record<string, any[]>}
+ */
+function inputMessages(hit) {
+  try {
+    const messages =
+      typeof hit.inputMessages === 'string' ? JSON.parse(hit.inputMessages) : hit.inputMessages;
+    return Object.fromEntries(
+      Object.entries(messages || {}).filter(([, list]) => Array.isArray(list))
+    );
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * An error in one line: its message and, for a failed request, what the remote API answered
+ * ("Request failed with status code 403 — Resource not accessible by integration").
+ */
+function errorLine(/** @type {unknown} */ err) {
+  const line = firstLine(err);
+  try {
+    const data = (typeof err === 'string' ? JSON.parse(err) : err)?.response?.data;
+    const reason = [data, data?.message, data?.error, data?.error?.message].find(
+      (value) => typeof value === 'string' && value.trim()
+    );
+    return reason ? `${line} — ${reason.replace(/\s+/g, ' ').trim()}`.slice(0, 400) : line;
+  } catch {
+    return line;
   }
 }
 
