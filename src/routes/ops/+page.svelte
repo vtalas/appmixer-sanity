@@ -79,15 +79,33 @@
   };
 
   /**
-   * How many calendar days ago a date was, in words.
+   * When a run started, the way one would say it: "Today 14:40" with "10 minutes ago" while
+   * it is less than an hour old, "Yesterday 14:40", then "3 days ago" with the date.
    * @param {string} value
    */
-  function day(value) {
+  function when(value) {
+    const date = new Date(value);
     /** @param {Date} d */
     const midnight = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-    const days = Math.round((midnight(new Date()) - midnight(new Date(value))) / 86400000);
-    if (days <= 0) return 'Today';
-    return days === 1 ? 'Yesterday' : `${days} days ago`;
+    const days = Math.round((midnight(new Date()) - midnight(date)) / 86400000);
+    const time = date.toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23'
+    });
+    if (days > 1) {
+      return { day: `${days} days ago`, more: `${date.toLocaleDateString()} ${time}` };
+    }
+    const minutes = Math.floor((Date.now() - date.getTime()) / 60000);
+    return {
+      day: `${days === 1 ? 'Yesterday' : 'Today'} ${time}`,
+      more:
+        minutes >= 60
+          ? ''
+          : minutes < 1
+            ? 'just now'
+            : `${minutes} minute${minutes === 1 ? '' : 's'} ago`
+    };
   }
 
   /** @param {number} ms */
@@ -204,8 +222,14 @@
       >
         {@render chevron(expandable ? expanded : !!panel.open[dataKey])}
         {#if run}
-          <span class="text-muted-foreground whitespace-nowrap" title={run.at}>
-            <span class="text-foreground">{day(run.at)}</span> · {new Date(run.at).toLocaleString()}
+          {@const started = when(run.at)}
+          <span
+            class="text-muted-foreground whitespace-nowrap"
+            title={new Date(run.at).toLocaleString()}
+          >
+            <span class="text-foreground">{started.day}</span>{started.more
+              ? ` · ${started.more}`
+              : ''}
           </span>
         {/if}
         <span class="px-1.5 rounded border whitespace-nowrap {statusClass[status]}">{status}</span>
@@ -250,7 +274,7 @@
             >
               {@render chevron(!!panel.open[entryKey])}
               <span class="text-muted-foreground whitespace-nowrap" title={entry.at}
-                >{new Date(entry.at).toLocaleTimeString()}</span
+                >{new Date(entry.at).toLocaleTimeString([], { hourCycle: 'h23' })}</span
               >
               {#if entry.severity !== 'info'}
                 <span
