@@ -164,6 +164,7 @@ export async function listFlowRuns(userId, flowId, { errorsOnly = false } = {}) 
   ]);
 
   let hits = found;
+  let full = found.length === LOG_ENTRIES;
   if (errorsOnly) {
     // An error entry is one line of its run; the rest of the run comes by correlation id
     const ids = [...new Set(found.map((hit) => hit.correlationId).filter(Boolean))].slice(
@@ -174,11 +175,10 @@ export async function listFlowRuns(userId, flowId, { errorsOnly = false } = {}) 
       ? await search(`correlationId:(${ids.map((id) => `"${id}"`).join(' OR ')})`, LOG_ENTRIES)
       : [];
     hits = [...correlated, ...found.filter((hit) => !hit.correlationId)];
+    full = correlated.length === LOG_ENTRIES;
   }
 
   const groups = groupRuns(hits);
-  // A full page cuts its oldest run somewhere in the middle
-  if (!errorsOnly && found.length === LOG_ENTRIES && groups.length > 1) groups.shift();
 
   /** @type {Record<string, any>} */
   const components = definition?.flow || {};
@@ -191,7 +191,12 @@ export async function listFlowRuns(userId, flowId, { errorsOnly = false } = {}) 
     await Promise.all(types.map(async (type) => [type, await outPortNames(baseUrl, token, type)]))
   );
 
-  return groups.map((group) => buildRun(group, components, ports)).reverse();
+  const runs = groups.map((group) => buildRun(group, components, ports)).reverse();
+  // A full page cuts the oldest runs short at their beginning: what is left of them starts
+  // at a component that has an input, not at a trigger.
+  return full
+    ? runs.filter((run) => !Object.keys(components[run.root.id]?.source || {}).length)
+    : runs;
 }
 
 /**
@@ -252,6 +257,7 @@ function buildRun(group, components, ports) {
         error: '',
         lastOutput: 0,
         lastError: 0,
+        output: null,
         entries: []
       });
     }
@@ -267,6 +273,7 @@ function buildRun(group, components, ports) {
     if (hit.portType === 'out' && hit.port) {
       node.fired[hit.port] = (node.fired[hit.port] || 0) + 1;
       node.lastOutput = at;
+      node.output ??= hit.msg;
     }
     if (hit.severity === 'error') {
       node.errors += 1;
@@ -365,7 +372,6 @@ function buildRun(group, components, ports) {
   const failed = all.find((node) => node.failed);
   const first = group.hits[0];
   const last = group.hits[group.hits.length - 1];
-  const output = root.entries.find((/** @type {any} */ entry) => entry.direction === 'out');
   return {
     id: group.id,
     at: first.gridTimestamp,
@@ -377,7 +383,7 @@ function buildRun(group, components, ports) {
       ? failed === root
         ? failed.error
         : `${failed.label}: ${failed.error}`
-      : (output || root.entries[0]).summary,
+      : headline(root.output) || summarize(root.output ?? group.hits[0].msg),
     root: tree
   };
 }
@@ -403,6 +409,27 @@ function summarize(/** @type {unknown} */ msg) {
   const text = typeof msg === 'string' ? msg : JSON.stringify(msg ?? '');
   // Redact before cutting, so a credential split by the cut is still masked
   return redact(text.replace(/\s+/g, ' ')).slice(0, 200);
+}
+
+/**
+ * What a trigger delivered, in a few words: the number and title (or name) of the item, as
+ * issues, pull requests and the like have them — on the item itself or on its `subject`.
+ * Empty when the payload has neither.
+ */
+function headline(/** @type {unknown} */ msg) {
+  try {
+    const item = typeof msg === 'string' ? JSON.parse(msg) : msg;
+    const title = [item?.title, item?.subject?.title, item?.name].find(
+      (value) => typeof value === 'string' && value
+    );
+    if (!title) return '';
+    return redact(`${typeof item.number === 'number' ? `#${item.number} ` : ''}${title}`).slice(
+      0,
+      200
+    );
+  } catch {
+    return '';
+  }
 }
 
 /** Pretty-prints a JSON-string log field; other values are returned as they are. */

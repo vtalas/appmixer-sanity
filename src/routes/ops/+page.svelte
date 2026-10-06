@@ -98,6 +98,16 @@
   }
 
   /**
+   * The components a component's output went to, whichever port they hang on.
+   * @param {any} node
+   * @returns {any[]}
+   */
+  const below = (node) => [
+    ...(node.ports || []).flatMap((/** @type {any} */ port) => port.children),
+    ...node.children
+  ];
+
+  /**
    * What a component of a run has to say for itself on its row.
    * @param {any} node
    */
@@ -167,9 +177,10 @@
   {/if}
 {/snippet}
 
-<!-- One component of a run with what its output set off below it. The root (the trigger)
-     is the run's own row and carries `run`. -->
-{#snippet treeNode(
+<!-- One component of a run on its row. The trigger is the run's own row and carries `run`.
+     A component that set off exactly one other is followed by it on the same level, so a
+     chain reads top to bottom; only a component that set off several opens into branches. -->
+{#snippet step(
   /** @type {any} */ panel,
   /** @type {string} */ path,
   /** @type {any} */ node,
@@ -177,7 +188,8 @@
 )}
   {@const key = `${path}/${node.id}`}
   {@const dataKey = `${key}:data`}
-  {@const expandable = (node.ports?.length || node.children.length) > 0}
+  {@const next = below(node)}
+  {@const expandable = run ? next.length > 0 : next.length > 1}
   <!-- A run opens on a click; below it, the way to a failure is already open -->
   {@const expanded = expandable && (panel.open[key] ?? (!run && node.failing))}
   {@const status = run ? run.status : node.retries ? 'retried' : node.status}
@@ -198,6 +210,12 @@
         {/if}
         <span class="px-1.5 rounded border whitespace-nowrap {statusClass[status]}">{status}</span>
         <span class="font-medium whitespace-nowrap" title={node.type}>{node.label}</span>
+        {#if !expandable || run}
+          <!-- Which way it went, where the branches themselves are not on show -->
+          {#each (node.ports || []).filter((/** @type {any} */ p) => p.fired) as port (port.name)}
+            <code class="px-1.5 rounded border bg-background whitespace-nowrap">{port.name}</code>
+          {/each}
+        {/if}
         <span
           class="truncate {status === 'error' ? 'text-red-700' : 'text-muted-foreground'}"
           title={text}>{text}</span
@@ -262,49 +280,59 @@
     {/if}
     {#if expanded}
       <div class="ml-[5px] pl-4 border-l">
-        {#each node.ports || [] as port (port.name)}
-          {@const portKey = `${key}>${port.name}`}
-          {@const portOpen = port.children.length > 0 && (panel.open[portKey] ?? true)}
-          <div>
-            <button
-              type="button"
-              class="flex items-center gap-2 py-1 text-left"
-              disabled={!port.children.length}
-              onclick={() => (panel.open[portKey] = !portOpen)}
-            >
-              {#if port.children.length}
-                {@render chevron(portOpen)}
-              {:else}
-                <span class="w-3 shrink-0"></span>
-              {/if}
-              <code
-                class="px-1.5 rounded border {port.fired
-                  ? 'bg-background'
-                  : 'text-muted-foreground'}">{port.name}</code
-              >
-              <span class="text-muted-foreground">
-                {#if port.children.length}
-                  {port.children.length} {port.children.length === 1 ? 'item' : 'items'}
-                {:else}
-                  {port.fired ? 'nothing connected' : 'nothing'}
-                {/if}
-              </span>
-            </button>
-            {#if portOpen}
-              <div class="ml-[5px] pl-4 border-l">
-                {#each port.children as child (child.id)}
-                  {@render treeNode(panel, portKey, child, null)}
-                {/each}
-              </div>
-            {/if}
-          </div>
-        {/each}
-        {#each node.children as child (child.id)}
-          {@render treeNode(panel, key, child, null)}
-        {/each}
+        {#if next.length === 1}
+          {@render step(panel, key, next[0], null)}
+        {:else}
+          {@render branches(panel, key, node)}
+        {/if}
       </div>
     {/if}
   </div>
+  {#if !run && next.length === 1}
+    {@render step(panel, key, next[0], null)}
+  {/if}
+{/snippet}
+
+<!-- The out ports of a component that set off several others, each with what hangs on it -->
+{#snippet branches(/** @type {any} */ panel, /** @type {string} */ key, /** @type {any} */ node)}
+  {#each node.ports || [] as port (port.name)}
+    {@const portKey = `${key}>${port.name}`}
+    {@const portOpen = port.children.length > 0 && (panel.open[portKey] ?? true)}
+    <div>
+      <button
+        type="button"
+        class="flex items-center gap-2 py-1 text-left"
+        disabled={!port.children.length}
+        onclick={() => (panel.open[portKey] = !portOpen)}
+      >
+        {#if port.children.length}
+          {@render chevron(portOpen)}
+        {:else}
+          <span class="w-3 shrink-0"></span>
+        {/if}
+        <code class="px-1.5 rounded border {port.fired ? 'bg-background' : 'text-muted-foreground'}"
+          >{port.name}</code
+        >
+        <span class="text-muted-foreground">
+          {#if port.children.length}
+            {port.children.length} {port.children.length === 1 ? 'item' : 'items'}
+          {:else}
+            {port.fired ? 'nothing connected' : 'nothing'}
+          {/if}
+        </span>
+      </button>
+      {#if portOpen}
+        <div class="ml-[5px] pl-4 border-l">
+          {#each port.children as child (child.id)}
+            {@render step(panel, portKey, child, null)}
+          {/each}
+        </div>
+      {/if}
+    </div>
+  {/each}
+  {#each node.children as child (child.id)}
+    {@render step(panel, key, child, null)}
+  {/each}
 {/snippet}
 
 <div class="space-y-8">
@@ -545,7 +573,7 @@
                     >
                       {#each panel.runs as run (run.id)}
                         <div class="px-3 py-0.5">
-                          {@render treeNode(panel, run.id, run.root, run)}
+                          {@render step(panel, run.id, run.root, run)}
                         </div>
                       {/each}
                     </div>
