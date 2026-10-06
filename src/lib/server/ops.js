@@ -22,10 +22,11 @@ import { getGitHubConfig } from '$lib/api/github.js';
 export const HUB_CATEGORY = 'appmixer-sanity-hub';
 const ERROR_WINDOW_DAYS = 7;
 const INACTIVE_DAYS = 30;
-// Run tree of an instance: log entries read per request, and how much of one is sent
-const LOG_ENTRIES = 300;
-const ERROR_ENTRIES = 100;
-const ERROR_RUNS = 20;
+// Run tree of an instance: runs per page, the entries read to find a page and to read its
+// runs in full, and how much of one entry is sent
+const RUNS_PAGE = 10;
+const HEAD_ENTRIES = 40;
+const RUN_ENTRIES = 1000;
 const DETAIL_LIMIT = 20000;
 /** Node of the entries that belong to no component: the flow was started or stopped. */
 const FLOW_NODE = 'flow';
@@ -137,51 +138,63 @@ function outPortNames(baseUrl, token, type) {
 }
 
 /**
- * Runs of one integration instance, newest first, for the run tree on /ops. A run is one
- * firing of the trigger with everything it set off; each run is a tree of the components it
- * went through.
+ * One page of the runs of an integration instance, newest first, for the run tree on /ops.
+ * A run is one firing of the trigger with everything it set off; each run is a tree of the
+ * components it went through.
  * @param {string} userId - caller's email, or '' for the env configuration
  * @param {string} flowId
- * @param {{ errorsOnly?: boolean }} [options]
+ * @param {{ errorsOnly?: boolean, before?: string }} [options] - `before` is the `next` of
+ *   the page above: only runs that started earlier are returned
+ * @returns {Promise<{ runs: any[], next: string | null }>}
  */
-export async function listFlowRuns(userId, flowId, { errorsOnly = false } = {}) {
+export async function listFlowRuns(userId, flowId, { errorsOnly = false, before = '' } = {}) {
   const { baseUrl, token } = await getAppmixerSession(userId);
   /** @param {string} query @param {number} size */
   const search = async (query, size) => {
     const data = await appmixerGet(baseUrl, token, '/logs', {
       flowId,
-      ...(query ? { query } : {}),
+      query,
       sort: 'gridTimestamp:desc',
       size: String(size)
     });
     return /** @type {any[]} */ (data.hits || []);
   };
+  /** @param {string[]} ids */
+  const anyOf = (ids) => `(${ids.map((id) => `"${id}"`).join(' OR ')})`;
 
-  const [found, definition] = await Promise.all([
-    search(errorsOnly ? 'severity:error' : '', errorsOnly ? ERROR_ENTRIES : LOG_ENTRIES),
-    // Error entries carry neither a label nor a sender, so both come from the flow itself
-    appmixerGet(baseUrl, token, `/flows/${flowId}`, { projection: 'flow' }).catch(() => null)
-  ]);
-
-  let hits = found;
-  let full = found.length === LOG_ENTRIES;
-  if (errorsOnly) {
-    // An error entry is one line of its run; the rest of the run comes by correlation id
-    const ids = [...new Set(found.map((hit) => hit.correlationId).filter(Boolean))].slice(
-      0,
-      ERROR_RUNS
-    );
-    const correlated = ids.length
-      ? await search(`correlationId:(${ids.map((id) => `"${id}"`).join(' OR ')})`, LOG_ENTRIES)
-      : [];
-    hits = [...correlated, ...found.filter((hit) => !hit.correlationId)];
-    full = correlated.length === LOG_ENTRIES;
-  }
-
-  const groups = groupRuns(hits);
-
+  // The flow itself tells which components are triggers, and gives error entries the label
+  // and the sender they do not carry.
+  const definition = await appmixerGet(baseUrl, token, `/flows/${flowId}`, { projection: 'flow' });
   /** @type {Record<string, any>} */
   const components = definition?.flow || {};
+  const triggers = Object.keys(components).filter(
+    (id) => !Object.keys(components[id].source || {}).length
+  );
+
+  // A page is found by its runs' first entries alone, so that only the runs it shows are
+  // read in full. A run starts where a trigger sends its output, or at an entry that belongs
+  // to no run: a failed poll, the flow being started. With errors only, at an error.
+  const starts = errorsOnly
+    ? 'severity:error'
+    : [
+        ...(triggers.length ? [`(portType:out AND componentId:${anyOf(triggers)})`] : []),
+        '(NOT _exists_:correlationId)'
+      ].join(' OR ');
+  const heads = await search(
+    before ? `(${starts}) AND gridTimestamp:{* TO "${before}"}` : starts,
+    HEAD_ENTRIES
+  );
+  const found = groupRuns(heads).reverse();
+  const page = found.slice(0, RUNS_PAGE);
+  const more = found.length > RUNS_PAGE || heads.length === HEAD_ENTRIES;
+
+  const ids = [...new Set(page.map((group) => group.hits[0].correlationId).filter(Boolean))];
+  const correlated = ids.length ? await search(`correlationId:${anyOf(ids)}`, RUN_ENTRIES) : [];
+  const hits = [
+    ...correlated,
+    ...page.flatMap((group) => group.hits).filter((hit) => !hit.correlationId)
+  ];
+
   const types = [
     ...new Set(
       hits.map((hit) => hit.componentType || components[hit.componentId]?.type).filter(Boolean)
@@ -191,12 +204,19 @@ export async function listFlowRuns(userId, flowId, { errorsOnly = false } = {}) 
     await Promise.all(types.map(async (type) => [type, await outPortNames(baseUrl, token, type)]))
   );
 
-  const runs = groups.map((group) => buildRun(group, components, ports)).reverse();
-  // A full page cuts the oldest runs short at their beginning: what is left of them starts
-  // at a component that has an input, not at a trigger.
-  return full
-    ? runs.filter((run) => !Object.keys(components[run.root.id]?.source || {}).length)
-    : runs;
+  const runs = groupRuns(hits)
+    .map((group) => buildRun(group, components, ports))
+    .reverse();
+  return {
+    // Runs too long to be read whole lose their beginning: what is left of them starts at a
+    // component that has an input, not at a trigger.
+    runs:
+      correlated.length === RUN_ENTRIES
+        ? runs.filter((run) => !Object.keys(components[run.root.id]?.source || {}).length)
+        : runs,
+    // Where the next page starts: before the oldest run of this one
+    next: more && page.length ? page[page.length - 1].hits[0].gridTimestamp : null
+  };
 }
 
 /**
@@ -213,7 +233,11 @@ function groupRuns(hits) {
   const correlated = new Map();
   /** @type {{ componentId: string, at: number, group: { hits: any[] } } | null} */
   let loose = null;
-  for (const hit of [...hits].sort((a, b) => time(a) - time(b))) {
+  // Entries of the same millisecond keep one order, so a run has the same id on every request
+  const inOrder = [...hits].sort(
+    (a, b) => time(a) - time(b) || String(a._id).localeCompare(String(b._id))
+  );
+  for (const hit of inOrder) {
     if (hit.correlationId) {
       let group = correlated.get(hit.correlationId);
       if (!group) {

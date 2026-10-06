@@ -26,27 +26,44 @@
     workflowsWaiting: activeWorkflows.reduce((n, w) => n + (w.recent?.waiting || 0), 0)
   });
 
-  // Run panels, one per instance, loaded on demand from /api/ops/runs. `open` holds what is
-  // expanded in the tree, by path: a run, a component, one of its ports, its data, an entry.
-  /** @type {Record<string, { errorsOnly: boolean, loading: boolean, error: string | null, runs: any[], open: Record<string, boolean> }>} */
+  // Run panels, one per instance, loaded a page at a time from /api/ops/runs. `next` is
+  // where the page after the runs shown starts (null: there is none), `more` whether that
+  // page is the one being loaded. `open` holds what is expanded in the tree, by path: a run,
+  // a component, one of its ports, its data, an entry.
+  /** @type {Record<string, { errorsOnly: boolean, loading: boolean, more: boolean, error: string | null, runs: any[], next: string | null, open: Record<string, boolean> }>} */
   let logPanels = $state({});
 
-  /** @param {string} flowId @param {boolean} errorsOnly */
-  async function loadLogs(flowId, errorsOnly) {
+  /**
+   * Loads the newest runs of an instance, or with `more` the page after the ones shown.
+   * @param {string} flowId @param {boolean} errorsOnly @param {boolean} [more]
+   */
+  async function loadLogs(flowId, errorsOnly, more = false) {
+    const shown = logPanels[flowId];
+    const before = more && shown?.next ? `&before=${encodeURIComponent(shown.next)}` : '';
     logPanels[flowId] = {
       errorsOnly,
       loading: true,
+      more,
       error: null,
-      runs: logPanels[flowId]?.runs || [],
-      open: logPanels[flowId]?.open || {}
+      runs: shown?.runs || [],
+      next: more ? (shown?.next ?? null) : null,
+      open: shown?.open || {}
     };
     try {
       const response = await fetch(
-        `/api/ops/runs?flowId=${flowId}${errorsOnly ? '&errors=1' : ''}`
+        `/api/ops/runs?flowId=${flowId}${errorsOnly ? '&errors=1' : ''}${before}`
       );
       const body = await response.json().catch(() => null);
       if (!response.ok) throw new Error(body?.message || `HTTP ${response.status}`);
-      if (logPanels[flowId]) logPanels[flowId].runs = body.runs;
+      const panel = logPanels[flowId];
+      if (panel) {
+        // A run with errors on both sides of a page boundary comes with both pages
+        const known = new Set(more ? panel.runs.map((run) => run.id) : []);
+        panel.runs = more
+          ? [...panel.runs, ...body.runs.filter((/** @type {any} */ run) => !known.has(run.id))]
+          : body.runs;
+        panel.next = body.next;
+      }
     } catch (e) {
       if (logPanels[flowId]) logPanels[flowId].error = /** @type {Error} */ (e).message;
     } finally {
@@ -549,7 +566,7 @@
                 <div class="ml-3 border rounded-md bg-muted/30">
                   <div class="flex items-center gap-2 px-3 py-2 border-b text-xs">
                     <span class="font-medium"
-                      >{panel.loading
+                      >{panel.loading && !panel.more
                         ? 'Loading…'
                         : `Last ${panel.runs.length} runs${panel.errorsOnly ? ' with errors' : ''}`}</span
                     >
@@ -591,7 +608,8 @@
                     </div>
                   {:else}
                     <div
-                      class="max-h-[70vh] overflow-auto divide-y text-xs {panel.loading
+                      class="max-h-[70vh] overflow-auto divide-y text-xs {panel.loading &&
+                      !panel.more
                         ? 'opacity-50'
                         : ''}"
                     >
@@ -600,6 +618,16 @@
                           {@render step(panel, run.id, run.root, run)}
                         </div>
                       {/each}
+                      {#if panel.next}
+                        <button
+                          type="button"
+                          class="w-full px-3 py-2 text-left text-muted-foreground hover:text-foreground hover:bg-muted/50"
+                          disabled={panel.loading}
+                          onclick={() => loadLogs(instance.flowId, panel.errorsOnly, true)}
+                        >
+                          {panel.loading && panel.more ? 'Loading…' : 'Load next…'}
+                        </button>
+                      {/if}
                     </div>
                   {/if}
                 </div>
