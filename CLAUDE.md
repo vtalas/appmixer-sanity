@@ -137,7 +137,7 @@ Monthly report of what is released, from the **release repo** (`Appmixer-ai/appm
 - **Released this month** — every commit on master in the month whose message is a release message, `<connector> <version> (new|major|minor|patch)` (the convention the release page writes), counted per type (the type tiles filter the list); the remaining commits are kept aside as "other".
 
 - **`src/lib/server/statistics.js`** — `loadMonthlyStatistics(userId, month)`: three GitHub commit queries (last commit before month end, last before month start, commits of the month) + `fetchTreeFiles` of the month-end tree (cached by tree sha in memory in `release/compare.js`), bundle.json blobs via `readBundles` (DB cache by blob sha). Components and flows are attributed to the nearest connector directory (`ownerOf`), so nested connectors (`microsoft/calendar`) count for themselves.
-- **`statistics_tree_counts`** table (`src/lib/db/statistics.js`) — the three counts per tree sha, so the previous month's tree is never downloaded again (content-addressed, never invalidated).
+- **`statistics_tree_counts`** table (`src/lib/db/statistics.js`) — the three counts plus the connector directories per tree sha, so the previous month's tree is never downloaded again (content-addressed, never invalidated). The directories give the connectors added and removed during the month, shown next to the net change (September 2026: 5 new, hubbi removed = +4).
 
 ## Connector PRs (`/prs`)
 

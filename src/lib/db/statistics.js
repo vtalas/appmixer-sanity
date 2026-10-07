@@ -1,10 +1,11 @@
 import { getDb } from './index.js';
 
 /**
- * Connector / component / E2E flow counts of git trees, by tree sha.
+ * Connector / component / E2E flow counts of git trees (plus the connector
+ * directories, to tell which connectors came and went), by tree sha.
  * Content-addressed, so an entry never goes stale.
  * @param {string[]} treeShas
- * @returns {Promise<Map<string, {connectors: number, components: number, e2eFlows: number}>>}
+ * @returns {Promise<Map<string, {connectors: number, components: number, e2eFlows: number, roots?: string[]}>>}
  */
 export async function getTreeCounts(treeShas) {
   const counts = new Map();
@@ -25,7 +26,7 @@ export async function getTreeCounts(treeShas) {
 
 /**
  * @param {string} treeSha
- * @param {{connectors: number, components: number, e2eFlows: number}} counts
+ * @param {{connectors: number, components: number, e2eFlows: number, roots: string[]}} counts
  */
 export async function saveTreeCounts(treeSha, counts) {
   await getDb().execute({

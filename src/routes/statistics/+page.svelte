@@ -310,8 +310,17 @@
               {#if tile.delta}
                 <span
                   class="text-sm font-semibold tabular-nums {tile.delta.class}"
-                  title="Change during the month">{tile.delta.text}</span
+                  title="Net change during the month">{tile.delta.text}</span
                 >
+              {/if}
+              {#if tile.key === 'connectors' && data.connectorChanges && data.connectorChanges.removed.length > 0}
+                <span
+                  class="text-xs text-muted-foreground tabular-nums"
+                  title="Added and removed during the month"
+                >
+                  (+{data.connectorChanges.added.length} added, −{data.connectorChanges.removed
+                    .length} removed)
+                </span>
               {/if}
             </span>
             <span class="text-sm font-medium mt-1">{tile.label}</span>
@@ -320,6 +329,32 @@
         </div>
       {/each}
     </div>
+    {#if data.connectorChanges && (data.connectorChanges.added.length > 0 || data.connectorChanges.removed.length > 0)}
+      <div class="mt-2 text-sm flex flex-wrap items-center gap-x-4 gap-y-1">
+        {#if data.connectorChanges.added.length > 0}
+          <span class="inline-flex flex-wrap items-center gap-1">
+            <span class="text-muted-foreground">Connectors added:</span>
+            {#each data.connectorChanges.added as name (name)}
+              <code
+                class="text-xs rounded-full border px-2 py-0.5 bg-blue-50 text-blue-800 border-blue-200"
+                >{name}</code
+              >
+            {/each}
+          </span>
+        {/if}
+        {#if data.connectorChanges.removed.length > 0}
+          <span class="inline-flex flex-wrap items-center gap-1">
+            <span class="text-muted-foreground">removed:</span>
+            {#each data.connectorChanges.removed as name (name)}
+              <code
+                class="text-xs rounded-full border px-2 py-0.5 bg-red-50 text-red-800 border-red-200 line-through"
+                >{name}</code
+              >
+            {/each}
+          </span>
+        {/if}
+      </div>
+    {/if}
   </div>
 
   <!-- Releases of the month -->

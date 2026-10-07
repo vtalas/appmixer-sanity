@@ -22,6 +22,7 @@ export async function load({ locals, url }) {
       head: null,
       counts: { connectors: 0, components: 0, e2eFlows: 0 },
       previous: null,
+      connectorChanges: null,
       releases: [],
       releasesByType: /** @type {Record<string, number>} */ ({
         new: 0,

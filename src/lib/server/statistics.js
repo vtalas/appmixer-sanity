@@ -184,18 +184,27 @@ function summarizeTree(files) {
 }
 
 /**
- * Counts of a tree — from the DB when the tree was counted before.
+ * What the DB keeps of a tree: the counts and the connector directories
+ * @param {ReturnType<typeof summarizeTree>} summary
+ */
+function treeRecord(summary) {
+  return { ...summary.counts, roots: [...summary.roots].sort() };
+}
+
+/**
+ * Counts and connector directories of a tree — from the DB when the tree was
+ * counted before.
  * @param {string} token
  * @param {string} fullName
  * @param {string} treeSha
- * @returns {Promise<Counts>}
+ * @returns {Promise<Counts & {roots: string[]}>}
  */
 async function treeCounts(token, fullName, treeSha) {
   const cached = (await getTreeCounts([treeSha])).get(treeSha);
-  if (cached) return cached;
-  const { counts } = summarizeTree(await fetchTreeFiles(token, fullName, treeSha));
-  await saveTreeCounts(treeSha, counts);
-  return counts;
+  if (cached && Array.isArray(cached.roots)) return { ...cached, roots: cached.roots };
+  const record = treeRecord(summarizeTree(await fetchTreeFiles(token, fullName, treeSha)));
+  await saveTreeCounts(treeSha, record);
+  return record;
 }
 
 /**
@@ -266,18 +275,31 @@ export async function loadMonthlyStatistics(userId, month) {
       head: null,
       counts: { connectors: 0, components: 0, e2eFlows: 0 },
       previous: null,
+      connectorChanges: null,
       connectors: [],
       e2eFlows: []
     };
   }
 
-  const [files, previousCounts, cachedCounts] = await Promise.all([
+  const [files, previousTree, cachedCounts] = await Promise.all([
     fetchTreeFiles(token, target.fullName, head.treeSha),
     previousHead ? treeCounts(token, target.fullName, previousHead.treeSha) : null,
     getTreeCounts([head.treeSha])
   ]);
   const summary = summarizeTree(files);
-  if (!cachedCounts.has(head.treeSha)) await saveTreeCounts(head.treeSha, summary.counts);
+  if (!cachedCounts.get(head.treeSha)?.roots) {
+    await saveTreeCounts(head.treeSha, treeRecord(summary));
+  }
+
+  // Connectors that came and went during the month — the net change of the
+  // connector count hides a removal behind the new ones (5 new, 1 removed = +4)
+  const previousRoots = new Set(previousTree?.roots || []);
+  const connectorChanges = previousTree
+    ? {
+        added: [...summary.roots].filter((root) => !previousRoots.has(root)).sort(),
+        removed: [...previousRoots].filter((root) => !summary.roots.has(root)).sort()
+      }
+    : null;
 
   // Links pin the month's commit — a link into `master` would drift away from the month
   const fileUrl = (/** @type {string} */ path) =>
@@ -310,9 +332,16 @@ export async function loadMonthlyStatistics(userId, month) {
       ? {
           month: range.previousKey,
           head: { sha: previousHead.sha, url: previousHead.url, date: previousHead.date },
-          counts: previousCounts
+          counts: previousTree
+            ? {
+                connectors: previousTree.connectors,
+                components: previousTree.components,
+                e2eFlows: previousTree.e2eFlows
+              }
+            : null
         }
       : null,
+    connectorChanges,
     connectors,
     e2eFlows: summary.e2eFlows.map((flow) => ({ ...flow, url: fileUrl(flow.path) }))
   };
