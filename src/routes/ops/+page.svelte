@@ -32,6 +32,9 @@
   // a component, one of its ports, its data, an entry.
   /** @type {Record<string, { errorsOnly: boolean, loading: boolean, more: boolean, error: string | null, runs: any[], next: string | null, open: Record<string, boolean> }>} */
   let logPanels = $state({});
+  /** Hook runs expanded to their steps and closing text, by the run's timestamp. */
+  /** @type {Record<string, boolean>} */
+  let openHookRuns = $state({});
 
   /**
    * Loads the newest runs of an instance, or with `more` the page after the ones shown.
@@ -768,20 +771,74 @@
         </div>
       </div>
       {#if openclaw.hookRuns?.length}
+        <!-- One row per hook call (a gateway journal line), with what the agent's session
+             transcript says about it: the PR, how long it took, model calls and cost. A row
+             expands to the exec steps by title and the agent's closing text. -->
         <div class="border rounded-lg divide-y">
-          {#each openclaw.hookRuns as run}
-            <div class="px-3 py-2 flex flex-wrap items-center gap-3 text-xs">
-              <span
-                class="px-2 py-0.5 rounded border {run.status === 'ok'
-                  ? 'bg-green-50 text-green-700 border-green-200'
-                  : 'bg-red-50 text-red-700 border-red-200'}">{run.status}</span
+          {#each openclaw.hookRuns as run (run.at)}
+            {@const details = run.steps?.length || run.result}
+            <div class="px-3 py-2 text-xs space-y-1">
+              <button
+                type="button"
+                class="flex flex-wrap items-center gap-3 w-full text-left {details
+                  ? ''
+                  : 'cursor-default'}"
+                onclick={() => {
+                  if (details) openHookRuns[run.at] = !openHookRuns[run.at];
+                }}
               >
-              <span>{ago(run.at)}</span>
-              <span class="text-muted-foreground">{run.model}</span>
-              {#if run.summary}<span
-                  class="text-muted-foreground truncate max-w-2xl"
-                  title={run.summary}>{run.summary}</span
-                >{/if}
+                {#if details}
+                  {#if openHookRuns[run.at]}<ChevronDown class="h-3 w-3" />{:else}<ChevronRight
+                      class="h-3 w-3"
+                    />{/if}
+                {/if}
+                <span
+                  class="px-2 py-0.5 rounded border {run.status === 'ok'
+                    ? 'bg-green-50 text-green-700 border-green-200'
+                    : 'bg-red-50 text-red-700 border-red-200'}">{run.status}</span
+                >
+                <span>{ago(run.at)}</span>
+                {#if run.pr}
+                  <a
+                    class="hover:underline font-medium"
+                    href="https://github.com/Appmixer-ai/appmixer-connectors/pull/{run.pr}"
+                    target="_blank"
+                    rel="noreferrer"
+                    onclick={(e) => e.stopPropagation()}>PR #{run.pr}</a
+                  >
+                {/if}
+                {#if run.durationSec != null}<span class="text-muted-foreground"
+                    >{run.durationSec} s</span
+                  >{/if}
+                {#if run.modelCalls}<span class="text-muted-foreground"
+                    >{run.modelCalls} model calls · {run.toolCalls} steps</span
+                  >{/if}
+                {#if run.costUsd != null}<span class="text-muted-foreground"
+                    >${run.costUsd.toFixed(3)}</span
+                  >{/if}
+                <span class="text-muted-foreground">{run.model}</span>
+                {#if run.summary}<span
+                    class="text-muted-foreground truncate max-w-2xl"
+                    title={run.summary}>{run.summary}</span
+                  >{/if}
+              </button>
+              {#if details && openHookRuns[run.at]}
+                <div class="pl-6 space-y-1">
+                  {#if run.steps?.length}
+                    <ol class="list-decimal pl-4 text-muted-foreground">
+                      {#each run.steps as step}<li>{step}</li>{/each}
+                    </ol>
+                  {/if}
+                  {#if run.result}
+                    <div class="whitespace-pre-wrap border-l-2 pl-2">{run.result}</div>
+                  {/if}
+                  {#if run.commentUrl}
+                    <a class="hover:underline" href={run.commentUrl} target="_blank" rel="noreferrer"
+                      >the reply on GitHub</a
+                    >
+                  {/if}
+                </div>
+              {/if}
             </div>
           {/each}
         </div>
