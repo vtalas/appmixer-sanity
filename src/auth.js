@@ -7,7 +7,11 @@ export const { handle, signIn, signOut } = SvelteKitAuth(async (event) => {
 		providers: [
 			Google({
 				clientId: env.GOOGLE_CLIENT_ID,
-				clientSecret: env.GOOGLE_CLIENT_SECRET
+				clientSecret: env.GOOGLE_CLIENT_SECRET,
+				// Always show Google's account chooser, filtered to the appmixer.ai
+				// Workspace: with one signed-in Google account (a phone), Google would
+				// otherwise pick it silently and a personal account ends in "Access Denied"
+				authorization: { params: { prompt: 'select_account', hd: 'appmixer.ai' } }
 			})
 		],
 		secret: env.AUTH_SECRET,
