@@ -31,6 +31,8 @@
   <header class="border-b bg-background">
     <div class="container mx-auto px-4 py-4 flex items-center justify-between">
       <a href="/" class="text-xl font-bold">Appmixer Sanity Check</a>
+      <!-- Every page but /login needs a session, so the menu is for signed-in users only -->
+      {#if data.session?.user}
       <nav class="flex items-center gap-4">
         <a href="/" class="text-sm text-muted-foreground hover:text-foreground">Dashboard</a>
         <a href="/e2e-flows" class="text-sm text-muted-foreground hover:text-foreground">E2E Flows</a>
@@ -41,11 +43,10 @@
         <a href="/automation-hub" class="text-sm text-muted-foreground hover:text-foreground">Automation Hub</a>
         <a href="/ops" class="text-sm text-muted-foreground hover:text-foreground">Operations</a>
         <a href="/settings" class="text-sm text-muted-foreground hover:text-foreground">Settings</a>
-        {#if data.session?.user}
-          <span class="text-sm text-muted-foreground">{data.session.user.email}</span>
-          <Button variant="outline" size="sm" onclick={() => signOut()}>Sign out</Button>
-        {/if}
+        <span class="text-sm text-muted-foreground">{data.session.user.email}</span>
+        <Button variant="outline" size="sm" onclick={() => signOut()}>Sign out</Button>
       </nav>
+      {/if}
     </div>
   </header>
 
