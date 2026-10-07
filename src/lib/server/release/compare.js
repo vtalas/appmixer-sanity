@@ -165,44 +165,55 @@ export async function mapLimit(items, limit, fn) {
 }
 
 /**
+ * Every file under src/appmixer/ of a git tree with its blob sha and mode.
+ * Trees are content-addressed, so the result is cached by tree sha.
+ * @param {string} token
+ * @param {string} fullName - "owner/repo"
+ * @param {string} treeSha
+ * @returns {Promise<Map<string, {sha: string, mode: string}>>}
+ */
+export async function fetchTreeFiles(token, fullName, treeSha) {
+  let files = treeCache.get(treeSha);
+  if (files) return files;
+
+  const tree = await githubRequest(
+    token,
+    'GET',
+    `/repos/${fullName}/git/trees/${treeSha}?recursive=1`
+  );
+  if (tree.truncated) {
+    throw new Error(`The git tree ${treeSha} of ${fullName} is too large to list in one request`);
+  }
+  files = new Map();
+  for (const item of tree.tree) {
+    if (item.type === 'blob' && item.path.startsWith(CONNECTORS_ROOT)) {
+      files.set(item.path, { sha: item.sha, mode: item.mode });
+    }
+  }
+  treeCache.set(treeSha, files);
+  const oldest = treeCache.keys().next().value;
+  if (treeCache.size > TREE_CACHE_SIZE && oldest) treeCache.delete(oldest);
+  return files;
+}
+
+/**
  * Branch head + every file under src/appmixer/ with its blob sha and mode.
  * @param {string} token
  * @param {RepoRef} repo
  */
 export async function fetchSnapshot(token, repo) {
-  const base = `/repos/${repo.fullName}`;
   const branch = await githubRequest(
     token,
     'GET',
-    `${base}/branches/${encodeURIComponent(repo.branch)}`
+    `/repos/${repo.fullName}/branches/${encodeURIComponent(repo.branch)}`
   );
   const treeSha = branch.commit.commit.tree.sha;
-
-  let files = treeCache.get(treeSha);
-  if (!files) {
-    const tree = await githubRequest(token, 'GET', `${base}/git/trees/${treeSha}?recursive=1`);
-    if (tree.truncated) {
-      throw new Error(
-        `The git tree of ${repo.fullName}@${repo.branch} is too large to list in one request`
-      );
-    }
-    files = new Map();
-    for (const item of tree.tree) {
-      if (item.type === 'blob' && item.path.startsWith(CONNECTORS_ROOT)) {
-        files.set(item.path, { sha: item.sha, mode: item.mode });
-      }
-    }
-    treeCache.set(treeSha, files);
-    const oldest = treeCache.keys().next().value;
-    if (treeCache.size > TREE_CACHE_SIZE && oldest) treeCache.delete(oldest);
-  }
-
   return {
     repo,
     commitSha: branch.commit.sha,
     treeSha,
     committedAt: branch.commit.commit.committer?.date || null,
-    files
+    files: await fetchTreeFiles(token, repo.fullName, treeSha)
   };
 }
 

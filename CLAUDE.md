@@ -131,9 +131,13 @@ Everything the page shows comes from a DB cache refreshed by an explicit **Scan*
 
 ## Statistics (`/statistics`)
 
-Counts of what is released: connectors (`bundle.json` files), components (`component.json` files) and E2E test flows (`test-flow*.json` files) on the **release repo** (`Appmixer-ai/appmixer-components` `master` — `RELEASE_TARGET_*`, the same snapshot `/releases` compares against), plus every connector's `name`/`version` from its bundle.json and the list of flow files. The counting rule is the one of appmixer-component-preview's Statistics panel (files by name anywhere under `src/appmixer/`), so the numbers match it on a checkout of the same branch.
+Monthly report of what is released, from the **release repo** (`Appmixer-ai/appmixer-components` `master` — `RELEASE_TARGET_*`, the same repo `/releases` compares against). `?month=YYYY-MM` (UTC months, default the current one) picks the month:
 
-- **`src/lib/server/statistics.js`** — `loadStatistics(userId)`: one `fetchSnapshot` of the release branch (tree cached by sha in `release/compare.js`) + the bundle.json blobs (DB cache by blob sha via `readBundles`); components and flows are attributed to the nearest connector directory (`ownerOf`), so nested connectors (`microsoft/calendar`) count for themselves.
+- **State at the end of the month** — counts of connectors (`bundle.json` files), components (`component.json` files) and E2E test flows (`test-flow*.json` files) in the tree of the last commit on master before the month ended, with the change against the end of the previous month. The counting rule is the one of appmixer-component-preview's Statistics panel (files by name anywhere under `src/appmixer/`), so the numbers match it on a checkout of the same commit. Every connector's `name`/`version` and the flow files of that commit are listed too (links pin the commit, not `master`).
+- **Released this month** — every commit on master in the month whose message is a release message, `<connector> <version> (new|major|minor|patch)` (the convention the release page writes), counted per type (the type tiles filter the list); the remaining commits are kept aside as "other".
+
+- **`src/lib/server/statistics.js`** — `loadMonthlyStatistics(userId, month)`: three GitHub commit queries (last commit before month end, last before month start, commits of the month) + `fetchTreeFiles` of the month-end tree (cached by tree sha in memory in `release/compare.js`), bundle.json blobs via `readBundles` (DB cache by blob sha). Components and flows are attributed to the nearest connector directory (`ownerOf`), so nested connectors (`microsoft/calendar`) count for themselves.
+- **`statistics_tree_counts`** table (`src/lib/db/statistics.js`) — the three counts per tree sha, so the previous month's tree is never downloaded again (content-addressed, never invalidated).
 
 ## Connector PRs (`/prs`)
 
