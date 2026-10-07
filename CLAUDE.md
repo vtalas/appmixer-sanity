@@ -129,6 +129,16 @@ Everything the page shows comes from a DB cache refreshed by an explicit **Scan*
 - `E2E_MAX_CONCURRENT` — max flows running at once (default 1 — the instance must never run everything at once)
 - `E2E_RUN_TIMEOUT_SECONDS` — per-run completion timeout (default 480, same as `appmixer e2e run`)
 
+## Statistics (`/statistics`)
+
+Monthly report of what is released, from the **release repo** (`Appmixer-ai/appmixer-components` `master` — `RELEASE_TARGET_*`, the same repo `/releases` compares against). `?month=YYYY-MM` (UTC months, default the current one) picks the month:
+
+- **State at the end of the month** — counts of connectors (`bundle.json` files), components (`component.json` files) and E2E test flows (`test-flow*.json` files) in the tree of the last commit on master before the month ended, with the change against the end of the previous month. The counting rule is the one of appmixer-component-preview's Statistics panel (files by name anywhere under `src/appmixer/`), so the numbers match it on a checkout of the same commit. Every connector's `name`/`version` and the flow files of that commit are listed too (links pin the commit, not `master`).
+- **Released this month** — every commit on master in the month whose message is a release message, `<connector> <version> (new|major|minor|patch)` (the convention the release page writes), counted per type (the type tiles filter the list); the remaining commits are kept aside as "other".
+
+- **`src/lib/server/statistics.js`** — `loadMonthlyStatistics(userId, month)`: three GitHub commit queries (last commit before month end, last before month start, commits of the month) + `fetchTreeFiles` of the month-end tree (cached by tree sha in memory in `release/compare.js`), bundle.json blobs via `readBundles` (DB cache by blob sha). Components and flows are attributed to the nearest connector directory (`ownerOf`), so nested connectors (`microsoft/calendar`) count for themselves.
+- **`statistics_tree_counts`** table (`src/lib/db/statistics.js`) — the three counts plus the connector directories per tree sha, so the previous month's tree is never downloaded again (content-addressed, never invalidated). The directories give the connectors added and removed during the month, shown next to the net change (September 2026: 5 new, hubbi removed = +4).
+
 ## Connector PRs (`/prs`)
 
 Open PRs of the connectors repo with the E2E flow state of every connector they touch — the same per-flow view as `/e2e-flows` (sync status, last result, account badge) but grouped by PR.

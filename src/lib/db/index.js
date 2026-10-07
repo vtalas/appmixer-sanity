@@ -303,4 +303,14 @@ export async function initializeDatabase() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // Connector / component / E2E flow counts of a git tree (/statistics).
+  // Keyed by tree sha, so entries never go stale.
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS statistics_tree_counts (
+      tree_sha TEXT PRIMARY KEY,
+      counts TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
 }
