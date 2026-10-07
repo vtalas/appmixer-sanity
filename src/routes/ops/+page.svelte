@@ -759,8 +759,11 @@
               >{/if}
           </div>
           <div class="text-xs text-muted-foreground">
-            {openclaw.mentionResponder?.shadowEntries ?? 0} logged replies · {openclaw
-              .mentionResponder?.runs ?? 0} runs on disk
+            {(openclaw.mentionResponder?.recent || []).filter(
+              (/** @type {any} */ r) => r.status === 'replied'
+            )
+              .length} replied of the last {openclaw.mentionResponder?.recent?.length ?? 0} ·
+            {openclaw.mentionResponder?.runs ?? 0} runs on disk
           </div>
         </div>
       </div>
@@ -784,21 +787,43 @@
         </div>
       {/if}
       {#if openclaw.mentionResponder?.recent?.length}
+        <!-- Runs of the mention responder: one per hook call, what it found on the PR and what
+             it answered. skipped = resolve.sh found nothing to do (PR closed, not by apx-vero, or
+             every mention answered), pending = the agent is still working, failed = it never
+             wrote its replies, shadow = answered into the shadow log only. -->
         <div class="border rounded-lg divide-y">
           {#each openclaw.mentionResponder.recent as entry}
             <div class="px-3 py-2 text-xs space-y-1">
-              <div class="flex gap-3 text-muted-foreground">
-                <a
-                  class="hover:underline"
-                  href="https://github.com/Appmixer-ai/appmixer-connectors/pull/{entry.pr}"
-                  target="_blank"
-                  rel="noreferrer">PR #{entry.pr}</a
+              <div class="flex flex-wrap items-center gap-3">
+                <span
+                  class="px-2 py-0.5 rounded border {entry.status === 'replied'
+                    ? 'bg-green-50 text-green-700 border-green-200'
+                    : entry.status === 'failed'
+                      ? 'bg-red-50 text-red-700 border-red-200'
+                      : entry.status === 'skipped'
+                        ? 'bg-muted text-muted-foreground'
+                        : 'bg-amber-50 text-amber-800 border-amber-200'}">{entry.status}</span
                 >
-                <span>{entry.kind} {entry.id}</span>
-                <span>{ago(entry.at)}</span>
-                {#if entry.code_changed}<span class="text-amber-800">would push a change</span>{/if}
+                <a class="hover:underline font-medium" href={entry.url} target="_blank" rel="noreferrer"
+                  >PR #{entry.pr}{#if entry.title}
+                    · {entry.title}{/if}</a
+                >
+                <span class="text-muted-foreground">{ago(entry.at)}</span>
+                {#if entry.reason}<span class="text-muted-foreground">{entry.reason}</span>{/if}
+                {#if entry.mentions?.length}
+                  <span class="text-muted-foreground">
+                    {entry.mentions.length} mention{entry.mentions.length === 1 ? '' : 's'} by
+                    {[...new Set(entry.mentions.map((/** @type {any} */ m) => m.author))].join(', ')}
+                  </span>
+                {/if}
+                {#if entry.durationMs != null}
+                  <span class="text-muted-foreground">{Math.round(entry.durationMs / 1000)} s</span>
+                {/if}
+                {#if entry.code_changed}<span class="text-amber-800">pushed a change</span>{/if}
               </div>
-              <div class="whitespace-pre-wrap">{entry.body}</div>
+              {#each entry.replies || [] as reply}
+                <div class="whitespace-pre-wrap pl-2 border-l-2">{reply.body}</div>
+              {/each}
             </div>
           {/each}
         </div>
