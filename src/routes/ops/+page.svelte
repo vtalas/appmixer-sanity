@@ -32,6 +32,9 @@
   // a component, one of its ports, its data, an entry.
   /** @type {Record<string, { errorsOnly: boolean, loading: boolean, more: boolean, error: string | null, runs: any[], next: string | null, open: Record<string, boolean> }>} */
   let logPanels = $state({});
+  /** Hook runs expanded to their steps and closing text, by the run's timestamp. */
+  /** @type {Record<string, boolean>} */
+  let openHookRuns = $state({});
 
   /**
    * Loads the newest runs of an instance, or with `more` the page after the ones shown.
@@ -759,46 +762,125 @@
               >{/if}
           </div>
           <div class="text-xs text-muted-foreground">
-            {openclaw.mentionResponder?.shadowEntries ?? 0} logged replies · {openclaw
-              .mentionResponder?.runs ?? 0} runs on disk
+            {(openclaw.mentionResponder?.recent || []).filter(
+              (/** @type {any} */ r) => r.status === 'replied'
+            )
+              .length} replied of the last {openclaw.mentionResponder?.recent?.length ?? 0} ·
+            {openclaw.mentionResponder?.runs ?? 0} runs on disk
           </div>
         </div>
       </div>
       {#if openclaw.hookRuns?.length}
+        <!-- One row per hook call (a gateway journal line), with what the agent's session
+             transcript says about it: the PR, how long it took, model calls and cost. A row
+             expands to the exec steps by title and the agent's closing text. -->
         <div class="border rounded-lg divide-y">
-          {#each openclaw.hookRuns as run}
-            <div class="px-3 py-2 flex flex-wrap items-center gap-3 text-xs">
-              <span
-                class="px-2 py-0.5 rounded border {run.status === 'ok'
-                  ? 'bg-green-50 text-green-700 border-green-200'
-                  : 'bg-red-50 text-red-700 border-red-200'}">{run.status}</span
+          {#each openclaw.hookRuns as run (run.at)}
+            {@const details = run.steps?.length || run.result}
+            <div class="px-3 py-2 text-xs space-y-1">
+              <button
+                type="button"
+                class="flex flex-wrap items-center gap-3 w-full text-left {details
+                  ? ''
+                  : 'cursor-default'}"
+                onclick={() => {
+                  if (details) openHookRuns[run.at] = !openHookRuns[run.at];
+                }}
               >
-              <span>{ago(run.at)}</span>
-              <span class="text-muted-foreground">{run.model}</span>
-              {#if run.summary}<span
-                  class="text-muted-foreground truncate max-w-2xl"
-                  title={run.summary}>{run.summary}</span
-                >{/if}
+                {#if details}
+                  {#if openHookRuns[run.at]}<ChevronDown class="h-3 w-3" />{:else}<ChevronRight
+                      class="h-3 w-3"
+                    />{/if}
+                {/if}
+                <span
+                  class="px-2 py-0.5 rounded border {run.status === 'ok'
+                    ? 'bg-green-50 text-green-700 border-green-200'
+                    : 'bg-red-50 text-red-700 border-red-200'}">{run.status}</span
+                >
+                <span>{ago(run.at)}</span>
+                {#if run.pr}
+                  <a
+                    class="hover:underline font-medium"
+                    href="https://github.com/Appmixer-ai/appmixer-connectors/pull/{run.pr}"
+                    target="_blank"
+                    rel="noreferrer"
+                    onclick={(e) => e.stopPropagation()}>PR #{run.pr}</a
+                  >
+                {/if}
+                {#if run.durationSec != null}<span class="text-muted-foreground"
+                    >{run.durationSec} s</span
+                  >{/if}
+                {#if run.modelCalls}<span class="text-muted-foreground"
+                    >{run.modelCalls} model calls · {run.toolCalls} steps</span
+                  >{/if}
+                {#if run.costUsd != null}<span class="text-muted-foreground"
+                    >${run.costUsd.toFixed(3)}</span
+                  >{/if}
+                <span class="text-muted-foreground">{run.model}</span>
+                {#if run.summary}<span
+                    class="text-muted-foreground truncate max-w-2xl"
+                    title={run.summary}>{run.summary}</span
+                  >{/if}
+              </button>
+              {#if details && openHookRuns[run.at]}
+                <div class="pl-6 space-y-1">
+                  {#if run.steps?.length}
+                    <ol class="list-decimal pl-4 text-muted-foreground">
+                      {#each run.steps as step}<li>{step}</li>{/each}
+                    </ol>
+                  {/if}
+                  {#if run.result}
+                    <div class="whitespace-pre-wrap border-l-2 pl-2">{run.result}</div>
+                  {/if}
+                  {#if run.commentUrl}
+                    <a class="hover:underline" href={run.commentUrl} target="_blank" rel="noreferrer"
+                      >the reply on GitHub</a
+                    >
+                  {/if}
+                </div>
+              {/if}
             </div>
           {/each}
         </div>
       {/if}
       {#if openclaw.mentionResponder?.recent?.length}
+        <!-- Runs of the mention responder: one per hook call, what it found on the PR and what
+             it answered. skipped = resolve.sh found nothing to do (PR closed, not by apx-vero, or
+             every mention answered), pending = the agent is still working, failed = it never
+             wrote its replies, shadow = answered into the shadow log only. -->
         <div class="border rounded-lg divide-y">
           {#each openclaw.mentionResponder.recent as entry}
             <div class="px-3 py-2 text-xs space-y-1">
-              <div class="flex gap-3 text-muted-foreground">
-                <a
-                  class="hover:underline"
-                  href="https://github.com/Appmixer-ai/appmixer-connectors/pull/{entry.pr}"
-                  target="_blank"
-                  rel="noreferrer">PR #{entry.pr}</a
+              <div class="flex flex-wrap items-center gap-3">
+                <span
+                  class="px-2 py-0.5 rounded border {entry.status === 'replied'
+                    ? 'bg-green-50 text-green-700 border-green-200'
+                    : entry.status === 'failed'
+                      ? 'bg-red-50 text-red-700 border-red-200'
+                      : entry.status === 'skipped'
+                        ? 'bg-muted text-muted-foreground'
+                        : 'bg-amber-50 text-amber-800 border-amber-200'}">{entry.status}</span
                 >
-                <span>{entry.kind} {entry.id}</span>
-                <span>{ago(entry.at)}</span>
-                {#if entry.code_changed}<span class="text-amber-800">would push a change</span>{/if}
+                <a class="hover:underline font-medium" href={entry.url} target="_blank" rel="noreferrer"
+                  >PR #{entry.pr}{#if entry.title}
+                    · {entry.title}{/if}</a
+                >
+                <span class="text-muted-foreground">{ago(entry.at)}</span>
+                {#if entry.reason}<span class="text-muted-foreground">{entry.reason}</span>{/if}
+                {#if entry.mentions?.length}
+                  <span class="text-muted-foreground">
+                    {entry.mentions.length} mention{entry.mentions.length === 1 ? '' : 's'} by
+                    {[...new Set(entry.mentions.map((/** @type {any} */ m) => m.author))].join(', ')}
+                  </span>
+                {/if}
+                {#if entry.durationMs != null}
+                  <span class="text-muted-foreground">{Math.round(entry.durationMs / 1000)} s</span>
+                {/if}
+                {#if entry.code_changed}<span class="text-amber-800">pushed a change</span>{/if}
               </div>
-              <div class="whitespace-pre-wrap">{entry.body}</div>
+              {#each entry.replies || [] as reply}
+                <div class="whitespace-pre-wrap pl-2 border-l-2">{reply.body}</div>
+              {/each}
             </div>
           {/each}
         </div>
