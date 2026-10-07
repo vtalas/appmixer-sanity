@@ -169,7 +169,7 @@ export async function mapLimit(items, limit, fn) {
  * @param {string} token
  * @param {RepoRef} repo
  */
-async function fetchSnapshot(token, repo) {
+export async function fetchSnapshot(token, repo) {
   const base = `/repos/${repo.fullName}`;
   const branch = await githubRequest(
     token,
@@ -229,7 +229,7 @@ export function isExcluded(path) {
 }
 
 /** Connector directories (relative to src/appmixer/) — every dir with a bundle.json */
-function connectorRoots(files) {
+export function connectorRoots(files) {
   const roots = new Set();
   for (const path of files.keys()) {
     if (!path.endsWith('/bundle.json')) continue;
@@ -244,7 +244,7 @@ function connectorRoots(files) {
  * their parent (utils/http, not utils). null = a namespace's shared file
  * (google/auth.js) or a loose file.
  */
-function ownerOf(path, roots) {
+export function ownerOf(path, roots) {
   const parts = path.slice(CONNECTORS_ROOT.length).split('/');
   for (let i = parts.length - 1; i > 0; i--) {
     const dir = parts.slice(0, i).join('/');
@@ -313,7 +313,7 @@ export function diffPaths(paths, sourceFiles, targetFiles) {
  * blob sha, fetching (and caching) only blobs not seen before.
  * @returns {Promise<Map<string, string>>} blob sha -> content
  */
-async function readBundles(token, snapshots, roots) {
+export async function readBundles(token, snapshots, roots) {
   /** @type {Map<string, RepoRef>} */
   const wanted = new Map();
   for (const snapshot of snapshots) {

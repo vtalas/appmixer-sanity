@@ -129,6 +129,12 @@ Everything the page shows comes from a DB cache refreshed by an explicit **Scan*
 - `E2E_MAX_CONCURRENT` — max flows running at once (default 1 — the instance must never run everything at once)
 - `E2E_RUN_TIMEOUT_SECONDS` — per-run completion timeout (default 480, same as `appmixer e2e run`)
 
+## Statistics (`/statistics`)
+
+Counts of what is released: connectors (`bundle.json` files), components (`component.json` files) and E2E test flows (`test-flow*.json` files) on the **release repo** (`Appmixer-ai/appmixer-components` `master` — `RELEASE_TARGET_*`, the same snapshot `/releases` compares against), plus every connector's `name`/`version` from its bundle.json and the list of flow files. The counting rule is the one of appmixer-component-preview's Statistics panel (files by name anywhere under `src/appmixer/`), so the numbers match it on a checkout of the same branch.
+
+- **`src/lib/server/statistics.js`** — `loadStatistics(userId)`: one `fetchSnapshot` of the release branch (tree cached by sha in `release/compare.js`) + the bundle.json blobs (DB cache by blob sha via `readBundles`); components and flows are attributed to the nearest connector directory (`ownerOf`), so nested connectors (`microsoft/calendar`) count for themselves.
+
 ## Connector PRs (`/prs`)
 
 Open PRs of the connectors repo with the E2E flow state of every connector they touch — the same per-flow view as `/e2e-flows` (sync status, last result, account badge) but grouped by PR.
