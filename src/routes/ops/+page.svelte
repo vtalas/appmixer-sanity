@@ -506,6 +506,9 @@
                 <span class="text-xs text-muted-foreground"
                   >last activity {ago(instance.lastActivity)}</span
                 >
+                {#each instance.hooks || [] as hookId}
+                  <a class="text-xs hover:underline" href="#openclaw">→ OpenClaw hook {hookId}</a>
+                {/each}
                 {#if instance.errors?.error}
                   <span class="text-xs text-red-700">errors: {instance.errors.error}</span>
                 {:else if instance.errors?.total}
@@ -747,12 +750,11 @@
         </div>
         <div class="border rounded-lg p-3 space-y-1 text-sm">
           <div class="font-medium">Agents & hooks</div>
-          <div class="text-xs">{(openclaw.agents || []).join(', ')}</div>
-          {#each openclaw.hooks || [] as hook}
-            <div class="text-xs text-muted-foreground">
-              <code>/hooks/{hook.path}</code> → {hook.agentId} · {hook.model}
-            </div>
-          {/each}
+          <div class="text-xs">agents {(openclaw.agents || []).join(', ')}</div>
+          <div class="text-xs text-muted-foreground">
+            {(openclaw.hooks || []).length} hook{(openclaw.hooks || []).length === 1 ? '' : 's'} on
+            {openclaw.publicHost || 'the gateway'}
+          </div>
         </div>
         <div class="border rounded-lg p-3 space-y-1 text-sm">
           <div class="font-medium">
@@ -770,6 +772,57 @@
           </div>
         </div>
       </div>
+      <!-- Every hook the gateway maps: what it is (URL, agent, model, how the transform runs the
+           agent) and which Appmixer integration instance calls it. A hook nothing calls, or a
+           hook that nginx does not expose, is flagged. -->
+      {#each openclaw.hooks || [] as hook (hook.id)}
+        <div class="border rounded-lg p-3 space-y-1 text-sm">
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="font-medium">{hook.id}</span>
+            <code class="text-xs">{hook.url}</code>
+            {#if hook.exposed === false}
+              <Badge variant="outline" class="text-red-700">not exposed by nginx</Badge>
+            {/if}
+          </div>
+          <div class="text-xs text-muted-foreground">
+            POST → agent <span class="text-foreground">{hook.agentId}</span> · {hook.model}
+            {#if hook.transform}· transform <code>{hook.transform}</code>{/if}
+            {#if hook.sessionMode}· {hook.sessionMode} session{/if}
+            {#if hook.sessionKey}<code class="ml-1">{hook.sessionKey}</code>{/if}
+            {#if hook.timeoutSeconds}· timeout {Math.round(hook.timeoutSeconds / 60)} min{/if}
+          </div>
+          {#if hook.description}
+            <div class="text-xs text-muted-foreground">{hook.description}</div>
+          {/if}
+          <div class="text-xs flex flex-wrap items-center gap-2">
+            <span class="text-muted-foreground">called by</span>
+            {#if hook.callers?.length}
+              {#each hook.callers as caller (caller.flowId)}
+                <Badge
+                  variant="outline"
+                  class={caller.stage === 'running' ? 'text-green-700' : 'text-red-700'}
+                  >{caller.stage}</Badge
+                >
+                {#if designer(caller.flowId)}
+                  <a
+                    class="hover:underline"
+                    href={designer(caller.flowId)}
+                    target="_blank"
+                    rel="noreferrer">{caller.name}</a
+                  >
+                {:else}
+                  <span>{caller.name}</span>
+                {/if}
+                <span class="text-muted-foreground">({caller.component})</span>
+              {/each}
+            {:else if data.appmixer?.error}
+              <span class="text-muted-foreground">unknown — Appmixer: {data.appmixer.error}</span>
+            {:else}
+              <span class="text-red-700">no Appmixer integration instance posts to this URL</span>
+            {/if}
+          </div>
+        </div>
+      {/each}
       {#if openclaw.hookRuns?.length}
         <!-- One row per hook call (a gateway journal line), with what the agent's session
              transcript says about it: the PR, how long it took, model calls and cost. A row
