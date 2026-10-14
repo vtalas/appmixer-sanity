@@ -38,6 +38,9 @@
   /** Hook runs that started from one hook, newest first; the builder stamps each run's hookId. */
   const runsOfHook = (/** @type {string} */ id) =>
     (openclaw?.hookRuns || []).filter((/** @type {any} */ run) => run.hookId === id);
+  const strayResponderRuns = $derived(
+    (openclaw?.mentionResponder?.recent || []).filter((/** @type {any} */ r) => !r.hookRunAt)
+  );
   const unmatchedRuns = $derived(
     (openclaw?.hookRuns || []).filter((/** @type {any} */ run) => !run.hookId)
   );
@@ -766,6 +769,20 @@
                 >${run.costUsd.toFixed(3)}</span
               >{/if}
             <span class="text-muted-foreground">{run.model}</span>
+            {#each run.responder || [] as r (r.at)}
+              <span
+                class="px-1.5 py-0.5 rounded border border-dashed {r.status === 'replied'
+                  ? 'border-green-400 text-green-700'
+                  : r.status === 'failed'
+                    ? 'border-red-400 text-red-700'
+                    : r.status === 'skipped'
+                      ? 'border-muted-foreground/40 text-muted-foreground'
+                      : 'border-amber-400 text-amber-800'}"
+                title="resolve.sh run {r.at}{r.reason ? ' — ' + r.reason : ''}"
+                >resolve.sh: {r.status}{#if r.reason} · {r.reason}{/if}{#if r.code_changed}
+                  · pushed{/if}</span
+              >
+            {/each}
             {#if run.summary}<span
                 class="text-muted-foreground truncate max-w-2xl"
                 title={run.summary}>{run.summary}</span
@@ -786,6 +803,19 @@
                   >the reply on GitHub</a
                 >
               {/if}
+              {#each run.responder || [] as r (r.at)}
+                {#if r.replies?.length || r.mentions}
+                  <div class="border border-dashed rounded px-2 py-1 space-y-1">
+                    <div class="text-muted-foreground">
+                      resolve.sh {when(r.at)}: {r.mentions} mention{r.mentions === 1 ? '' : 's'}
+                      {#if r.durationMs != null}· replied after {Math.round(r.durationMs / 1000)} s{/if}
+                    </div>
+                    {#each r.replies || [] as reply}
+                      <div class="whitespace-pre-wrap">{reply.body}</div>
+                    {/each}
+                  </div>
+                {/if}
+              {/each}
             </div>
           {/if}
         </div>
@@ -918,13 +948,15 @@
           {@render hookRunRows(unmatchedRuns)}
         </div>
       {/if}
-      {#if openclaw.mentionResponder?.recent?.length}
-        <!-- Runs of the mention responder: one per hook call, what it found on the PR and what
-             it answered. skipped = resolve.sh found nothing to do (PR closed, not by apx-vero, or
-             every mention answered), pending = the agent is still working, failed = it never
-             wrote its replies, shadow = answered into the shadow log only. -->
+      {#if strayResponderRuns.length}
+        <!-- Runs of the mention responder (one per resolve.sh call) that fall into no hook run
+             above — normally none: a run started by hand on the host, or one whose hook run is
+             older than the transcripts kept. skipped = resolve.sh found nothing to do (PR closed,
+             not by apx-vero, or every mention answered), pending = the agent is still working,
+             failed = it never wrote its replies, shadow = answered into the shadow log only. -->
+        <div class="text-sm font-medium">Responder runs outside any hook call</div>
         <div class="border rounded-lg divide-y">
-          {#each openclaw.mentionResponder.recent as entry}
+          {#each strayResponderRuns as entry}
             <div class="px-3 py-2 text-xs space-y-1">
               <div class="flex flex-wrap items-center gap-3">
                 <span
