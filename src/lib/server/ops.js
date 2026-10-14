@@ -548,6 +548,31 @@ function firstLine(/** @type {unknown} */ err) {
   }
 }
 
+/**
+ * The HTTP components of a flow and the URLs they post to — what an integration calls outside
+ * Appmixer (an OpenClaw hook, for one). Only the fixed part of a URL is kept: no query string.
+ * @param {string} baseUrl
+ * @param {string} token
+ * @param {string} flowId
+ * @returns {Promise<Array<{ componentId: string, label: string, url: string }>>}
+ */
+async function outgoingWebhooks(baseUrl, token, flowId) {
+  const definition = await appmixerGet(baseUrl, token, `/flows/${flowId}`, { projection: 'flow' });
+  /** @type {Array<{ componentId: string, label: string, url: string }>} */
+  const found = [];
+  for (const [componentId, component] of Object.entries(definition?.flow || {})) {
+    const c = /** @type {any} */ (component);
+    if (!/^appmixer\.utils\.http\./.test(c.type || '')) continue;
+    for (const source of Object.values(c.config?.transform?.in || {})) {
+      for (const port of Object.values(/** @type {any} */ (source) || {})) {
+        const url = String(/** @type {any} */ (port)?.lambda?.url || '').split('?')[0];
+        if (url) found.push({ componentId, label: c.label || c.type.split('.').pop(), url });
+      }
+    }
+  }
+  return found;
+}
+
 /** @param {string} userId - caller's email, or '' for the env configuration */
 export async function collectAppmixer(userId) {
   const { baseUrl, uiUrl, token } = await getAppmixerSession(userId);
@@ -566,11 +591,12 @@ export async function collectAppmixer(userId) {
 
   const enriched = await Promise.all(
     (Array.isArray(instances) ? instances : []).map(async (/** @type {any} */ instance) => {
-      const [errors, active] = await Promise.all([
+      const [errors, active, webhooks] = await Promise.all([
         flowErrors(baseUrl, token, instance.flowId).catch((err) => ({ error: message(err) })),
-        lastActivity(baseUrl, token, instance.flowId).catch(() => null)
+        lastActivity(baseUrl, token, instance.flowId).catch(() => null),
+        outgoingWebhooks(baseUrl, token, instance.flowId).catch(() => [])
       ]);
-      return { ...instance, errors, lastActivity: active };
+      return { ...instance, errors, lastActivity: active, webhooks };
     })
   );
 
@@ -592,7 +618,10 @@ export async function collectAppmixer(userId) {
             template.revision != null && i.revision != null && i.revision < template.revision,
           started: i.started || null,
           lastActivity: i.lastActivity,
-          errors: i.errors
+          errors: i.errors,
+          webhooks: i.webhooks,
+          /** OpenClaw hooks this instance posts to, filled in by linkHooksToCallers */
+          hooks: /** @type {string[]} */ ([])
         }))
       };
     })
@@ -695,5 +724,36 @@ export async function buildOpsOverview(userId) {
     settle(() => collectWorkflows(userId)),
     settle(() => collectOpenClaw())
   ]);
+  linkHooksToCallers(openclaw.data, appmixer.data);
   return { generatedAt: new Date().toISOString(), appmixer, workflows, openclaw };
+}
+
+/**
+ * Names, on each OpenClaw hook, the integration instances whose HTTP component posts to its URL,
+ * and on each instance the hooks it calls. Matched on the path (`/hooks/<name>`), so a host
+ * renamed or fronted by another domain still pairs.
+ * @param {any} openclaw
+ * @param {any} appmixer
+ */
+function linkHooksToCallers(openclaw, appmixer) {
+  if (!openclaw?.hooks?.length || !appmixer?.templates) return;
+  const instances = appmixer.templates.flatMap((/** @type {any} */ template) =>
+    (template.instances || []).map((/** @type {any} */ instance) => ({ template, instance }))
+  );
+  for (const hook of openclaw.hooks) {
+    const hookPath = new URL(hook.url, 'https://x').pathname;
+    hook.callers = [];
+    for (const { template, instance } of instances) {
+      for (const webhook of instance.webhooks || []) {
+        if (new URL(webhook.url, 'https://x').pathname !== hookPath) continue;
+        hook.callers.push({
+          flowId: instance.flowId,
+          name: template.name,
+          stage: instance.stage,
+          component: webhook.label
+        });
+        instance.hooks.push(hook.id);
+      }
+    }
+  }
 }

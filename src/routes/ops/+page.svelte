@@ -35,6 +35,15 @@
   /** Hook runs expanded to their steps and closing text, by the run's timestamp. */
   /** @type {Record<string, boolean>} */
   let openHookRuns = $state({});
+  /** Hook runs that started from one hook, newest first; the builder stamps each run's hookId. */
+  const runsOfHook = (/** @type {string} */ id) =>
+    (openclaw?.hookRuns || []).filter((/** @type {any} */ run) => run.hookId === id);
+  const strayResponderRuns = $derived(
+    (openclaw?.mentionResponder?.recent || []).filter((/** @type {any} */ r) => !r.hookRunAt)
+  );
+  const unmatchedRuns = $derived(
+    (openclaw?.hookRuns || []).filter((/** @type {any} */ run) => !run.hookId)
+  );
 
   /**
    * Loads the newest runs of an instance, or with `more` the page after the ones shown.
@@ -506,6 +515,9 @@
                 <span class="text-xs text-muted-foreground"
                   >last activity {ago(instance.lastActivity)}</span
                 >
+                {#each instance.hooks || [] as hookId}
+                  <a class="text-xs hover:underline" href="#openclaw">→ OpenClaw hook {hookId}</a>
+                {/each}
                 {#if instance.errors?.error}
                   <span class="text-xs text-red-700">errors: {instance.errors.error}</span>
                 {:else if instance.errors?.total}
@@ -710,6 +722,107 @@
   </section>
 
   <!-- OpenClaw -->
+  {#snippet hookRunRows(/** @type {any[]} */ runs)}
+    <!-- One row per hook call (a gateway journal line), with what the agent's session
+         transcript says about it: the PR, how long it took, model calls and cost. A row
+         expands to the exec steps by title and the agent's closing text. -->
+    <div class="border rounded-lg divide-y">
+      {#each runs as run (run.at)}
+        {@const details = run.steps?.length || run.result}
+        <div class="px-3 py-2 text-xs space-y-1">
+          <button
+            type="button"
+            class="flex flex-wrap items-center gap-3 w-full text-left {details
+              ? ''
+              : 'cursor-default'}"
+            onclick={() => {
+              if (details) openHookRuns[run.at] = !openHookRuns[run.at];
+            }}
+          >
+            {#if details}
+              {#if openHookRuns[run.at]}<ChevronDown class="h-3 w-3" />{:else}<ChevronRight
+                  class="h-3 w-3"
+                />{/if}
+            {/if}
+            <span
+              class="px-2 py-0.5 rounded border {run.status === 'ok'
+                ? 'bg-green-50 text-green-700 border-green-200'
+                : 'bg-red-50 text-red-700 border-red-200'}">{run.status}</span
+            >
+            <span>{ago(run.at)}</span>
+            {#if run.pr}
+              <a
+                class="hover:underline font-medium"
+                href="https://github.com/Appmixer-ai/appmixer-connectors/pull/{run.pr}"
+                target="_blank"
+                rel="noreferrer"
+                onclick={(e) => e.stopPropagation()}>PR #{run.pr}</a
+              >
+            {/if}
+            {#if run.durationSec != null}<span class="text-muted-foreground"
+                >{run.durationSec} s</span
+              >{/if}
+            {#if run.modelCalls}<span class="text-muted-foreground"
+                >{run.modelCalls} model calls · {run.toolCalls} steps</span
+              >{/if}
+            {#if run.costUsd != null}<span class="text-muted-foreground"
+                >${run.costUsd.toFixed(3)}</span
+              >{/if}
+            <span class="text-muted-foreground">{run.model}</span>
+            {#each run.responder || [] as r (r.at)}
+              <span
+                class="px-1.5 py-0.5 rounded border border-dashed {r.status === 'replied'
+                  ? 'border-green-400 text-green-700'
+                  : r.status === 'failed'
+                    ? 'border-red-400 text-red-700'
+                    : r.status === 'skipped'
+                      ? 'border-muted-foreground/40 text-muted-foreground'
+                      : 'border-amber-400 text-amber-800'}"
+                title="resolve.sh run {r.at}{r.reason ? ' — ' + r.reason : ''}"
+                >resolve.sh: {r.status}{#if r.reason} · {r.reason}{/if}{#if r.code_changed}
+                  · pushed{/if}</span
+              >
+            {/each}
+            {#if run.summary}<span
+                class="text-muted-foreground truncate max-w-2xl"
+                title={run.summary}>{run.summary}</span
+              >{/if}
+          </button>
+          {#if details && openHookRuns[run.at]}
+            <div class="pl-6 space-y-1">
+              {#if run.steps?.length}
+                <ol class="list-decimal pl-4 text-muted-foreground">
+                  {#each run.steps as step}<li>{step}</li>{/each}
+                </ol>
+              {/if}
+              {#if run.result}
+                <div class="whitespace-pre-wrap border-l-2 pl-2">{run.result}</div>
+              {/if}
+              {#if run.commentUrl}
+                <a class="hover:underline" href={run.commentUrl} target="_blank" rel="noreferrer"
+                  >the reply on GitHub</a
+                >
+              {/if}
+              {#each run.responder || [] as r (r.at)}
+                {#if r.replies?.length || r.mentions}
+                  <div class="border border-dashed rounded px-2 py-1 space-y-1">
+                    <div class="text-muted-foreground">
+                      resolve.sh {when(r.at)}: {r.mentions} mention{r.mentions === 1 ? '' : 's'}
+                      {#if r.durationMs != null}· replied after {Math.round(r.durationMs / 1000)} s{/if}
+                    </div>
+                    {#each r.replies || [] as reply}
+                      <div class="whitespace-pre-wrap">{reply.body}</div>
+                    {/each}
+                  </div>
+                {/if}
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/each}
+    </div>
+  {/snippet}
+
   <section id="openclaw" class="space-y-3">
     <h2 class="text-xl font-semibold">OpenClaw agents</h2>
     {#if data.openclaw?.error}
@@ -747,12 +860,11 @@
         </div>
         <div class="border rounded-lg p-3 space-y-1 text-sm">
           <div class="font-medium">Agents & hooks</div>
-          <div class="text-xs">{(openclaw.agents || []).join(', ')}</div>
-          {#each openclaw.hooks || [] as hook}
-            <div class="text-xs text-muted-foreground">
-              <code>/hooks/{hook.path}</code> → {hook.agentId} · {hook.model}
-            </div>
-          {/each}
+          <div class="text-xs">agents {(openclaw.agents || []).join(', ')}</div>
+          <div class="text-xs text-muted-foreground">
+            {(openclaw.hooks || []).length} hook{(openclaw.hooks || []).length === 1 ? '' : 's'} on
+            {openclaw.publicHost || 'the gateway'}
+          </div>
         </div>
         <div class="border rounded-lg p-3 space-y-1 text-sm">
           <div class="font-medium">
@@ -770,86 +882,81 @@
           </div>
         </div>
       </div>
-      {#if openclaw.hookRuns?.length}
-        <!-- One row per hook call (a gateway journal line), with what the agent's session
-             transcript says about it: the PR, how long it took, model calls and cost. A row
-             expands to the exec steps by title and the agent's closing text. -->
-        <div class="border rounded-lg divide-y">
-          {#each openclaw.hookRuns as run (run.at)}
-            {@const details = run.steps?.length || run.result}
-            <div class="px-3 py-2 text-xs space-y-1">
-              <button
-                type="button"
-                class="flex flex-wrap items-center gap-3 w-full text-left {details
-                  ? ''
-                  : 'cursor-default'}"
-                onclick={() => {
-                  if (details) openHookRuns[run.at] = !openHookRuns[run.at];
-                }}
-              >
-                {#if details}
-                  {#if openHookRuns[run.at]}<ChevronDown class="h-3 w-3" />{:else}<ChevronRight
-                      class="h-3 w-3"
-                    />{/if}
-                {/if}
-                <span
-                  class="px-2 py-0.5 rounded border {run.status === 'ok'
-                    ? 'bg-green-50 text-green-700 border-green-200'
-                    : 'bg-red-50 text-red-700 border-red-200'}">{run.status}</span
+      <!-- Every hook the gateway maps: what it is (URL, agent, model, how the transform runs the
+           agent) and which Appmixer integration instance calls it. A hook nothing calls, or a
+           hook that nginx does not expose, is flagged. -->
+      {#each openclaw.hooks || [] as hook (hook.id)}
+        {@const runs = runsOfHook(hook.id)}
+        <div class="border rounded-lg p-3 space-y-1 text-sm">
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="font-medium">{hook.id}</span>
+            <code class="text-xs">{hook.url}</code>
+            {#if hook.exposed === false}
+              <Badge variant="outline" class="text-red-700">not exposed by nginx</Badge>
+            {/if}
+          </div>
+          <div class="text-xs text-muted-foreground">
+            POST → agent <span class="text-foreground">{hook.agentId}</span> · {hook.model}
+            {#if hook.transform}· transform <code>{hook.transform}</code>{/if}
+            {#if hook.sessionMode}· {hook.sessionMode} session{/if}
+            {#if hook.sessionKey}<code class="ml-1">{hook.sessionKey}</code>{/if}
+            {#if hook.timeoutSeconds}· timeout {Math.round(hook.timeoutSeconds / 60)} min{/if}
+          </div>
+          {#if hook.description}
+            <div class="text-xs text-muted-foreground">{hook.description}</div>
+          {/if}
+          <div class="text-xs flex flex-wrap items-center gap-2">
+            <span class="text-muted-foreground">called by</span>
+            {#if hook.callers?.length}
+              {#each hook.callers as caller (caller.flowId)}
+                <Badge
+                  variant="outline"
+                  class={caller.stage === 'running' ? 'text-green-700' : 'text-red-700'}
+                  >{caller.stage}</Badge
                 >
-                <span>{ago(run.at)}</span>
-                {#if run.pr}
+                {#if designer(caller.flowId)}
                   <a
-                    class="hover:underline font-medium"
-                    href="https://github.com/Appmixer-ai/appmixer-connectors/pull/{run.pr}"
+                    class="hover:underline"
+                    href={designer(caller.flowId)}
                     target="_blank"
-                    rel="noreferrer"
-                    onclick={(e) => e.stopPropagation()}>PR #{run.pr}</a
+                    rel="noreferrer">{caller.name}</a
                   >
+                {:else}
+                  <span>{caller.name}</span>
                 {/if}
-                {#if run.durationSec != null}<span class="text-muted-foreground"
-                    >{run.durationSec} s</span
-                  >{/if}
-                {#if run.modelCalls}<span class="text-muted-foreground"
-                    >{run.modelCalls} model calls · {run.toolCalls} steps</span
-                  >{/if}
-                {#if run.costUsd != null}<span class="text-muted-foreground"
-                    >${run.costUsd.toFixed(3)}</span
-                  >{/if}
-                <span class="text-muted-foreground">{run.model}</span>
-                {#if run.summary}<span
-                    class="text-muted-foreground truncate max-w-2xl"
-                    title={run.summary}>{run.summary}</span
-                  >{/if}
-              </button>
-              {#if details && openHookRuns[run.at]}
-                <div class="pl-6 space-y-1">
-                  {#if run.steps?.length}
-                    <ol class="list-decimal pl-4 text-muted-foreground">
-                      {#each run.steps as step}<li>{step}</li>{/each}
-                    </ol>
-                  {/if}
-                  {#if run.result}
-                    <div class="whitespace-pre-wrap border-l-2 pl-2">{run.result}</div>
-                  {/if}
-                  {#if run.commentUrl}
-                    <a class="hover:underline" href={run.commentUrl} target="_blank" rel="noreferrer"
-                      >the reply on GitHub</a
-                    >
-                  {/if}
-                </div>
-              {/if}
+                <span class="text-muted-foreground">({caller.component})</span>
+              {/each}
+            {:else if data.appmixer?.error}
+              <span class="text-muted-foreground">unknown — Appmixer: {data.appmixer.error}</span>
+            {:else}
+              <span class="text-red-700">no Appmixer integration instance posts to this URL</span>
+            {/if}
+          </div>
+          {#if runs.length}
+            <div class="text-xs text-muted-foreground pt-1">
+              {runs.length} run{runs.length === 1 ? '' : 's'} in the last 7 days
             </div>
-          {/each}
+            {@render hookRunRows(runs)}
+          {:else}
+            <div class="text-xs text-muted-foreground pt-1">no run in the last 7 days</div>
+          {/if}
+        </div>
+      {/each}
+      {#if unmatchedRuns.length}
+        <div class="space-y-1">
+          <div class="text-sm font-medium">Hook runs matched to no hook</div>
+          {@render hookRunRows(unmatchedRuns)}
         </div>
       {/if}
-      {#if openclaw.mentionResponder?.recent?.length}
-        <!-- Runs of the mention responder: one per hook call, what it found on the PR and what
-             it answered. skipped = resolve.sh found nothing to do (PR closed, not by apx-vero, or
-             every mention answered), pending = the agent is still working, failed = it never
-             wrote its replies, shadow = answered into the shadow log only. -->
+      {#if strayResponderRuns.length}
+        <!-- Runs of the mention responder (one per resolve.sh call) that fall into no hook run
+             above — normally none: a run started by hand on the host, or one whose hook run is
+             older than the transcripts kept. skipped = resolve.sh found nothing to do (PR closed,
+             not by apx-vero, or every mention answered), pending = the agent is still working,
+             failed = it never wrote its replies, shadow = answered into the shadow log only. -->
+        <div class="text-sm font-medium">Responder runs outside any hook call</div>
         <div class="border rounded-lg divide-y">
-          {#each openclaw.mentionResponder.recent as entry}
+          {#each strayResponderRuns as entry}
             <div class="px-3 py-2 text-xs space-y-1">
               <div class="flex flex-wrap items-center gap-3">
                 <span
