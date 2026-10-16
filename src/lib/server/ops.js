@@ -742,18 +742,35 @@ function linkHooksToCallers(openclaw, appmixer) {
   );
   for (const hook of openclaw.hooks) {
     const hookPath = new URL(hook.url, 'https://x').pathname;
-    hook.callers = [];
+    /** The path of a webhook URL, as a pattern when a variable ({{{…}}}) fills part of it */
+    const pathMatches = (/** @type {string} */ url) => {
+      const path = String(url).replace(/^https?:\/\/[^/]+/, '').split('?')[0];
+      if (!path.includes('{{{')) return { match: path === hookPath, dynamic: false };
+      const pattern = path.split(/\{\{\{[^}]*\}\}\}/).map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[^/]+');
+      return { match: new RegExp('^' + pattern + '$').test(hookPath), dynamic: true };
+    };
+    // A URL with a variable in its path could reach any hook; it counts only for hooks that no
+    // fixed URL calls (the pipeline dispatcher picks its stage hook per status, the mention
+    // integration posts to its own hook by a fixed URL).
+    /** @type {any[]} */
+    const exact = [];
+    /** @type {any[]} */
+    const dynamic = [];
     for (const { template, instance } of instances) {
       for (const webhook of instance.webhooks || []) {
-        if (new URL(webhook.url, 'https://x').pathname !== hookPath) continue;
-        hook.callers.push({
-          flowId: instance.flowId,
-          name: template.name,
-          stage: instance.stage,
-          component: webhook.label
-        });
-        instance.hooks.push(hook.id);
+        const m = pathMatches(webhook.url);
+        if (m.match) (m.dynamic ? dynamic : exact).push({ template, instance, webhook });
       }
     }
+    const callers = exact.length ? exact : dynamic;
+    hook.callers = callers.map(({ template, instance, webhook }) => {
+      instance.hooks.push(hook.id);
+      return {
+        flowId: instance.flowId,
+        name: template.name,
+        stage: instance.stage,
+        component: exact.length ? webhook.label : `${webhook.label}, hook chosen per message`
+      };
+    });
   }
 }
