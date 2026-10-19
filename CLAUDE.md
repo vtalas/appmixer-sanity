@@ -325,7 +325,7 @@ An Appmixer flow that someone keeps running by hand becomes an **integration**: 
 - **`integration-template`** — published from the draft: a clone with `originFlowId` = the draft and `sharedWith` = every user of the instance. The page lists templates of the `appmixer-sanity-hub` category.
 - **`integration-instance`** — one user's copy, created by the Wizard from the template (`templateId` = the template, its own component IDs).
 
-Worked example: the Copilot review and `@apx-vero` mention responders in [`Appmixer-ai/appmixer-connectors` → `.github/appmixer-flows/`](https://github.com/Appmixer-ai/appmixer-connectors/tree/dev/.github/appmixer-flows) — the JSON format `scripts/publish-integration.js` reads, with a README on what each flow does.
+Worked example: the Copilot review and `@apx-vero` mention responders in [`Appmixer-ai/appmixer-components` → `.github/appmixer-flows/`](https://github.com/Appmixer-ai/appmixer-components/tree/dev/.github/appmixer-flows) (private; moved from appmixer-connectors on 2026-10-19) — the JSON format `scripts/publish-integration.js` reads, with a README on what each flow does.
 
 ### 1. The flow JSON
 
