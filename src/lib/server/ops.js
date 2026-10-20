@@ -509,33 +509,140 @@ function headline(/** @type {unknown} */ msg) {
   }
 }
 
-/** Pretty-prints a JSON-string log field; other values are returned as they are. */
-function pretty(/** @type {unknown} */ value) {
+/**
+ * Pretty-prints a JSON-string log field; other values are returned as they are. Only about
+ * DETAIL_LIMIT of it is shown, so printing stops once that much is out (with some to spare,
+ * so redacting before the cut still sees a whole credential) and a string holding JSON is
+ * parsed only when printing reaches it: a megabyte payload costs no more than a small one.
+ * @param {unknown} value
+ */
+function pretty(value) {
   if (!value) return '';
-  const parsed = unwrap(value);
-  return typeof parsed === 'object' ? JSON.stringify(parsed, null, 2) : String(parsed);
+  const budget = { left: DETAIL_LIMIT + DETAIL_SPARE };
+  return typeof value === 'string' ? printString(value, '', budget) : print(value, '', budget);
+}
+
+// Printed past DETAIL_LIMIT before the cut
+const DETAIL_SPARE = 1000;
+// Places in one text tried as the start of a JSON object, so that prose full of brackets
+// costs a bounded number of scans
+const EMBEDDED_JSON_TRIES = 20;
+
+/**
+ * Indented JSON, except that a string spanning several lines (a Markdown comment, a prompt)
+ * is printed as a block of its lines, `|` first, with any JSON inside it indented too.
+ * @param {unknown} value
+ * @param {string} indent
+ * @param {{ left: number }} budget - characters still to print; `…` marks where it ran out
+ * @returns {string}
+ */
+function print(value, indent, budget) {
+  if (budget.left <= 0) return '…';
+  if (typeof value === 'string') return printString(value, indent, budget);
+  const inner = `${indent}  `;
+  if (value && typeof value === 'object') {
+    const entries = Array.isArray(value)
+      ? value.map((v) => /** @type {[string | null, unknown]} */ ([null, v]))
+      : Object.entries(value);
+    if (!entries.length) return Array.isArray(value) ? '[]' : '{}';
+    const lines = [];
+    for (const [key, v] of entries) {
+      if (budget.left <= 0) {
+        lines.push(`${inner}…`);
+        break;
+      }
+      const name = key === null ? '' : `${JSON.stringify(key)}: `;
+      budget.left -= inner.length + name.length;
+      lines.push(inner + name + print(v, inner, budget));
+    }
+    const [open, close] = Array.isArray(value) ? ['[', ']'] : ['{', '}'];
+    return `${open}\n${lines.join(',\n')}\n${indent}${close}`;
+  }
+  const text = JSON.stringify(value) ?? 'null';
+  budget.left -= text.length;
+  return text;
 }
 
 /**
- * A value with every string that is itself JSON (a request `body`, a webhook payload) parsed
- * in place, so the detail shows it indented rather than as one escaped line.
- * @param {unknown} value
- * @returns {unknown}
+ * A string as JSON when it holds JSON (a request `body`, a webhook payload), otherwise as a
+ * quoted string or, over several lines, a block.
+ * @param {string} value
+ * @param {string} indent
+ * @param {{ left: number }} budget
+ * @returns {string}
  */
-function unwrap(value) {
-  if (typeof value === 'string') {
-    const text = value.trim();
-    if (!/^[[{]/.test(text)) return value;
+function printString(value, indent, budget) {
+  if (/^\s*[[{]/.test(value)) {
     try {
-      return unwrap(JSON.parse(text));
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === 'object') return print(parsed, indent, budget);
     } catch {
-      return value;
+      // Not JSON as a whole; it may still hold some
     }
   }
-  if (Array.isArray(value)) return value.map(unwrap);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([key, v]) => [key, unwrap(v)]));
+  const text = expand(value.slice(0, Math.max(0, budget.left)), budget);
+  if (!text.includes('\n')) {
+    const quoted = JSON.stringify(text) + (value.length > text.length ? '…' : '');
+    budget.left -= quoted.length;
+    return indent ? quoted : text;
   }
+  budget.left -= text.length;
+  return indent ? `|\n${text.replace(/^/gm, `${indent}  `)}` : text;
+}
+
+/**
+ * Text with the JSON objects and arrays written inside it (`<!-- pipeline: {...} -->`)
+ * indented in place. Each try scans from one `{` or `[` to the bracket that closes it.
+ * @param {string} text
+ * @param {{ left: number }} budget
+ * @returns {string}
+ */
+function expand(text, budget) {
+  let out = '';
+  let from = 0;
+  let tries = 0;
+  for (let at = text.search(/[[{]/); at >= 0 && tries < EMBEDDED_JSON_TRIES; tries++) {
+    const end = closingBracket(text, at);
+    if (end > 0) {
+      try {
+        const value = JSON.parse(text.slice(at, end + 1));
+        if (value && typeof value === 'object' && Object.keys(value).length) {
+          out += text.slice(from, at) + print(value, '', budget);
+          from = end + 1;
+        }
+      } catch {
+        // Brackets in prose, not JSON
+      }
+    }
+    const rest = Math.max(at + 1, from);
+    const next = text.slice(rest).search(/[[{]/);
+    at = next < 0 ? -1 : rest + next;
+  }
+  return out + text.slice(from);
+}
+
+/**
+ * Where the bracket opened at `start` closes, skipping brackets inside JSON strings; -1 when
+ * it does not.
+ * @param {string} text
+ * @param {number} start
+ */
+function closingBracket(text, start) {
+  let depth = 0;
+  let quoted = false;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '\\') i++;
+      else if (c === '"') quoted = false;
+    } else if (c === '"') quoted = true;
+    else if (c === '{' || c === '[') depth++;
+    else if (c === '}' || c === ']') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
 }
 
 /**

@@ -236,7 +236,7 @@
     /** @type {Array<{ text: string, kind: string }>} */
     const tokens = [];
     const pattern =
-      /("(?:[^"\\]|\\.)*")(\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+      /("(?:[^"\\\n]|\\.)*")(\s*:)?|(?<=(?::|^\s*|\[)\s?)(?:true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=,?$)/gm;
     let last = 0;
     for (const match of text.matchAll(pattern)) {
       const at = match.index ?? 0;
