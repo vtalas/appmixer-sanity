@@ -21,6 +21,8 @@ import { getGitHubConfig } from '$lib/api/github.js';
 
 export const HUB_CATEGORY = 'appmixer-sanity-hub';
 const ERROR_WINDOW_DAYS = 7;
+/** The shorter windows /ops counts errors in, besides ERROR_WINDOW_DAYS. */
+const ERROR_WINDOWS = ['1h', '24h', '3d'];
 const INACTIVE_DAYS = 30;
 // Run tree of an instance: runs per page, the entries read to find a page and to read its
 // runs in full, and how much of one entry is sent
@@ -53,29 +55,45 @@ async function appmixerGet(baseUrl, token, path, params = {}) {
 }
 
 /**
- * Error count per day for the last ERROR_WINDOW_DAYS and the newest error of one flow.
- * The log search returns a daily histogram (`buckets`) next to the hits.
+ * Error count per day for the last ERROR_WINDOW_DAYS, the counts within the shorter windows
+ * /ops lets you pick (`byWindow`) and the newest error of one flow. The log search returns
+ * only a daily histogram (`buckets`) next to the hits, so each shorter window is a search of
+ * its own with no hits, its count the sum of its buckets.
  * @param {string} baseUrl
  * @param {string} token
  * @param {string} flowId
  */
 async function flowErrors(baseUrl, token, flowId) {
-  const data = await appmixerGet(baseUrl, token, '/logs', {
-    flowId,
-    query: `severity:error AND gridTimestamp:>now-${ERROR_WINDOW_DAYS}d`,
-    sort: 'gridTimestamp:desc',
-    size: '1'
-  });
+  /** @param {string} since @param {string} size */
+  const search = (since, size) =>
+    appmixerGet(baseUrl, token, '/logs', {
+      flowId,
+      query: `severity:error AND gridTimestamp:>now-${since}`,
+      sort: 'gridTimestamp:desc',
+      size
+    });
+  /** @param {any} data */
+  const count = (data) =>
+    (data.buckets || []).reduce(
+      (/** @type {number} */ sum, /** @type {any} */ b) => sum + (b.doc_count || 0),
+      0
+    );
+  const [data, ...shorter] = await Promise.all([
+    search(`${ERROR_WINDOW_DAYS}d`, '1'),
+    ...ERROR_WINDOWS.map((window) => search(window, '0'))
+  ]);
   const buckets = (data.buckets || []).map((/** @type {any} */ b) => ({
     day: String(b.key_as_string || '').slice(0, 10),
     count: b.doc_count || 0
   }));
   const last = (data.hits || [])[0];
+  const total = count(data);
   return {
-    total: buckets.reduce(
-      (/** @type {number} */ sum, /** @type {{count: number}} */ b) => sum + b.count,
-      0
-    ),
+    total,
+    byWindow: {
+      ...Object.fromEntries(ERROR_WINDOWS.map((window, i) => [window, count(shorter[i])])),
+      [`${ERROR_WINDOW_DAYS}d`]: total
+    },
     buckets,
     last: last
       ? {
@@ -556,11 +574,26 @@ function errorLine(/** @type {unknown} */ err) {
 }
 
 /** First line of an error stack stored as a JSON string. */
+/**
+ * An error message as text. A GraphQL call fails with a list of errors as its message, each
+ * with a message of its own.
+ * @param {unknown} message
+ * @returns {string}
+ */
+function text(message) {
+  if (Array.isArray(message)) return message.map(text).join('; ');
+  if (message && typeof message === 'object') {
+    const { message: inner } = /** @type {any} */ (message);
+    return inner ? text(inner) : JSON.stringify(message);
+  }
+  return String(message);
+}
+
 function firstLine(/** @type {unknown} */ err) {
   if (!err) return '';
   try {
     const parsed = typeof err === 'string' ? JSON.parse(err) : err;
-    return String(parsed.message || parsed.stack || '').split('\n')[0];
+    return text(parsed.message || parsed.stack || '').split('\n')[0];
   } catch {
     return String(err).split('\n')[0];
   }
