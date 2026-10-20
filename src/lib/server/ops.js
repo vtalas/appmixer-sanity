@@ -494,11 +494,29 @@ function headline(/** @type {unknown} */ msg) {
 /** Pretty-prints a JSON-string log field; other values are returned as they are. */
 function pretty(/** @type {unknown} */ value) {
   if (!value) return '';
-  try {
-    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
-    return typeof parsed === 'object' ? JSON.stringify(parsed, null, 2) : String(parsed);
-  } catch {
-    return String(value);
+  const parsed = unwrap(value);
+  return typeof parsed === 'object' ? JSON.stringify(parsed, null, 2) : String(parsed);
+}
+
+/**
+ * A value with every string that is itself JSON (a request `body`, a webhook payload) parsed
+ * in place, so the detail shows it indented rather than as one escaped line.
+ * @param {unknown} value
+ * @returns {unknown}
+ */
+function unwrap(value) {
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!/^[[{]/.test(text)) return value;
+    try {
+      return unwrap(JSON.parse(text));
+    } catch {
+      return value;
+    }
+  }
+  if (Array.isArray(value)) return value.map(unwrap);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, v]) => [key, unwrap(v)]));
   }
 }
 

@@ -167,6 +167,46 @@
     return output && output.summary !== '{}' ? output.summary : '';
   }
 
+  /**
+   * A component's type without the vendor prefix: its connector, module and component, e.g.
+   * `github.project.StatusChanged`.
+   * @param {string | null | undefined} type
+   */
+  const componentType = (type) => (type ? type.replace(/^appmixer\./, '') : '');
+
+  /**
+   * An entry's detail cut into tokens to colour, when it is JSON; anything else stays one
+   * plain token.
+   * @param {string} text
+   * @returns {Array<{ text: string, kind: string }>}
+   */
+  function jsonTokens(text) {
+    if (!/^\s*[[{]/.test(text)) return [{ text, kind: '' }];
+    /** @type {Array<{ text: string, kind: string }>} */
+    const tokens = [];
+    const pattern = /("(?:[^"\\]|\\.)*")(\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+    let last = 0;
+    for (const match of text.matchAll(pattern)) {
+      const at = match.index ?? 0;
+      if (at > last) tokens.push({ text: text.slice(last, at), kind: '' });
+      if (match[2]) {
+        tokens.push({ text: match[1], kind: 'key' }, { text: match[2], kind: '' });
+      } else {
+        tokens.push({ text: match[0], kind: match[1] ? 'string' : 'literal' });
+      }
+      last = at + match[0].length;
+    }
+    if (last < text.length) tokens.push({ text: text.slice(last), kind: '' });
+    return tokens;
+  }
+
+  /** @type {Record<string, string>} */
+  const tokenClass = {
+    key: 'text-sky-800',
+    string: 'text-emerald-800',
+    literal: 'text-amber-700'
+  };
+
   let refreshing = $state(false);
   async function refresh() {
     refreshing = true;
@@ -263,6 +303,9 @@
         {/if}
         <span class="px-1.5 rounded border whitespace-nowrap {statusClass[status]}">{status}</span>
         <span class="font-medium whitespace-nowrap" title={node.type}>{node.label}</span>
+        {#if node.type}
+          <code class="text-muted-foreground whitespace-nowrap">{componentType(node.type)}</code>
+        {/if}
         {#if !expandable || run}
           <!-- Which way it went, where the branches themselves are not on show -->
           {#each (node.ports || []).filter((/** @type {any} */ p) => p.fired) as port (port.name)}
@@ -325,7 +368,9 @@
             </button>
             {#if panel.open[entryKey]}
               <pre
-                class="mt-1 ml-5 p-2 bg-muted/30 border rounded text-[11px] whitespace-pre-wrap break-all max-h-80 overflow-auto">{entry.detail}</pre>
+                class="mt-1 ml-5 p-2 bg-muted/30 border rounded text-[11px] whitespace-pre-wrap break-all max-h-80 overflow-auto">{#each jsonTokens(entry.detail) as token}{#if token.kind}<span
+                    class={tokenClass[token.kind]}>{token.text}</span
+                  >{:else}{token.text}{/if}{/each}</pre>
             {/if}
           </div>
         {/each}
