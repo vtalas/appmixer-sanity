@@ -2,6 +2,7 @@
   import { Badge } from '$lib/components/ui/badge';
   import { Button } from '$lib/components/ui/button';
   import { invalidateAll } from '$app/navigation';
+  import { onMount } from 'svelte';
   import { ChevronDown, ChevronRight, ExternalLink, RefreshCw, ScrollText } from 'lucide-svelte';
 
   let { data } = $props();
@@ -11,13 +12,63 @@
   const openclaw = $derived(data.openclaw?.data);
 
   const instances = $derived((appmixer?.templates || []).flatMap((t) => t.instances));
+
+  // Errors count, and show in red, only within the window picked here; older ones fade out.
+  // The pick is the viewer's own and is remembered in the browser.
+  const ERROR_WINDOWS = [
+    { key: '1h', label: '1 h', ms: 3600e3 },
+    { key: '24h', label: '24 h', ms: 24 * 3600e3 },
+    { key: '3d', label: '3 d', ms: 3 * 24 * 3600e3 },
+    { key: '7d', label: '7 d', ms: 7 * 24 * 3600e3 }
+  ];
+  /** An error newer than this is marked new */
+  const NEW_MS = 3600e3;
+  const ERROR_WINDOW_KEY = 'ops.errorWindow';
+  let errorWindowKey = $state('24h');
+  onMount(() => {
+    try {
+      const saved = localStorage.getItem(ERROR_WINDOW_KEY);
+      if (ERROR_WINDOWS.some((w) => w.key === saved)) errorWindowKey = /** @type {string} */ (saved);
+    } catch {
+      // Storage blocked: the default window
+    }
+  });
+  const errorWindow = $derived(
+    ERROR_WINDOWS.find((w) => w.key === errorWindowKey) || ERROR_WINDOWS[1]
+  );
+  /** @param {string} key */
+  function pickErrorWindow(key) {
+    errorWindowKey = key;
+    try {
+      localStorage.setItem(ERROR_WINDOW_KEY, key);
+    } catch {
+      // Not remembered, still applied
+    }
+  }
+  /**
+   * Errors of an instance within the picked window.
+   * @param {any} instance
+   * @returns {number}
+   */
+  const recentErrors = (instance) =>
+    instance.errors?.byWindow?.[errorWindow.key] ?? instance.errors?.total ?? 0;
+  /** @param {string | null | undefined} at */
+  const withinWindow = (at) => !!at && Date.now() - new Date(at).getTime() <= errorWindow.ms;
+  /** @param {string | null | undefined} at */
+  const isNew = (at) => !!at && Date.now() - new Date(at).getTime() <= NEW_MS;
+  /**
+   * Whether a day of the error histogram reaches into the picked window.
+   * @param {string} day - YYYY-MM-DD
+   */
+  const dayInWindow = (day) =>
+    new Date(`${day}T00:00`).getTime() + 24 * 3600e3 > Date.now() - errorWindow.ms;
   const activeWorkflows = $derived((workflows?.workflows || []).filter((w) => !w.inactive));
   const inactiveWorkflows = $derived((workflows?.workflows || []).filter((w) => w.inactive));
   const stats = $derived({
     templates: appmixer?.templates?.length ?? 0,
     running: instances.filter((i) => i.stage === 'running').length,
     instances: instances.length,
-    withErrors: instances.filter((i) => (i.errors?.total ?? 0) > 0).length,
+    withErrors: instances.filter((i) => recentErrors(i) > 0).length,
     outdated: instances.filter((i) => i.outdated).length,
     missing: (appmixer?.templates || []).filter(
       (t) => !t.instances.some((i) => i.stage === 'running')
@@ -167,6 +218,47 @@
     return output && output.summary !== '{}' ? output.summary : '';
   }
 
+  /**
+   * A component's type without the vendor prefix: its connector, module and component, e.g.
+   * `github.project.StatusChanged`.
+   * @param {string | null | undefined} type
+   */
+  const componentType = (type) => (type ? type.replace(/^appmixer\./, '') : '');
+
+  /**
+   * An entry's detail cut into tokens to colour, when it is JSON; anything else stays one
+   * plain token.
+   * @param {string} text
+   * @returns {Array<{ text: string, kind: string }>}
+   */
+  function jsonTokens(text) {
+    if (!/^\s*[[{]/.test(text)) return [{ text, kind: '' }];
+    /** @type {Array<{ text: string, kind: string }>} */
+    const tokens = [];
+    const pattern =
+      /("(?:[^"\\\n]|\\.)*")(\s*:)?|(?<=(?::|^\s*|\[)\s?)(?:true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=,?$)/gm;
+    let last = 0;
+    for (const match of text.matchAll(pattern)) {
+      const at = match.index ?? 0;
+      if (at > last) tokens.push({ text: text.slice(last, at), kind: '' });
+      if (match[2]) {
+        tokens.push({ text: match[1], kind: 'key' }, { text: match[2], kind: '' });
+      } else {
+        tokens.push({ text: match[0], kind: match[1] ? 'string' : 'literal' });
+      }
+      last = at + match[0].length;
+    }
+    if (last < text.length) tokens.push({ text: text.slice(last), kind: '' });
+    return tokens;
+  }
+
+  /** @type {Record<string, string>} */
+  const tokenClass = {
+    key: 'text-sky-800',
+    string: 'text-emerald-800',
+    literal: 'text-amber-700'
+  };
+
   let refreshing = $state(false);
   async function refresh() {
     refreshing = true;
@@ -263,6 +355,9 @@
         {/if}
         <span class="px-1.5 rounded border whitespace-nowrap {statusClass[status]}">{status}</span>
         <span class="font-medium whitespace-nowrap" title={node.type}>{node.label}</span>
+        {#if node.type}
+          <code class="text-muted-foreground whitespace-nowrap">{componentType(node.type)}</code>
+        {/if}
         {#if !expandable || run}
           <!-- Which way it went, where the branches themselves are not on show -->
           {#each (node.ports || []).filter((/** @type {any} */ p) => p.fired) as port (port.name)}
@@ -325,7 +420,9 @@
             </button>
             {#if panel.open[entryKey]}
               <pre
-                class="mt-1 ml-5 p-2 bg-muted/30 border rounded text-[11px] whitespace-pre-wrap break-all max-h-80 overflow-auto">{entry.detail}</pre>
+                class="mt-1 ml-5 p-2 bg-muted/30 border rounded text-[11px] whitespace-pre-wrap break-all max-h-80 overflow-auto">{#each jsonTokens(entry.detail) as token}{#if token.kind}<span
+                      class={tokenClass[token.kind]}>{token.text}</span
+                    >{:else}{token.text}{/if}{/each}</pre>
             {/if}
           </div>
         {/each}
@@ -424,7 +521,9 @@
       class="border rounded-lg p-3 {stats.withErrors ? 'bg-amber-50 border-amber-200' : ''}"
     >
       <div class="text-2xl font-bold">{stats.withErrors}</div>
-      <div class="text-xs text-muted-foreground">Instances with errors (7 days)</div>
+      <div class="text-xs text-muted-foreground">
+        Instances with errors ({errorWindow.label})
+      </div>
     </a>
     <a
       href="#appmixer"
@@ -459,7 +558,23 @@
   <!-- Appmixer -->
   <section id="appmixer" class="space-y-3">
     <div class="flex items-baseline justify-between">
-      <h2 class="text-xl font-semibold">Appmixer integrations</h2>
+      <div class="flex items-baseline gap-4">
+        <h2 class="text-xl font-semibold">Appmixer integrations</h2>
+        {#if appmixer}
+          <span class="flex items-center gap-1 text-xs text-muted-foreground">
+            errors in
+            {#each ERROR_WINDOWS as w (w.key)}
+              <button
+                type="button"
+                class="px-2 py-0.5 rounded border {w.key === errorWindow.key
+                  ? 'bg-foreground text-background border-foreground'
+                  : 'hover:text-foreground'}"
+                onclick={() => pickErrorWindow(w.key)}>{w.label}</button
+              >
+            {/each}
+          </span>
+        {/if}
+      </div>
       {#if appmixer}
         <span class="text-xs text-muted-foreground">
           {appmixer.instanceUrl} · category <code>{appmixer.category?.name || 'missing'}</code> ·
@@ -521,13 +636,17 @@
                 {#if instance.errors?.error}
                   <span class="text-xs text-red-700">errors: {instance.errors.error}</span>
                 {:else if instance.errors?.total}
+                  {@const recent = recentErrors(instance)}
+                  {@const last = instance.errors.last}
                   <span
                     class="inline-flex items-end gap-0.5 h-4"
-                    title="errors per day, last 7 days"
+                    title="errors per day, last 7 days; grey: before the last {errorWindow.label}"
                   >
                     {#each instance.errors.buckets as bucket}
                       <span
-                        class="w-1.5 bg-red-400 rounded-sm"
+                        class="w-1.5 rounded-sm {dayInWindow(bucket.day)
+                          ? 'bg-red-400'
+                          : 'bg-muted-foreground/25'}"
                         style="height: {Math.max(
                           2,
                           Math.round((bucket.count / maxBucket(instance.errors.buckets)) * 16)
@@ -536,23 +655,42 @@
                       ></span>
                     {/each}
                   </span>
-                  <button
-                    type="button"
-                    class="text-xs text-red-700 underline decoration-dotted hover:decoration-solid"
-                    onclick={() => toggleLogs(instance.flowId, true)}
-                    >{instance.errors.total} errors / 7 d</button
-                  >
-                  {#if instance.errors.last}
-                    <span
-                      class="text-xs text-muted-foreground truncate max-w-xl"
-                      title={instance.errors.last.message}
+                  {#if recent}
+                    {#if isNew(last?.at)}
+                      <span
+                        class="px-1.5 rounded bg-red-600 text-white text-[10px] font-semibold uppercase"
+                        title="an error in the last hour">new</span
+                      >
+                    {/if}
+                    <button
+                      type="button"
+                      class="text-xs text-red-700 underline decoration-dotted hover:decoration-solid"
+                      onclick={() => toggleLogs(instance.flowId, true)}
+                      >{recent} error{recent === 1 ? '' : 's'} / {errorWindow.label}</button
                     >
-                      last {ago(instance.errors.last.at)} in {instance.errors.last.component}: {instance
-                        .errors.last.message}
-                    </span>
+                    {#if last}
+                      <span
+                        class="text-xs text-muted-foreground truncate max-w-xl"
+                        title={last.message}
+                      >
+                        last {ago(last.at)} in {last.component}: {last.message}
+                      </span>
+                    {/if}
+                  {:else}
+                    <span class="text-xs text-green-700">no errors / {errorWindow.label}</span>
+                    <!-- Older ones stay reachable, without drawing the eye -->
+                    <button
+                      type="button"
+                      class="text-xs text-muted-foreground/70 underline decoration-dotted hover:text-foreground"
+                      title={last
+                        ? `last ${ago(last.at)} in ${last.component}: ${last.message}`
+                        : ''}
+                      onclick={() => toggleLogs(instance.flowId, true)}
+                      >{instance.errors.total} older, last {ago(last?.at)}</button
+                    >
                   {/if}
                 {:else}
-                  <span class="text-xs text-green-700">no errors / 7 d</span>
+                  <span class="text-xs text-green-700">no errors / {errorWindow.label}</span>
                 {/if}
                 <button
                   type="button"
@@ -629,7 +767,11 @@
                         : ''}"
                     >
                       {#each panel.runs as run (run.id)}
-                        <div class="px-3 py-0.5">
+                        <!-- Runs before the error window are there for reference only -->
+                        <div
+                          class="px-3 py-0.5 {withinWindow(run.at) ? '' : 'opacity-50'}"
+                          title={withinWindow(run.at) ? '' : `before the last ${errorWindow.label}`}
+                        >
                           {@render step(panel, run.id, run.root, run)}
                         </div>
                       {/each}
@@ -779,7 +921,8 @@
                       ? 'border-muted-foreground/40 text-muted-foreground'
                       : 'border-amber-400 text-amber-800'}"
                 title="resolve.sh run {r.at}{r.reason ? ' — ' + r.reason : ''}"
-                >resolve.sh: {r.status}{#if r.reason} · {r.reason}{/if}{#if r.code_changed}
+                >resolve.sh: {r.status}{#if r.reason}
+                  · {r.reason}{/if}{#if r.code_changed}
                   · pushed{/if}</span
               >
             {/each}
@@ -876,8 +1019,7 @@
           <div class="text-xs text-muted-foreground">
             {(openclaw.mentionResponder?.recent || []).filter(
               (/** @type {any} */ r) => r.status === 'replied'
-            )
-              .length} replied of the last {openclaw.mentionResponder?.recent?.length ?? 0} ·
+            ).length} replied of the last {openclaw.mentionResponder?.recent?.length ?? 0} ·
             {openclaw.mentionResponder?.runs ?? 0} runs on disk
           </div>
         </div>
@@ -968,7 +1110,11 @@
                         ? 'bg-muted text-muted-foreground'
                         : 'bg-amber-50 text-amber-800 border-amber-200'}">{entry.status}</span
                 >
-                <a class="hover:underline font-medium" href={entry.url} target="_blank" rel="noreferrer"
+                <a
+                  class="hover:underline font-medium"
+                  href={entry.url}
+                  target="_blank"
+                  rel="noreferrer"
                   >PR #{entry.pr}{#if entry.title}
                     · {entry.title}{/if}</a
                 >
@@ -977,7 +1123,9 @@
                 {#if entry.mentions?.length}
                   <span class="text-muted-foreground">
                     {entry.mentions.length} mention{entry.mentions.length === 1 ? '' : 's'} by
-                    {[...new Set(entry.mentions.map((/** @type {any} */ m) => m.author))].join(', ')}
+                    {[...new Set(entry.mentions.map((/** @type {any} */ m) => m.author))].join(
+                      ', '
+                    )}
                   </span>
                 {/if}
                 {#if entry.durationMs != null}
