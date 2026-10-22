@@ -1024,6 +1024,57 @@
           </div>
         </div>
       </div>
+      <!-- The OpenClaw cron job openclaw-deploy keeps the host on appmixer-components dev:
+           its last run, the dev commit it deployed, and deploy.log (newest first). -->
+      {#if openclaw.deploy}
+        {@const deploy = openclaw.deploy}
+        <div class="border rounded-lg p-3 space-y-1 text-sm">
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="font-medium">Deploy from dev</span>
+            {#if !deploy.cron}
+              <Badge variant="outline" class="text-red-700">cron job missing</Badge>
+            {:else if !deploy.cron.enabled}
+              <Badge variant="outline" class="text-amber-800">disabled</Badge>
+            {:else if deploy.cron.lastStatus && deploy.cron.lastStatus !== 'ok'}
+              <Badge variant="outline" class="text-red-700">last run {deploy.cron.lastStatus}</Badge>
+            {/if}
+            {#if deploy.restartPending}
+              <Badge variant="outline" class="text-amber-800">gateway restart pending</Badge>
+            {/if}
+          </div>
+          {#if deploy.cron}
+            <div class="text-xs text-muted-foreground">
+              cron <code>openclaw-deploy</code> every {deploy.cron.everyMin} min · last run
+              {ago(deploy.cron.lastRunAt)}
+              {#if deploy.cron.lastStatus}({deploy.cron.lastStatus}){/if}
+            </div>
+          {/if}
+          {#if deploy.commit}
+            <div class="text-xs text-muted-foreground">
+              dev <a
+                class="hover:underline"
+                href="https://github.com/Appmixer-ai/appmixer-components/commit/{deploy.commit
+                  .sha}"
+                target="_blank"
+                rel="noreferrer"><code>{deploy.commit.sha.slice(0, 8)}</code></a
+              >
+              {deploy.commit.subject} · {ago(deploy.commit.at)}
+            </div>
+          {/if}
+          {#if deploy.log?.length}
+            <div class="text-xs space-y-0.5 pt-1">
+              {#each deploy.log as entry, i (i)}
+                <div class={/FAILED|not deployed/.test(entry.text) ? 'text-red-700' : ''}>
+                  <span class="text-muted-foreground">{ago(entry.at)}</span>
+                  {entry.text}
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <div class="text-xs text-muted-foreground">deploy.log is empty</div>
+          {/if}
+        </div>
+      {/if}
       <!-- Every hook the gateway maps: what it is (URL, agent, model, how the transform runs the
            agent) and which Appmixer integration instance calls it. A hook nothing calls, or a
            hook that nginx does not expose, is flagged. -->
