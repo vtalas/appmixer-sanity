@@ -870,7 +870,7 @@
          expands to the exec steps by title and the agent's closing text. -->
     <div class="border rounded-lg divide-y">
       {#each runs as run (run.at)}
-        {@const details = run.steps?.length || run.result}
+        {@const details = run.steps?.length || run.result || run.stage?.report}
         <div class="px-3 py-2 text-xs space-y-1">
           <button
             type="button"
@@ -901,6 +901,39 @@
                 onclick={(e) => e.stopPropagation()}>PR #{run.pr}</a
               >
             {/if}
+            <!-- The pipeline stage this hook call started (Build of an issue, Testing, Fix,
+                 Doc&Verification of a PR) and what it decided -->
+            {#if run.stage}
+              <span
+                class="px-1.5 py-0.5 rounded border {run.stage.result === 'passed'
+                  ? 'border-green-400 text-green-700'
+                  : run.stage.result === 'running'
+                    ? 'border-amber-400 text-amber-800'
+                    : 'border-red-400 text-red-700'}"
+                >{run.stage.name}: {run.stage.result}</span
+              >
+              {#if run.stage.issue}
+                {@const [repo, number] = run.stage.issue.split('#')}
+                <a
+                  class="hover:underline font-medium"
+                  href="https://github.com/{repo}/issues/{number}"
+                  target="_blank"
+                  rel="noreferrer"
+                  onclick={(e) => e.stopPropagation()}
+                  >{repo.replace('Appmixer-ai/appmixer-', '')}#{number}</a
+                >
+              {/if}
+              {#if run.stage.prUrl && !run.pr}
+                <a
+                  class="hover:underline font-medium"
+                  href={run.stage.prUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  onclick={(e) => e.stopPropagation()}
+                  >→ PR #{run.stage.prUrl.split('/').pop()}</a
+                >
+              {/if}
+            {/if}
             {#if run.durationSec != null}<span class="text-muted-foreground"
                 >{run.durationSec} s</span
               >{/if}
@@ -926,13 +959,18 @@
                   · pushed{/if}</span
               >
             {/each}
-            {#if run.summary}<span
+            {#if run.summary || run.stage?.summary}<span
                 class="text-muted-foreground truncate max-w-2xl"
-                title={run.summary}>{run.summary}</span
+                title={run.summary || run.stage.summary}>{run.summary || run.stage.summary}</span
               >{/if}
           </button>
           {#if details && openHookRuns[run.at]}
             <div class="pl-6 space-y-1">
+              {#if run.stage?.report}
+                <div class="whitespace-pre-wrap border-l-2 border-amber-300 pl-2">
+                  {run.stage.name} report: {run.stage.report}
+                </div>
+              {/if}
               {#if run.steps?.length}
                 <ol class="list-decimal pl-4 text-muted-foreground">
                   {#each run.steps as step}<li>{step}</li>{/each}
