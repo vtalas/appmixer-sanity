@@ -21,6 +21,15 @@ import { getGitHubConfig } from '$lib/api/github.js';
 
 export const HUB_CATEGORY = 'appmixer-sanity-hub';
 const ERROR_WINDOW_DAYS = 7;
+/** The shorter windows /ops counts errors in, besides ERROR_WINDOW_DAYS. */
+const ERROR_WINDOWS = ['1h', '24h', '3d'];
+/** Errors per day, as the log search computed them by default before engine 6.6 */
+const DAILY_HISTOGRAM = {
+  field: 'gridTimestamp',
+  calendar_interval: '1d',
+  time_zone: 'UTC',
+  min_doc_count: 0
+};
 const INACTIVE_DAYS = 30;
 // Run tree of an instance: runs per page, the entries read to find a page and to read its
 // runs in full, and how much of one entry is sent
@@ -39,43 +48,76 @@ const message = (err) => (err instanceof Error ? err.message : String(err));
  * @param {string} token
  * @param {string} path
  * @param {Record<string, string | string[]>} [params]
+ * @param {object} [body]
  */
-async function appmixerGet(baseUrl, token, path, params = {}) {
+async function appmixerGet(baseUrl, token, path, params = {}, body = undefined) {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     for (const v of Array.isArray(value) ? value : [value]) search.append(key, v);
   }
   const response = await fetch(`${baseUrl}${path}?${search}`, {
-    headers: { Authorization: `Bearer ${token}` }
+    // A body makes it a POST: the log search takes its aggregations only that way
+    ...(body
+      ? {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        }
+      : { headers: { Authorization: `Bearer ${token}` } })
   });
   if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
   return response.json();
 }
 
 /**
- * Error count per day for the last ERROR_WINDOW_DAYS and the newest error of one flow.
- * The log search returns a daily histogram (`buckets`) next to the hits.
+ * Error count per day for the last ERROR_WINDOW_DAYS, the counts within the shorter windows
+ * /ops lets you pick (`byWindow`) and the newest error of one flow. The log search counts
+ * only through a daily histogram next to the hits, so each shorter window is a search of its
+ * own with no hits, its count the sum of its buckets. Engine 6.6 adds no histogram to a GET
+ * any more: it is asked for in the body of a POST, and comes back under `aggregations`.
  * @param {string} baseUrl
  * @param {string} token
  * @param {string} flowId
  */
 async function flowErrors(baseUrl, token, flowId) {
-  const data = await appmixerGet(baseUrl, token, '/logs', {
-    flowId,
-    query: `severity:error AND gridTimestamp:>now-${ERROR_WINDOW_DAYS}d`,
-    sort: 'gridTimestamp:desc',
-    size: '1'
-  });
-  const buckets = (data.buckets || []).map((/** @type {any} */ b) => ({
+  /** @param {string} since @param {string} size */
+  const search = (since, size) =>
+    appmixerGet(
+      baseUrl,
+      token,
+      '/logs',
+      {
+        flowId,
+        query: `severity:error AND gridTimestamp:>now-${since}`,
+        sort: 'gridTimestamp:desc',
+        size
+      },
+      { aggs: { by_interval: { date_histogram: DAILY_HISTOGRAM } } }
+    );
+  /** @param {any} data @returns {any[]} */
+  const histogram = (data) => data.buckets || data.aggregations?.by_interval?.buckets || [];
+  /** @param {any} data */
+  const count = (data) =>
+    histogram(data).reduce(
+      (/** @type {number} */ sum, /** @type {any} */ b) => sum + (b.doc_count || 0),
+      0
+    );
+  const [data, ...shorter] = await Promise.all([
+    search(`${ERROR_WINDOW_DAYS}d`, '1'),
+    ...ERROR_WINDOWS.map((window) => search(window, '0'))
+  ]);
+  const buckets = histogram(data).map((/** @type {any} */ b) => ({
     day: String(b.key_as_string || '').slice(0, 10),
     count: b.doc_count || 0
   }));
   const last = (data.hits || [])[0];
+  const total = count(data);
   return {
-    total: buckets.reduce(
-      (/** @type {number} */ sum, /** @type {{count: number}} */ b) => sum + b.count,
-      0
-    ),
+    total,
+    byWindow: {
+      ...Object.fromEntries(ERROR_WINDOWS.map((window, i) => [window, count(shorter[i])])),
+      [`${ERROR_WINDOW_DAYS}d`]: total
+    },
     buckets,
     last: last
       ? {
@@ -491,15 +533,140 @@ function headline(/** @type {unknown} */ msg) {
   }
 }
 
-/** Pretty-prints a JSON-string log field; other values are returned as they are. */
-function pretty(/** @type {unknown} */ value) {
+/**
+ * Pretty-prints a JSON-string log field; other values are returned as they are. Only about
+ * DETAIL_LIMIT of it is shown, so printing stops once that much is out (with some to spare,
+ * so redacting before the cut still sees a whole credential) and a string holding JSON is
+ * parsed only when printing reaches it: a megabyte payload costs no more than a small one.
+ * @param {unknown} value
+ */
+function pretty(value) {
   if (!value) return '';
-  try {
-    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
-    return typeof parsed === 'object' ? JSON.stringify(parsed, null, 2) : String(parsed);
-  } catch {
-    return String(value);
+  const budget = { left: DETAIL_LIMIT + DETAIL_SPARE };
+  return typeof value === 'string' ? printString(value, '', budget) : print(value, '', budget);
+}
+
+// Printed past DETAIL_LIMIT before the cut
+const DETAIL_SPARE = 1000;
+// Places in one text tried as the start of a JSON object, so that prose full of brackets
+// costs a bounded number of scans
+const EMBEDDED_JSON_TRIES = 20;
+
+/**
+ * Indented JSON, except that a string spanning several lines (a Markdown comment, a prompt)
+ * is printed as a block of its lines, `|` first, with any JSON inside it indented too.
+ * @param {unknown} value
+ * @param {string} indent
+ * @param {{ left: number }} budget - characters still to print; `…` marks where it ran out
+ * @returns {string}
+ */
+function print(value, indent, budget) {
+  if (budget.left <= 0) return '…';
+  if (typeof value === 'string') return printString(value, indent, budget);
+  const inner = `${indent}  `;
+  if (value && typeof value === 'object') {
+    const entries = Array.isArray(value)
+      ? value.map((v) => /** @type {[string | null, unknown]} */ ([null, v]))
+      : Object.entries(value);
+    if (!entries.length) return Array.isArray(value) ? '[]' : '{}';
+    const lines = [];
+    for (const [key, v] of entries) {
+      if (budget.left <= 0) {
+        lines.push(`${inner}…`);
+        break;
+      }
+      const name = key === null ? '' : `${JSON.stringify(key)}: `;
+      budget.left -= inner.length + name.length;
+      lines.push(inner + name + print(v, inner, budget));
+    }
+    const [open, close] = Array.isArray(value) ? ['[', ']'] : ['{', '}'];
+    return `${open}\n${lines.join(',\n')}\n${indent}${close}`;
   }
+  const text = JSON.stringify(value) ?? 'null';
+  budget.left -= text.length;
+  return text;
+}
+
+/**
+ * A string as JSON when it holds JSON (a request `body`, a webhook payload), otherwise as a
+ * quoted string or, over several lines, a block.
+ * @param {string} value
+ * @param {string} indent
+ * @param {{ left: number }} budget
+ * @returns {string}
+ */
+function printString(value, indent, budget) {
+  if (/^\s*[[{]/.test(value)) {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === 'object') return print(parsed, indent, budget);
+    } catch {
+      // Not JSON as a whole; it may still hold some
+    }
+  }
+  const text = expand(value.slice(0, Math.max(0, budget.left)), budget);
+  if (!text.includes('\n')) {
+    const quoted = JSON.stringify(text) + (value.length > text.length ? '…' : '');
+    budget.left -= quoted.length;
+    return indent ? quoted : text;
+  }
+  budget.left -= text.length;
+  return indent ? `|\n${text.replace(/^/gm, `${indent}  `)}` : text;
+}
+
+/**
+ * Text with the JSON objects and arrays written inside it (`<!-- pipeline: {...} -->`)
+ * indented in place. Each try scans from one `{` or `[` to the bracket that closes it.
+ * @param {string} text
+ * @param {{ left: number }} budget
+ * @returns {string}
+ */
+function expand(text, budget) {
+  let out = '';
+  let from = 0;
+  let tries = 0;
+  for (let at = text.search(/[[{]/); at >= 0 && tries < EMBEDDED_JSON_TRIES; tries++) {
+    const end = closingBracket(text, at);
+    if (end > 0) {
+      try {
+        const value = JSON.parse(text.slice(at, end + 1));
+        if (value && typeof value === 'object' && Object.keys(value).length) {
+          out += text.slice(from, at) + print(value, '', budget);
+          from = end + 1;
+        }
+      } catch {
+        // Brackets in prose, not JSON
+      }
+    }
+    const rest = Math.max(at + 1, from);
+    const next = text.slice(rest).search(/[[{]/);
+    at = next < 0 ? -1 : rest + next;
+  }
+  return out + text.slice(from);
+}
+
+/**
+ * Where the bracket opened at `start` closes, skipping brackets inside JSON strings; -1 when
+ * it does not.
+ * @param {string} text
+ * @param {number} start
+ */
+function closingBracket(text, start) {
+  let depth = 0;
+  let quoted = false;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '\\') i++;
+      else if (c === '"') quoted = false;
+    } else if (c === '"') quoted = true;
+    else if (c === '{' || c === '[') depth++;
+    else if (c === '}' || c === ']') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
 }
 
 /**
@@ -538,11 +705,26 @@ function errorLine(/** @type {unknown} */ err) {
 }
 
 /** First line of an error stack stored as a JSON string. */
+/**
+ * An error message as text. A GraphQL call fails with a list of errors as its message, each
+ * with a message of its own.
+ * @param {unknown} message
+ * @returns {string}
+ */
+function text(message) {
+  if (Array.isArray(message)) return message.map(text).join('; ');
+  if (message && typeof message === 'object') {
+    const { message: inner } = /** @type {any} */ (message);
+    return inner ? text(inner) : JSON.stringify(message);
+  }
+  return String(message);
+}
+
 function firstLine(/** @type {unknown} */ err) {
   if (!err) return '';
   try {
     const parsed = typeof err === 'string' ? JSON.parse(err) : err;
-    return String(parsed.message || parsed.stack || '').split('\n')[0];
+    return text(parsed.message || parsed.stack || '').split('\n')[0];
   } catch {
     return String(err).split('\n')[0];
   }
@@ -764,18 +946,35 @@ function linkHooksToCallers(openclaw, appmixer) {
   );
   for (const hook of openclaw.hooks) {
     const hookPath = new URL(hook.url, 'https://x').pathname;
-    hook.callers = [];
+    /** The path of a webhook URL, as a pattern when a variable ({{{…}}}) fills part of it */
+    const pathMatches = (/** @type {string} */ url) => {
+      const path = String(url).replace(/^https?:\/\/[^/]+/, '').split('?')[0];
+      if (!path.includes('{{{')) return { match: path === hookPath, dynamic: false };
+      const pattern = path.split(/\{\{\{[^}]*\}\}\}/).map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[^/]+');
+      return { match: new RegExp('^' + pattern + '$').test(hookPath), dynamic: true };
+    };
+    // A URL with a variable in its path could reach any hook; it counts only for hooks that no
+    // fixed URL calls (the pipeline dispatcher picks its stage hook per status, the mention
+    // integration posts to its own hook by a fixed URL).
+    /** @type {any[]} */
+    const exact = [];
+    /** @type {any[]} */
+    const dynamic = [];
     for (const { template, instance } of instances) {
       for (const webhook of instance.webhooks || []) {
-        if (new URL(webhook.url, 'https://x').pathname !== hookPath) continue;
-        hook.callers.push({
-          flowId: instance.flowId,
-          name: template.name,
-          stage: instance.stage,
-          component: webhook.label
-        });
-        instance.hooks.push(hook.id);
+        const m = pathMatches(webhook.url);
+        if (m.match) (m.dynamic ? dynamic : exact).push({ template, instance, webhook });
       }
     }
+    const callers = exact.length ? exact : dynamic;
+    hook.callers = callers.map(({ template, instance, webhook }) => {
+      instance.hooks.push(hook.id);
+      return {
+        flowId: instance.flowId,
+        name: template.name,
+        stage: instance.stage,
+        component: exact.length ? webhook.label : `${webhook.label}, hook chosen per message`
+      };
+    });
   }
 }
