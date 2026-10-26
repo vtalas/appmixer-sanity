@@ -62,8 +62,15 @@
    */
   const dayInWindow = (day) =>
     new Date(`${day}T00:00`).getTime() + 24 * 3600e3 > Date.now() - errorWindow.ms;
-  const activeWorkflows = $derived((workflows?.workflows || []).filter((w) => !w.inactive));
-  const inactiveWorkflows = $derived((workflows?.workflows || []).filter((w) => w.inactive));
+  /** One group per repository, each with its active and inactive workflows. */
+  const workflowRepos = $derived(
+    (workflows?.repos || []).map((/** @type {any} */ group) => ({
+      ...group,
+      active: group.workflows.filter((/** @type {any} */ w) => !w.inactive),
+      inactive: group.workflows.filter((/** @type {any} */ w) => w.inactive)
+    }))
+  );
+  const activeWorkflows = $derived(workflowRepos.flatMap((group) => group.active));
   const stats = $derived({
     templates: appmixer?.templates?.length ?? 0,
     running: instances.filter((i) => i.stage === 'running').length,
@@ -805,7 +812,9 @@
   <section id="workflows" class="space-y-3">
     <div class="flex items-baseline justify-between">
       <h2 class="text-xl font-semibold">GitHub Actions</h2>
-      {#if workflows}<span class="text-xs text-muted-foreground">{workflows.repo}</span>{/if}
+      {#if workflows}<span class="text-xs text-muted-foreground"
+          >{workflowRepos.map((group) => group.repo).join(' · ')}</span
+        >{/if}
     </div>
     {#if data.workflows?.error}
       <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
@@ -848,23 +857,42 @@
           </span>
         </div>
       {/snippet}
-      <div class="border rounded-lg divide-y">
-        {#each activeWorkflows as workflow (workflow.id)}
-          {@render workflowRow(workflow)}
-        {/each}
-      </div>
-      {#if inactiveWorkflows.length}
-        <details class="border rounded-lg">
-          <summary class="px-3 py-2 text-sm text-muted-foreground cursor-pointer">
-            {inactiveWorkflows.length} inactive (no run in 30 days — removed files or GitHub-managed)
-          </summary>
-          <div class="divide-y border-t opacity-70">
-            {#each inactiveWorkflows as workflow (workflow.id)}
-              {@render workflowRow(workflow)}
-            {/each}
-          </div>
-        </details>
-      {/if}
+      {#each workflowRepos as group (group.repo)}
+        <div class="space-y-2">
+          <a
+            class="text-sm font-medium hover:underline"
+            href="https://github.com/{group.repo}/actions"
+            target="_blank"
+            rel="noreferrer">{group.repo}</a
+          >
+          {#if group.error}
+            <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+              {group.error}
+            </div>
+          {:else}
+            <div class="border rounded-lg divide-y">
+              {#each group.active as workflow (workflow.id)}
+                {@render workflowRow(workflow)}
+              {/each}
+              {#if !group.active.length}
+                <div class="p-3 text-sm text-muted-foreground">no active workflow</div>
+              {/if}
+            </div>
+            {#if group.inactive.length}
+              <details class="border rounded-lg">
+                <summary class="px-3 py-2 text-sm text-muted-foreground cursor-pointer">
+                  {group.inactive.length} inactive (no run in 30 days — removed files or GitHub-managed)
+                </summary>
+                <div class="divide-y border-t opacity-70">
+                  {#each group.inactive as workflow (workflow.id)}
+                    {@render workflowRow(workflow)}
+                  {/each}
+                </div>
+              </details>
+            {/if}
+          {/if}
+        </div>
+      {/each}
     {/if}
   </section>
 

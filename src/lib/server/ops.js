@@ -810,9 +810,33 @@ export async function collectAppmixer(userId) {
   };
 }
 
-/** @param {string} userId - caller's email, or '' for the env configuration */
+/** The release repo, where the marketplace workflows run (same default as the release page). */
+const RELEASE_REPO = env.RELEASE_TARGET_REPO || 'Appmixer-ai/appmixer-components';
+
+/**
+ * The workflows of every repository the connector CI runs in: the configured one (the
+ * responders, Node.js CI) and the release repo (marketplace builds). Each repository is
+ * collected on its own, so one that the token cannot read is reported in its own group.
+ * @param {string} userId - caller's email, or '' for the env configuration
+ */
 export async function collectWorkflows(userId) {
   const { owner, repo, token } = await getGitHubConfig(userId);
+  const repos = [...new Set([`${owner}/${repo}`, RELEASE_REPO])];
+  return {
+    repos: await Promise.all(
+      repos.map(async (fullName) => {
+        const { data, error } = await settle(() => workflowsOfRepo(fullName, token));
+        return { repo: fullName, workflows: data?.workflows || [], error };
+      })
+    )
+  };
+}
+
+/**
+ * @param {string} fullName - owner/repo
+ * @param {string} token
+ */
+async function workflowsOfRepo(fullName, token) {
   const headers = {
     Accept: 'application/vnd.github+json',
     'User-Agent': 'appmixer-sanity-check',
@@ -820,9 +844,7 @@ export async function collectWorkflows(userId) {
   };
   /** @param {string} path */
   const get = async (path) => {
-    const response = await fetch(`https://api.github.com/repos/${owner}/${repo}${path}`, {
-      headers
-    });
+    const response = await fetch(`https://api.github.com/repos/${fullName}${path}`, { headers });
     if (!response.ok) throw new Error(`GitHub ${path}: HTTP ${response.status}`);
     return response.json();
   };
@@ -872,7 +894,7 @@ export async function collectWorkflows(userId) {
         };
       })
   );
-  return { repo: `${owner}/${repo}`, workflows: rows.sort((a, b) => a.name.localeCompare(b.name)) };
+  return { workflows: rows.sort((a, b) => a.name.localeCompare(b.name)) };
 }
 
 export async function collectOpenClaw() {
