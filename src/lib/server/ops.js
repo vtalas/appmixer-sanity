@@ -23,6 +23,13 @@ export const HUB_CATEGORY = 'appmixer-sanity-hub';
 const ERROR_WINDOW_DAYS = 7;
 /** The shorter windows /ops counts errors in, besides ERROR_WINDOW_DAYS. */
 const ERROR_WINDOWS = ['1h', '24h', '3d'];
+/** Errors per day, as the log search computed them by default before engine 6.6 */
+const DAILY_HISTOGRAM = {
+  field: 'gridTimestamp',
+  calendar_interval: '1d',
+  time_zone: 'UTC',
+  min_doc_count: 0
+};
 const INACTIVE_DAYS = 30;
 // Run tree of an instance: runs per page, the entries read to find a page and to read its
 // runs in full, and how much of one entry is sent
@@ -41,14 +48,22 @@ const message = (err) => (err instanceof Error ? err.message : String(err));
  * @param {string} token
  * @param {string} path
  * @param {Record<string, string | string[]>} [params]
+ * @param {object} [body]
  */
-async function appmixerGet(baseUrl, token, path, params = {}) {
+async function appmixerGet(baseUrl, token, path, params = {}, body = undefined) {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     for (const v of Array.isArray(value) ? value : [value]) search.append(key, v);
   }
   const response = await fetch(`${baseUrl}${path}?${search}`, {
-    headers: { Authorization: `Bearer ${token}` }
+    // A body makes it a POST: the log search takes its aggregations only that way
+    ...(body
+      ? {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        }
+      : { headers: { Authorization: `Bearer ${token}` } })
   });
   if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
   return response.json();
@@ -56,9 +71,10 @@ async function appmixerGet(baseUrl, token, path, params = {}) {
 
 /**
  * Error count per day for the last ERROR_WINDOW_DAYS, the counts within the shorter windows
- * /ops lets you pick (`byWindow`) and the newest error of one flow. The log search returns
- * only a daily histogram (`buckets`) next to the hits, so each shorter window is a search of
- * its own with no hits, its count the sum of its buckets.
+ * /ops lets you pick (`byWindow`) and the newest error of one flow. The log search counts
+ * only through a daily histogram next to the hits, so each shorter window is a search of its
+ * own with no hits, its count the sum of its buckets. Engine 6.6 adds no histogram to a GET
+ * any more: it is asked for in the body of a POST, and comes back under `aggregations`.
  * @param {string} baseUrl
  * @param {string} token
  * @param {string} flowId
@@ -66,15 +82,23 @@ async function appmixerGet(baseUrl, token, path, params = {}) {
 async function flowErrors(baseUrl, token, flowId) {
   /** @param {string} since @param {string} size */
   const search = (since, size) =>
-    appmixerGet(baseUrl, token, '/logs', {
-      flowId,
-      query: `severity:error AND gridTimestamp:>now-${since}`,
-      sort: 'gridTimestamp:desc',
-      size
-    });
+    appmixerGet(
+      baseUrl,
+      token,
+      '/logs',
+      {
+        flowId,
+        query: `severity:error AND gridTimestamp:>now-${since}`,
+        sort: 'gridTimestamp:desc',
+        size
+      },
+      { aggs: { by_interval: { date_histogram: DAILY_HISTOGRAM } } }
+    );
+  /** @param {any} data @returns {any[]} */
+  const histogram = (data) => data.buckets || data.aggregations?.by_interval?.buckets || [];
   /** @param {any} data */
   const count = (data) =>
-    (data.buckets || []).reduce(
+    histogram(data).reduce(
       (/** @type {number} */ sum, /** @type {any} */ b) => sum + (b.doc_count || 0),
       0
     );
@@ -82,7 +106,7 @@ async function flowErrors(baseUrl, token, flowId) {
     search(`${ERROR_WINDOW_DAYS}d`, '1'),
     ...ERROR_WINDOWS.map((window) => search(window, '0'))
   ]);
-  const buckets = (data.buckets || []).map((/** @type {any} */ b) => ({
+  const buckets = histogram(data).map((/** @type {any} */ b) => ({
     day: String(b.key_as_string || '').slice(0, 10),
     count: b.doc_count || 0
   }));
