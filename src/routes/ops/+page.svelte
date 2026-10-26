@@ -2,6 +2,7 @@
   import { Badge } from '$lib/components/ui/badge';
   import { Button } from '$lib/components/ui/button';
   import { invalidateAll } from '$app/navigation';
+  import { onMount } from 'svelte';
   import { ChevronDown, ChevronRight, ExternalLink, RefreshCw, ScrollText } from 'lucide-svelte';
 
   let { data } = $props();
@@ -11,13 +12,63 @@
   const openclaw = $derived(data.openclaw?.data);
 
   const instances = $derived((appmixer?.templates || []).flatMap((t) => t.instances));
+
+  // Errors count, and show in red, only within the window picked here; older ones fade out.
+  // The pick is the viewer's own and is remembered in the browser.
+  const ERROR_WINDOWS = [
+    { key: '1h', label: '1 h', ms: 3600e3 },
+    { key: '24h', label: '24 h', ms: 24 * 3600e3 },
+    { key: '3d', label: '3 d', ms: 3 * 24 * 3600e3 },
+    { key: '7d', label: '7 d', ms: 7 * 24 * 3600e3 }
+  ];
+  /** An error newer than this is marked new */
+  const NEW_MS = 3600e3;
+  const ERROR_WINDOW_KEY = 'ops.errorWindow';
+  let errorWindowKey = $state('24h');
+  onMount(() => {
+    try {
+      const saved = localStorage.getItem(ERROR_WINDOW_KEY);
+      if (ERROR_WINDOWS.some((w) => w.key === saved)) errorWindowKey = /** @type {string} */ (saved);
+    } catch {
+      // Storage blocked: the default window
+    }
+  });
+  const errorWindow = $derived(
+    ERROR_WINDOWS.find((w) => w.key === errorWindowKey) || ERROR_WINDOWS[1]
+  );
+  /** @param {string} key */
+  function pickErrorWindow(key) {
+    errorWindowKey = key;
+    try {
+      localStorage.setItem(ERROR_WINDOW_KEY, key);
+    } catch {
+      // Not remembered, still applied
+    }
+  }
+  /**
+   * Errors of an instance within the picked window.
+   * @param {any} instance
+   * @returns {number}
+   */
+  const recentErrors = (instance) =>
+    instance.errors?.byWindow?.[errorWindow.key] ?? instance.errors?.total ?? 0;
+  /** @param {string | null | undefined} at */
+  const withinWindow = (at) => !!at && Date.now() - new Date(at).getTime() <= errorWindow.ms;
+  /** @param {string | null | undefined} at */
+  const isNew = (at) => !!at && Date.now() - new Date(at).getTime() <= NEW_MS;
+  /**
+   * Whether a day of the error histogram reaches into the picked window.
+   * @param {string} day - YYYY-MM-DD
+   */
+  const dayInWindow = (day) =>
+    new Date(`${day}T00:00`).getTime() + 24 * 3600e3 > Date.now() - errorWindow.ms;
   const activeWorkflows = $derived((workflows?.workflows || []).filter((w) => !w.inactive));
   const inactiveWorkflows = $derived((workflows?.workflows || []).filter((w) => w.inactive));
   const stats = $derived({
     templates: appmixer?.templates?.length ?? 0,
     running: instances.filter((i) => i.stage === 'running').length,
     instances: instances.length,
-    withErrors: instances.filter((i) => (i.errors?.total ?? 0) > 0).length,
+    withErrors: instances.filter((i) => recentErrors(i) > 0).length,
     outdated: instances.filter((i) => i.outdated).length,
     missing: (appmixer?.templates || []).filter(
       (t) => !t.instances.some((i) => i.stage === 'running')
@@ -167,6 +218,47 @@
     return output && output.summary !== '{}' ? output.summary : '';
   }
 
+  /**
+   * A component's type without the vendor prefix: its connector, module and component, e.g.
+   * `github.project.StatusChanged`.
+   * @param {string | null | undefined} type
+   */
+  const componentType = (type) => (type ? type.replace(/^appmixer\./, '') : '');
+
+  /**
+   * An entry's detail cut into tokens to colour, when it is JSON; anything else stays one
+   * plain token.
+   * @param {string} text
+   * @returns {Array<{ text: string, kind: string }>}
+   */
+  function jsonTokens(text) {
+    if (!/^\s*[[{]/.test(text)) return [{ text, kind: '' }];
+    /** @type {Array<{ text: string, kind: string }>} */
+    const tokens = [];
+    const pattern =
+      /("(?:[^"\\\n]|\\.)*")(\s*:)?|(?<=(?::|^\s*|\[)\s?)(?:true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=,?$)/gm;
+    let last = 0;
+    for (const match of text.matchAll(pattern)) {
+      const at = match.index ?? 0;
+      if (at > last) tokens.push({ text: text.slice(last, at), kind: '' });
+      if (match[2]) {
+        tokens.push({ text: match[1], kind: 'key' }, { text: match[2], kind: '' });
+      } else {
+        tokens.push({ text: match[0], kind: match[1] ? 'string' : 'literal' });
+      }
+      last = at + match[0].length;
+    }
+    if (last < text.length) tokens.push({ text: text.slice(last), kind: '' });
+    return tokens;
+  }
+
+  /** @type {Record<string, string>} */
+  const tokenClass = {
+    key: 'text-sky-800',
+    string: 'text-emerald-800',
+    literal: 'text-amber-700'
+  };
+
   let refreshing = $state(false);
   async function refresh() {
     refreshing = true;
@@ -226,19 +318,24 @@
 
 <!-- One component of a run on its row. The trigger is the run's own row and carries `run`.
      A component that set off exactly one other is followed by it on the same level, so a
-     chain reads top to bottom; only a component that set off several opens into branches. -->
+     chain reads top to bottom; only a component that set off several opens into branches.
+     That holds only for a component `alone` where it hangs: of several side by side, each
+     opens onto what it set off, so one chain does not run on into the next. -->
 {#snippet step(
   /** @type {any} */ panel,
   /** @type {string} */ path,
   /** @type {any} */ node,
-  /** @type {any} */ run
+  /** @type {any} */ run,
+  /** @type {boolean} */ alone
 )}
   {@const key = `${path}/${node.id}`}
   {@const dataKey = `${key}:data`}
   {@const next = below(node)}
-  {@const expandable = run ? next.length > 0 : next.length > 1}
-  <!-- A run opens on a click; below it, the way to a failure is already open -->
-  {@const expanded = expandable && (panel.open[key] ?? (!run && node.failing))}
+  {@const expandable = run || !alone ? next.length > 0 : next.length > 1}
+  <!-- A run opens on a click; below it, the way to a failure is already open, and so is a
+       chain that would have followed on the same level -->
+  {@const expanded =
+    expandable && (panel.open[key] ?? (!run && (node.failing || next.length === 1)))}
   {@const status = run ? run.status : node.retries ? 'retried' : node.status}
   {@const text = run ? run.summary : outcome(node)}
   <div>
@@ -263,7 +360,10 @@
         {/if}
         <span class="px-1.5 rounded border whitespace-nowrap {statusClass[status]}">{status}</span>
         <span class="font-medium whitespace-nowrap" title={node.type}>{node.label}</span>
-        {#if !expandable || run}
+        {#if node.type}
+          <code class="text-muted-foreground whitespace-nowrap">{componentType(node.type)}</code>
+        {/if}
+        {#if run || !expanded || next.length === 1}
           <!-- Which way it went, where the branches themselves are not on show -->
           {#each (node.ports || []).filter((/** @type {any} */ p) => p.fired) as port (port.name)}
             <code class="px-1.5 rounded border bg-background whitespace-nowrap">{port.name}</code>
@@ -325,7 +425,9 @@
             </button>
             {#if panel.open[entryKey]}
               <pre
-                class="mt-1 ml-5 p-2 bg-muted/30 border rounded text-[11px] whitespace-pre-wrap break-all max-h-80 overflow-auto">{entry.detail}</pre>
+                class="mt-1 ml-5 p-2 bg-muted/30 border rounded text-[11px] whitespace-pre-wrap break-all max-h-80 overflow-auto">{#each jsonTokens(entry.detail) as token}{#if token.kind}<span
+                      class={tokenClass[token.kind]}>{token.text}</span
+                    >{:else}{token.text}{/if}{/each}</pre>
             {/if}
           </div>
         {/each}
@@ -334,15 +436,15 @@
     {#if expanded}
       <div class="ml-[5px] pl-4 border-l">
         {#if next.length === 1}
-          {@render step(panel, key, next[0], null)}
+          {@render step(panel, key, next[0], null, true)}
         {:else}
           {@render branches(panel, key, node)}
         {/if}
       </div>
     {/if}
   </div>
-  {#if !run && next.length === 1}
-    {@render step(panel, key, next[0], null)}
+  {#if !run && alone && next.length === 1}
+    {@render step(panel, key, next[0], null, true)}
   {/if}
 {/snippet}
 
@@ -377,14 +479,14 @@
       {#if portOpen}
         <div class="ml-[5px] pl-4 border-l">
           {#each port.children as child (child.id)}
-            {@render step(panel, portKey, child, null)}
+            {@render step(panel, portKey, child, null, port.children.length === 1)}
           {/each}
         </div>
       {/if}
     </div>
   {/each}
   {#each node.children as child (child.id)}
-    {@render step(panel, key, child, null)}
+    {@render step(panel, key, child, null, node.children.length === 1)}
   {/each}
 {/snippet}
 
@@ -424,7 +526,9 @@
       class="border rounded-lg p-3 {stats.withErrors ? 'bg-amber-50 border-amber-200' : ''}"
     >
       <div class="text-2xl font-bold">{stats.withErrors}</div>
-      <div class="text-xs text-muted-foreground">Instances with errors (7 days)</div>
+      <div class="text-xs text-muted-foreground">
+        Instances with errors ({errorWindow.label})
+      </div>
     </a>
     <a
       href="#appmixer"
@@ -459,7 +563,23 @@
   <!-- Appmixer -->
   <section id="appmixer" class="space-y-3">
     <div class="flex items-baseline justify-between">
-      <h2 class="text-xl font-semibold">Appmixer integrations</h2>
+      <div class="flex items-baseline gap-4">
+        <h2 class="text-xl font-semibold">Appmixer integrations</h2>
+        {#if appmixer}
+          <span class="flex items-center gap-1 text-xs text-muted-foreground">
+            errors in
+            {#each ERROR_WINDOWS as w (w.key)}
+              <button
+                type="button"
+                class="px-2 py-0.5 rounded border {w.key === errorWindow.key
+                  ? 'bg-foreground text-background border-foreground'
+                  : 'hover:text-foreground'}"
+                onclick={() => pickErrorWindow(w.key)}>{w.label}</button
+              >
+            {/each}
+          </span>
+        {/if}
+      </div>
       {#if appmixer}
         <span class="text-xs text-muted-foreground">
           {appmixer.instanceUrl} · category <code>{appmixer.category?.name || 'missing'}</code> ·
@@ -521,13 +641,17 @@
                 {#if instance.errors?.error}
                   <span class="text-xs text-red-700">errors: {instance.errors.error}</span>
                 {:else if instance.errors?.total}
+                  {@const recent = recentErrors(instance)}
+                  {@const last = instance.errors.last}
                   <span
                     class="inline-flex items-end gap-0.5 h-4"
-                    title="errors per day, last 7 days"
+                    title="errors per day, last 7 days; grey: before the last {errorWindow.label}"
                   >
                     {#each instance.errors.buckets as bucket}
                       <span
-                        class="w-1.5 bg-red-400 rounded-sm"
+                        class="w-1.5 rounded-sm {dayInWindow(bucket.day)
+                          ? 'bg-red-400'
+                          : 'bg-muted-foreground/25'}"
                         style="height: {Math.max(
                           2,
                           Math.round((bucket.count / maxBucket(instance.errors.buckets)) * 16)
@@ -536,23 +660,42 @@
                       ></span>
                     {/each}
                   </span>
-                  <button
-                    type="button"
-                    class="text-xs text-red-700 underline decoration-dotted hover:decoration-solid"
-                    onclick={() => toggleLogs(instance.flowId, true)}
-                    >{instance.errors.total} errors / 7 d</button
-                  >
-                  {#if instance.errors.last}
-                    <span
-                      class="text-xs text-muted-foreground truncate max-w-xl"
-                      title={instance.errors.last.message}
+                  {#if recent}
+                    {#if isNew(last?.at)}
+                      <span
+                        class="px-1.5 rounded bg-red-600 text-white text-[10px] font-semibold uppercase"
+                        title="an error in the last hour">new</span
+                      >
+                    {/if}
+                    <button
+                      type="button"
+                      class="text-xs text-red-700 underline decoration-dotted hover:decoration-solid"
+                      onclick={() => toggleLogs(instance.flowId, true)}
+                      >{recent} error{recent === 1 ? '' : 's'} / {errorWindow.label}</button
                     >
-                      last {ago(instance.errors.last.at)} in {instance.errors.last.component}: {instance
-                        .errors.last.message}
-                    </span>
+                    {#if last}
+                      <span
+                        class="text-xs text-muted-foreground truncate max-w-xl"
+                        title={last.message}
+                      >
+                        last {ago(last.at)} in {last.component}: {last.message}
+                      </span>
+                    {/if}
+                  {:else}
+                    <span class="text-xs text-green-700">no errors / {errorWindow.label}</span>
+                    <!-- Older ones stay reachable, without drawing the eye -->
+                    <button
+                      type="button"
+                      class="text-xs text-muted-foreground/70 underline decoration-dotted hover:text-foreground"
+                      title={last
+                        ? `last ${ago(last.at)} in ${last.component}: ${last.message}`
+                        : ''}
+                      onclick={() => toggleLogs(instance.flowId, true)}
+                      >{instance.errors.total} older, last {ago(last?.at)}</button
+                    >
                   {/if}
                 {:else}
-                  <span class="text-xs text-green-700">no errors / 7 d</span>
+                  <span class="text-xs text-green-700">no errors / {errorWindow.label}</span>
                 {/if}
                 <button
                   type="button"
@@ -629,8 +772,12 @@
                         : ''}"
                     >
                       {#each panel.runs as run (run.id)}
-                        <div class="px-3 py-0.5">
-                          {@render step(panel, run.id, run.root, run)}
+                        <!-- Runs before the error window are there for reference only -->
+                        <div
+                          class="px-3 py-0.5 {withinWindow(run.at) ? '' : 'opacity-50'}"
+                          title={withinWindow(run.at) ? '' : `before the last ${errorWindow.label}`}
+                        >
+                          {@render step(panel, run.id, run.root, run, true)}
                         </div>
                       {/each}
                       {#if panel.next}
@@ -728,7 +875,7 @@
          expands to the exec steps by title and the agent's closing text. -->
     <div class="border rounded-lg divide-y">
       {#each runs as run (run.at)}
-        {@const details = run.steps?.length || run.result || run.stage}
+        {@const details = run.steps?.length || run.result || run.stage?.report}
         <div class="px-3 py-2 text-xs space-y-1">
           <button
             type="button"
@@ -759,6 +906,43 @@
                 onclick={(e) => e.stopPropagation()}>PR #{run.pr}</a
               >
             {/if}
+            <!-- The pipeline stage this hook call started (Build of an issue, Testing, Fix,
+                 Doc&Verification of a PR) and what it decided -->
+            {#if run.stage}
+              <span
+                class="px-1.5 py-0.5 rounded border {run.stage.result === 'passed'
+                  ? 'border-green-400 text-green-700'
+                  : run.stage.result === 'running'
+                    ? 'border-amber-400 text-amber-800'
+                    : 'border-red-400 text-red-700'}"
+                >{run.stage.name}: {run.stage.result}{#if run.stage.durationSec != null}{` · ${
+                    run.stage.durationSec < 120
+                      ? `${run.stage.durationSec} s`
+                      : `${Math.round(run.stage.durationSec / 60)} min`
+                  }`}{/if}</span
+              >
+              {#if run.stage.issue}
+                {@const [repo, number] = run.stage.issue.split('#')}
+                <a
+                  class="hover:underline font-medium"
+                  href="https://github.com/{repo}/issues/{number}"
+                  target="_blank"
+                  rel="noreferrer"
+                  onclick={(e) => e.stopPropagation()}
+                  >{repo.replace('Appmixer-ai/appmixer-', '')}#{number}</a
+                >
+              {/if}
+              {#if run.stage.prUrl && !run.pr}
+                <a
+                  class="hover:underline font-medium"
+                  href={run.stage.prUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  onclick={(e) => e.stopPropagation()}
+                  >→ PR #{run.stage.prUrl.split('/').pop()}</a
+                >
+              {/if}
+            {/if}
             {#if run.durationSec != null}<span class="text-muted-foreground"
                 >{run.durationSec} s</span
               >{/if}
@@ -779,33 +963,23 @@
                       ? 'border-muted-foreground/40 text-muted-foreground'
                       : 'border-amber-400 text-amber-800'}"
                 title="resolve.sh run {r.at}{r.reason ? ' — ' + r.reason : ''}"
-                >resolve.sh: {r.status}{#if r.reason} · {r.reason}{/if}{#if r.code_changed}
+                >resolve.sh: {r.status}{#if r.reason}
+                  · {r.reason}{/if}{#if r.code_changed}
                   · pushed{/if}</span
               >
             {/each}
-            {#if run.stage}
-              <span
-                class="px-1.5 py-0.5 rounded border border-dashed {run.stage.result === 'passed'
-                  ? 'border-green-400 text-green-700'
-                  : run.stage.result === 'failed'
-                    ? 'border-red-400 text-red-700'
-                    : run.stage.result === 'running'
-                      ? 'border-amber-400 text-amber-800'
-                      : 'border-muted-foreground/40 text-muted-foreground'}"
-                title="{run.stage.name} runner {run.stage.dir}"
-                >{run.stage.name}: {run.stage.result}{#if run.stage.durationSec != null}
-                  · {run.stage.durationSec < 120
-                    ? run.stage.durationSec + ' s'
-                    : Math.round(run.stage.durationSec / 60) + ' min'}{/if}</span
-              >
-            {/if}
-            {#if run.summary}<span
+            {#if run.summary || run.stage?.summary}<span
                 class="text-muted-foreground truncate max-w-2xl"
-                title={run.summary}>{run.summary}</span
+                title={run.summary || run.stage.summary}>{run.summary || run.stage.summary}</span
               >{/if}
           </button>
           {#if details && openHookRuns[run.at]}
             <div class="pl-6 space-y-1">
+              {#if run.stage?.report}
+                <div class="whitespace-pre-wrap border-l-2 border-amber-300 pl-2">
+                  {run.stage.name} report: {run.stage.report}
+                </div>
+              {/if}
               {#if run.steps?.length}
                 <ol class="list-decimal pl-4 text-muted-foreground">
                   {#each run.steps as step}<li>{step}</li>{/each}
@@ -832,19 +1006,6 @@
                   </div>
                 {/if}
               {/each}
-              {#if run.stage}
-                <!-- The hook turn only launches the runner; what the stage found is here -->
-                <div class="border border-dashed rounded px-2 py-1 space-y-1">
-                  <div class="text-muted-foreground">
-                    {run.stage.name} runner {when(run.stage.at)} · PR #{run.stage.pr}
-                    {#if run.stage.target}· comment on {run.stage.target}{/if}
-                  </div>
-                  {#if run.stage.summary}<div>{run.stage.summary}</div>{/if}
-                  {#if run.stage.report}
-                    <div class="whitespace-pre-wrap text-muted-foreground">{run.stage.report}</div>
-                  {/if}
-                </div>
-              {/if}
             </div>
           {/if}
         </div>
@@ -905,12 +1066,62 @@
           <div class="text-xs text-muted-foreground">
             {(openclaw.mentionResponder?.recent || []).filter(
               (/** @type {any} */ r) => r.status === 'replied'
-            )
-              .length} replied of the last {openclaw.mentionResponder?.recent?.length ?? 0} ·
+            ).length} replied of the last {openclaw.mentionResponder?.recent?.length ?? 0} ·
             {openclaw.mentionResponder?.runs ?? 0} runs on disk
           </div>
         </div>
       </div>
+      <!-- The OpenClaw cron job openclaw-deploy keeps the host on appmixer-components dev:
+           its last run, the dev commit it deployed, and deploy.log (newest first). -->
+      {#if openclaw.deploy}
+        {@const deploy = openclaw.deploy}
+        <div class="border rounded-lg p-3 space-y-1 text-sm">
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="font-medium">Deploy from dev</span>
+            {#if !deploy.cron}
+              <Badge variant="outline" class="text-red-700">cron job missing</Badge>
+            {:else if !deploy.cron.enabled}
+              <Badge variant="outline" class="text-amber-800">disabled</Badge>
+            {:else if deploy.cron.lastStatus && deploy.cron.lastStatus !== 'ok'}
+              <Badge variant="outline" class="text-red-700">last run {deploy.cron.lastStatus}</Badge>
+            {/if}
+            {#if deploy.restartPending}
+              <Badge variant="outline" class="text-amber-800">gateway restart pending</Badge>
+            {/if}
+          </div>
+          {#if deploy.cron}
+            <div class="text-xs text-muted-foreground">
+              cron <code>openclaw-deploy</code> every {deploy.cron.everyMin} min · last run
+              {ago(deploy.cron.lastRunAt)}
+              {#if deploy.cron.lastStatus}({deploy.cron.lastStatus}){/if}
+            </div>
+          {/if}
+          {#if deploy.commit}
+            <div class="text-xs text-muted-foreground">
+              dev <a
+                class="hover:underline"
+                href="https://github.com/Appmixer-ai/appmixer-components/commit/{deploy.commit
+                  .sha}"
+                target="_blank"
+                rel="noreferrer"><code>{deploy.commit.sha.slice(0, 8)}</code></a
+              >
+              {deploy.commit.subject} · {ago(deploy.commit.at)}
+            </div>
+          {/if}
+          {#if deploy.log?.length}
+            <div class="text-xs space-y-0.5 pt-1">
+              {#each deploy.log as entry, i (i)}
+                <div class={/FAILED|not deployed/.test(entry.text) ? 'text-red-700' : ''}>
+                  <span class="text-muted-foreground">{ago(entry.at)}</span>
+                  {entry.text}
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <div class="text-xs text-muted-foreground">deploy.log is empty</div>
+          {/if}
+        </div>
+      {/if}
       <!-- Every hook the gateway maps: what it is (URL, agent, model, how the transform runs the
            agent) and which Appmixer integration instance calls it. A hook nothing calls, or a
            hook that nginx does not expose, is flagged. -->
@@ -997,7 +1208,11 @@
                         ? 'bg-muted text-muted-foreground'
                         : 'bg-amber-50 text-amber-800 border-amber-200'}">{entry.status}</span
                 >
-                <a class="hover:underline font-medium" href={entry.url} target="_blank" rel="noreferrer"
+                <a
+                  class="hover:underline font-medium"
+                  href={entry.url}
+                  target="_blank"
+                  rel="noreferrer"
                   >PR #{entry.pr}{#if entry.title}
                     · {entry.title}{/if}</a
                 >
@@ -1006,7 +1221,9 @@
                 {#if entry.mentions?.length}
                   <span class="text-muted-foreground">
                     {entry.mentions.length} mention{entry.mentions.length === 1 ? '' : 's'} by
-                    {[...new Set(entry.mentions.map((/** @type {any} */ m) => m.author))].join(', ')}
+                    {[...new Set(entry.mentions.map((/** @type {any} */ m) => m.author))].join(
+                      ', '
+                    )}
                   </span>
                 {/if}
                 {#if entry.durationMs != null}
