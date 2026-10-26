@@ -915,7 +915,11 @@
                   : run.stage.result === 'running'
                     ? 'border-amber-400 text-amber-800'
                     : 'border-red-400 text-red-700'}"
-                >{run.stage.name}: {run.stage.result}</span
+                >{run.stage.name}: {run.stage.result}{#if run.stage.durationSec != null}{` · ${
+                    run.stage.durationSec < 120
+                      ? `${run.stage.durationSec} s`
+                      : `${Math.round(run.stage.durationSec / 60)} min`
+                  }`}{/if}</span
               >
               {#if run.stage.issue}
                 {@const [repo, number] = run.stage.issue.split('#')}
@@ -945,7 +949,7 @@
             {#if run.modelCalls}<span class="text-muted-foreground"
                 >{run.modelCalls} model calls · {run.toolCalls} steps</span
               >{/if}
-            {#if run.costUsd != null}<span class="text-muted-foreground"
+            {#if run.costUsd}<span class="text-muted-foreground"
                 >${run.costUsd.toFixed(3)}</span
               >{/if}
             <span class="text-muted-foreground">{run.model}</span>
