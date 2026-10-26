@@ -318,19 +318,24 @@
 
 <!-- One component of a run on its row. The trigger is the run's own row and carries `run`.
      A component that set off exactly one other is followed by it on the same level, so a
-     chain reads top to bottom; only a component that set off several opens into branches. -->
+     chain reads top to bottom; only a component that set off several opens into branches.
+     That holds only for a component `alone` where it hangs: of several side by side, each
+     opens onto what it set off, so one chain does not run on into the next. -->
 {#snippet step(
   /** @type {any} */ panel,
   /** @type {string} */ path,
   /** @type {any} */ node,
-  /** @type {any} */ run
+  /** @type {any} */ run,
+  /** @type {boolean} */ alone
 )}
   {@const key = `${path}/${node.id}`}
   {@const dataKey = `${key}:data`}
   {@const next = below(node)}
-  {@const expandable = run ? next.length > 0 : next.length > 1}
-  <!-- A run opens on a click; below it, the way to a failure is already open -->
-  {@const expanded = expandable && (panel.open[key] ?? (!run && node.failing))}
+  {@const expandable = run || !alone ? next.length > 0 : next.length > 1}
+  <!-- A run opens on a click; below it, the way to a failure is already open, and so is a
+       chain that would have followed on the same level -->
+  {@const expanded =
+    expandable && (panel.open[key] ?? (!run && (node.failing || next.length === 1)))}
   {@const status = run ? run.status : node.retries ? 'retried' : node.status}
   {@const text = run ? run.summary : outcome(node)}
   <div>
@@ -358,7 +363,7 @@
         {#if node.type}
           <code class="text-muted-foreground whitespace-nowrap">{componentType(node.type)}</code>
         {/if}
-        {#if !expandable || run}
+        {#if run || !expanded || next.length === 1}
           <!-- Which way it went, where the branches themselves are not on show -->
           {#each (node.ports || []).filter((/** @type {any} */ p) => p.fired) as port (port.name)}
             <code class="px-1.5 rounded border bg-background whitespace-nowrap">{port.name}</code>
@@ -431,15 +436,15 @@
     {#if expanded}
       <div class="ml-[5px] pl-4 border-l">
         {#if next.length === 1}
-          {@render step(panel, key, next[0], null)}
+          {@render step(panel, key, next[0], null, true)}
         {:else}
           {@render branches(panel, key, node)}
         {/if}
       </div>
     {/if}
   </div>
-  {#if !run && next.length === 1}
-    {@render step(panel, key, next[0], null)}
+  {#if !run && alone && next.length === 1}
+    {@render step(panel, key, next[0], null, true)}
   {/if}
 {/snippet}
 
@@ -474,14 +479,14 @@
       {#if portOpen}
         <div class="ml-[5px] pl-4 border-l">
           {#each port.children as child (child.id)}
-            {@render step(panel, portKey, child, null)}
+            {@render step(panel, portKey, child, null, port.children.length === 1)}
           {/each}
         </div>
       {/if}
     </div>
   {/each}
   {#each node.children as child (child.id)}
-    {@render step(panel, key, child, null)}
+    {@render step(panel, key, child, null, node.children.length === 1)}
   {/each}
 {/snippet}
 
@@ -772,7 +777,7 @@
                           class="px-3 py-0.5 {withinWindow(run.at) ? '' : 'opacity-50'}"
                           title={withinWindow(run.at) ? '' : `before the last ${errorWindow.label}`}
                         >
-                          {@render step(panel, run.id, run.root, run)}
+                          {@render step(panel, run.id, run.root, run, true)}
                         </div>
                       {/each}
                       {#if panel.next}
