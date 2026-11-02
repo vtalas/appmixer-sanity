@@ -43,6 +43,33 @@ const FLOW_NODE = 'flow';
 /** @param {unknown} err */
 const message = (err) => (err instanceof Error ? err.message : String(err));
 
+// The engine serves at most 4 log searches of one user at a time and answers the fifth with
+// 429 "max connections reached: 4". /ops keeps to 3, so a run tree opened meanwhile still gets
+// through, and waits a little and asks again when another client took the slots.
+const LOG_SEARCHES = 3;
+const LOG_RETRY_MS = [500, 1500, 3000];
+let logSearches = 0;
+/** @type {(() => void)[]} */
+const logQueue = [];
+
+/**
+ * Runs a log search once fewer than LOG_SEARCHES are under way.
+ * @template T
+ * @param {() => Promise<T>} search
+ * @returns {Promise<T>}
+ */
+async function inLogSlot(search) {
+  if (logSearches >= LOG_SEARCHES)
+    await new Promise((resolve) => logQueue.push(() => resolve(undefined)));
+  logSearches += 1;
+  try {
+    return await search();
+  } finally {
+    logSearches -= 1;
+    logQueue.shift()?.();
+  }
+}
+
 /**
  * @param {string} baseUrl
  * @param {string} token
@@ -51,6 +78,27 @@ const message = (err) => (err instanceof Error ? err.message : String(err));
  * @param {object} [body]
  */
 async function appmixerGet(baseUrl, token, path, params = {}, body = undefined) {
+  if (path !== '/logs') return appmixerFetch(baseUrl, token, path, params, body);
+  return inLogSlot(async () => {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await appmixerFetch(baseUrl, token, path, params, body);
+      } catch (err) {
+        if (!/HTTP 429$/.test(message(err)) || attempt >= LOG_RETRY_MS.length) throw err;
+        await new Promise((resolve) => setTimeout(resolve, LOG_RETRY_MS[attempt]));
+      }
+    }
+  });
+}
+
+/**
+ * @param {string} baseUrl
+ * @param {string} token
+ * @param {string} path
+ * @param {Record<string, string | string[]>} params
+ * @param {object} [body]
+ */
+async function appmixerFetch(baseUrl, token, path, params, body) {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     for (const v of Array.isArray(value) ? value : [value]) search.append(key, v);
@@ -71,29 +119,37 @@ async function appmixerGet(baseUrl, token, path, params = {}, body = undefined) 
 
 /**
  * Error count per day for the last ERROR_WINDOW_DAYS, the counts within the shorter windows
- * /ops lets you pick (`byWindow`) and the newest error of one flow. The log search counts
- * only through a daily histogram next to the hits, so each shorter window is a search of its
- * own with no hits, its count the sum of its buckets. Engine 6.6 adds no histogram to a GET
- * any more: it is asked for in the body of a POST, and comes back under `aggregations`.
+ * /ops lets you pick (`byWindow`) and the newest error of one flow, all from one search: the
+ * daily histogram and a date range per shorter window are aggregations next to the hit.
+ * Engine 6.6 adds no histogram to a GET any more: it is asked for in the body of a POST, and
+ * comes back under `aggregations`.
  * @param {string} baseUrl
  * @param {string} token
  * @param {string} flowId
  */
 async function flowErrors(baseUrl, token, flowId) {
-  /** @param {string} since @param {string} size */
-  const search = (since, size) =>
-    appmixerGet(
-      baseUrl,
-      token,
-      '/logs',
-      {
-        flowId,
-        query: `severity:error AND gridTimestamp:>now-${since}`,
-        sort: 'gridTimestamp:desc',
-        size
-      },
-      { aggs: { by_interval: { date_histogram: DAILY_HISTOGRAM } } }
-    );
+  const data = await appmixerGet(
+    baseUrl,
+    token,
+    '/logs',
+    {
+      flowId,
+      query: `severity:error AND gridTimestamp:>now-${ERROR_WINDOW_DAYS}d`,
+      sort: 'gridTimestamp:desc',
+      size: '1'
+    },
+    {
+      aggs: {
+        by_interval: { date_histogram: DAILY_HISTOGRAM },
+        windows: {
+          date_range: {
+            field: 'gridTimestamp',
+            ranges: ERROR_WINDOWS.map((window) => ({ key: window, from: `now-${window}` }))
+          }
+        }
+      }
+    }
+  );
   /** @param {any} data @returns {any[]} */
   const histogram = (data) => data.buckets || data.aggregations?.by_interval?.buckets || [];
   /** @param {any} data */
@@ -102,10 +158,8 @@ async function flowErrors(baseUrl, token, flowId) {
       (/** @type {number} */ sum, /** @type {any} */ b) => sum + (b.doc_count || 0),
       0
     );
-  const [data, ...shorter] = await Promise.all([
-    search(`${ERROR_WINDOW_DAYS}d`, '1'),
-    ...ERROR_WINDOWS.map((window) => search(window, '0'))
-  ]);
+  /** @type {any[]} */
+  const ranges = data.aggregations?.windows?.buckets || [];
   const buckets = histogram(data).map((/** @type {any} */ b) => ({
     day: String(b.key_as_string || '').slice(0, 10),
     count: b.doc_count || 0
@@ -115,7 +169,12 @@ async function flowErrors(baseUrl, token, flowId) {
   return {
     total,
     byWindow: {
-      ...Object.fromEntries(ERROR_WINDOWS.map((window, i) => [window, count(shorter[i])])),
+      ...Object.fromEntries(
+        ERROR_WINDOWS.map((window) => [
+          window,
+          ranges.find((/** @type {any} */ r) => r.key === window)?.doc_count || 0
+        ])
+      ),
       [`${ERROR_WINDOW_DAYS}d`]: total
     },
     buckets,
