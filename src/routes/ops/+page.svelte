@@ -2,7 +2,8 @@
   import { Badge } from '$lib/components/ui/badge';
   import { Button } from '$lib/components/ui/button';
   import { invalidateAll } from '$app/navigation';
-  import { onMount } from 'svelte';
+  import { page } from '$app/state';
+  import { onMount, tick } from 'svelte';
   import { ChevronDown, ChevronRight, ExternalLink, RefreshCw, ScrollText } from 'lucide-svelte';
 
   let { data } = $props();
@@ -102,6 +103,38 @@
   const unmatchedRuns = $derived(
     (openclaw?.hookRuns || []).filter((/** @type {any} */ run) => !run.hookId)
   );
+
+  // Runs of the pipeline stages on the OpenClaw host, newest first, running ones included. A
+  // stage line of the pipeline comment on GitHub links here with ?run=<dir>: that run opens and
+  // the page scrolls to it. Older runs past the first few stay behind "Show all".
+  const PIPELINE_RUNS_SHOWN = 15;
+  /** @type {any[]} */
+  const pipelineRuns = $derived(openclaw?.pipelineRuns || []);
+  const linkedRun = $derived(page.url.searchParams.get('run') || '');
+  /** Pipeline runs expanded to their log, report and agent steps, by run directory. */
+  /** @type {Record<string, boolean>} */
+  let openPipelineRuns = $state({});
+  let allPipelineRuns = $state(false);
+  const shownPipelineRuns = $derived(
+    allPipelineRuns
+      ? pipelineRuns
+      : pipelineRuns.filter(
+          (run, i) => i < PIPELINE_RUNS_SHOWN || run.result === 'running' || run.dir === linkedRun
+        )
+  );
+  const pipelineRunning = $derived(pipelineRuns.filter((run) => run.result === 'running').length);
+  $effect(() => {
+    const dir = linkedRun;
+    if (!dir || !pipelineRuns.some((run) => run.dir === dir)) return;
+    openPipelineRuns[dir] = true;
+    tick().then(() =>
+      document.getElementById(`run-${dir}`)?.scrollIntoView({ block: 'center' })
+    );
+  });
+  /** @param {number | null | undefined} sec */
+  const seconds = (sec) => (sec == null ? '' : duration(sec * 1000));
+  /** @param {string} value */
+  const stamp = (value) => new Date(value).toLocaleString();
 
   /**
    * Loads the newest runs of an instance, or with `more` the page after the ones shown.
@@ -516,7 +549,16 @@
   </div>
 
   <!-- Summary -->
-  <div class="grid grid-cols-2 md:grid-cols-6 gap-3">
+  <div class="grid grid-cols-2 md:grid-cols-7 gap-3">
+    <a
+      href="#pipeline"
+      class="border rounded-lg p-3 hover:bg-muted/50 {pipelineRunning
+        ? 'bg-amber-50 border-amber-200'
+        : ''}"
+    >
+      <div class="text-2xl font-bold">{pipelineRunning}</div>
+      <div class="text-xs text-muted-foreground">Pipeline stages running</div>
+    </a>
     <a href="#appmixer" class="border rounded-lg p-3 hover:bg-muted/50">
       <div class="text-2xl font-bold">{stats.running}/{stats.instances}</div>
       <div class="text-xs text-muted-foreground">Integrations running</div>
@@ -566,6 +608,182 @@
       <div class="text-xs text-muted-foreground">OpenClaw gateway</div>
     </a>
   </div>
+
+  <!-- Pipeline runs -->
+  <section id="pipeline" class="space-y-3">
+    <div class="flex items-baseline gap-4">
+      <h2 class="text-xl font-semibold">Pipeline runs</h2>
+      <span class="text-xs text-muted-foreground">
+        stage runs on the OpenClaw host, last 14 days{#if openclaw?.generatedAt}
+          · host status {ago(openclaw.generatedAt)}, rebuilt every 5 min{/if}
+      </span>
+    </div>
+    {#if data.openclaw?.error}
+      <p class="text-sm text-red-700">{data.openclaw.error}</p>
+    {:else if !openclaw?.configured}
+      <p class="text-sm text-muted-foreground">OpenClaw status is not configured.</p>
+    {:else if !pipelineRuns.length}
+      <p class="text-sm text-muted-foreground">
+        No stage ran in the last 14 days{#if openclaw && !openclaw.pipelineRuns}
+          (the host status has no pipeline runs yet: its builder predates them){/if}.
+      </p>
+    {:else}
+      {#if linkedRun && !pipelineRuns.some((run) => run.dir === linkedRun)}
+        <p class="text-sm text-amber-800">
+          Run {linkedRun} is not in the host status: older than 14 days, or it started after the
+          status was built ({ago(openclaw.generatedAt)}).
+        </p>
+      {/if}
+      <!-- One row per run of a stage (Build, Testing, Fix, Doc&Verification): what it ran on,
+           its result and summary. A row expands to the stage report, the tail of the runner
+           log, the agent's steps and the result callbacks to Appmixer. -->
+      <div class="border rounded-lg divide-y">
+        {#each shownPipelineRuns as run (run.hookId + run.dir)}
+          {@const open = openPipelineRuns[run.dir]}
+          <div
+            id="run-{run.dir}"
+            class="px-3 py-2 text-xs space-y-1 {run.dir === linkedRun
+              ? 'bg-amber-50 ring-1 ring-inset ring-amber-300'
+              : ''}"
+          >
+            <button
+              type="button"
+              class="flex flex-wrap items-center gap-3 w-full text-left"
+              onclick={() => (openPipelineRuns[run.dir] = !open)}
+            >
+              {@render chevron(!!open)}
+              <span
+                class="px-2 py-0.5 rounded border {run.result === 'passed'
+                  ? 'bg-green-50 text-green-700 border-green-200'
+                  : run.result === 'running'
+                    ? 'bg-amber-50 text-amber-800 border-amber-300 animate-pulse'
+                    : run.result === 'blocked'
+                      ? 'bg-amber-50 text-amber-800 border-amber-200'
+                      : 'bg-red-50 text-red-700 border-red-200'}">{run.result}</span
+              >
+              <span class="font-medium">{run.name}</span>
+              {#if run.issue}
+                {@const [repo, number] = run.issue.split('#')}
+                <a
+                  class="hover:underline font-medium"
+                  href="https://github.com/{repo}/issues/{number}"
+                  target="_blank"
+                  rel="noreferrer"
+                  onclick={(e) => e.stopPropagation()}
+                  >{repo.replace('Appmixer-ai/appmixer-', '')}#{number}</a
+                >
+              {:else if run.pr}
+                <a
+                  class="hover:underline font-medium"
+                  href="https://github.com/Appmixer-ai/appmixer-connectors/pull/{run.pr}"
+                  target="_blank"
+                  rel="noreferrer"
+                  onclick={(e) => e.stopPropagation()}>PR #{run.pr}</a
+                >
+              {/if}
+              {#if run.target && run.target !== run.issue}
+                {@const [repo, number] = run.target.split('#')}
+                <a
+                  class="hover:underline"
+                  href="https://github.com/{repo}/issues/{number}"
+                  target="_blank"
+                  rel="noreferrer"
+                  onclick={(e) => e.stopPropagation()}
+                  >card {repo.replace('Appmixer-ai/appmixer-', '')}#{number}</a
+                >
+              {/if}
+              {#if run.prUrl && !run.pr}
+                <a
+                  class="hover:underline font-medium"
+                  href={run.prUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  onclick={(e) => e.stopPropagation()}>→ PR #{run.prUrl.split('/').pop()}</a
+                >
+              {/if}
+              <span title={stamp(run.at)}>{ago(run.at)}</span>
+              <span class="text-muted-foreground">
+                {#if run.result === 'running'}running for {seconds(
+                    Math.round((Date.now() - new Date(run.at).getTime()) / 1000)
+                  )}{:else}{seconds(run.durationSec)}{/if}
+              </span>
+              {#if run.agent?.costUsd}<span class="text-muted-foreground"
+                  >${run.agent.costUsd.toFixed(2)}</span
+                >{/if}
+              {#if run.summary}<span
+                  class="text-muted-foreground truncate max-w-2xl"
+                  title={run.summary}>{run.summary}</span
+                >{/if}
+            </button>
+            {#if open}
+              <div class="pl-6 space-y-2">
+                <div class="text-muted-foreground">
+                  run <code>{run.dir}</code> · {run.hookId} · started {stamp(run.at)}{#if run.finishedAt}
+                    · finished {stamp(run.finishedAt)}{/if}{#if run.agent}
+                    · {run.agent.model}{/if}
+                </div>
+                {#if run.result === 'running'}
+                  <div class="text-amber-800">
+                    Still running. The agent's steps show here once its turn ends; the host status is
+                    rebuilt every 5 min, so refresh for news.
+                  </div>
+                {:else if run.result === 'unfinished'}
+                  <div class="text-red-700">
+                    No result after 3 hours: the run died without reporting. Move the card again to
+                    restart the stage.
+                  </div>
+                {/if}
+                {#if run.summary}
+                  <div class="whitespace-pre-wrap">{run.summary}</div>
+                {/if}
+                {#if run.report}
+                  <div class="whitespace-pre-wrap border-l-2 border-amber-300 pl-2">
+                    {run.report}
+                  </div>
+                {/if}
+                {#if run.log?.length}
+                  <div>
+                    <div class="text-muted-foreground">Runner log (last {run.log.length} lines)</div>
+                    <pre
+                      class="whitespace-pre-wrap bg-muted/50 rounded p-2 font-mono text-[11px]">{run.log.join(
+                        '\n'
+                      )}</pre>
+                  </div>
+                {/if}
+                {#if run.agent?.steps?.length}
+                  <div>
+                    <div class="text-muted-foreground">
+                      Agent steps ({seconds(run.agent.durationSec)})
+                    </div>
+                    <ol class="list-decimal pl-4 text-muted-foreground">
+                      {#each run.agent.steps as step}<li>{step}</li>{/each}
+                    </ol>
+                  </div>
+                {/if}
+                {#if run.callback?.length}
+                  <div>
+                    <div class="text-muted-foreground">Results sent to Appmixer</div>
+                    <pre
+                      class="whitespace-pre-wrap bg-muted/50 rounded p-2 font-mono text-[11px]">{run.callback.join(
+                        '\n'
+                      )}</pre>
+                  </div>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        {/each}
+      </div>
+      {#if pipelineRuns.length > shownPipelineRuns.length || allPipelineRuns}
+        <button
+          type="button"
+          class="text-xs text-muted-foreground hover:underline"
+          onclick={() => (allPipelineRuns = !allPipelineRuns)}
+          >{allPipelineRuns ? 'Show fewer' : `Show all ${pipelineRuns.length} runs`}</button
+        >
+      {/if}
+    {/if}
+  </section>
 
   <!-- Appmixer -->
   <section id="appmixer" class="space-y-3">
