@@ -1027,7 +1027,7 @@ async function cardRuns(baseUrl, token, flowId, itemNodeId, from, to) {
   const components = definition?.flow || {};
   return ids.map((id) => {
     const hits = (entries.hits || []).filter((/** @type {any} */ h) => h.correlationId === id);
-    /** @type {{ label: string, port: string, text: string, error: boolean }[]} */
+    /** @type {{ label: string, port: string, text: string, error: boolean, at: string }[]} */
     const steps = [];
     let move = null;
     let stageResult = null;
@@ -1036,7 +1036,7 @@ async function cardRuns(baseUrl, token, flowId, itemNodeId, from, to) {
       const label = components[h.componentId]?.label || type || 'flow';
       const msg = parseMsg(h.msg);
       if (h.severity === 'error') {
-        steps.push({ label, port: 'error', text: firstLine(h.err) || String(h.msg || ''), error: true });
+        steps.push({ label, port: 'error', text: firstLine(h.err) || String(h.msg || ''), error: true, at: h.gridTimestamp });
         continue;
       }
       if (h.portType !== 'out') continue;
@@ -1053,14 +1053,30 @@ async function cardRuns(baseUrl, token, flowId, itemNodeId, from, to) {
         (/** @type {any} */ e) => e.componentId === h.componentId && e.portType === 'in'
       );
       const input = parseMsg(inEntry?.msg);
-      const status = type === 'UpdateProjectItemField' ? null : (msg.status ?? msg.statusCode);
+      const status =
+        type === 'UpdateProjectItemField' || type === 'CallHook'
+          ? null
+          : (msg.status ?? msg.statusCode);
+      // The OpenClaw connector's Call Hook: Out when the gateway admitted the call, Progress and
+      // Done when the host reported back to its callback URL
+      const reported = parseMsg(msg.result);
       const text =
         type === 'UpdateProjectItemField'
           ? `set to ${input.value || '?'}`
-          : status != null
-            ? `${input.method || (type === 'Post' ? 'POST' : '')} ${input.url || ''} → ${status}`
-            : '';
-      steps.push({ label, port: h.port || '', text, error: status != null && Number(status) >= 400 });
+          : type === 'CallHook'
+            ? h.port === 'out'
+              ? `POST /hooks/${msg.hook || input.hook || '?'} → admitted`
+              : `${h.port}: ${reported.stage || '?'}/${reported.result || '?'}`
+            : status != null
+              ? `${input.method || (type === 'Post' ? 'POST' : '')} ${input.url || ''} → ${status}`
+              : '';
+      steps.push({
+        label,
+        port: h.port || '',
+        text,
+        error: status != null && Number(status) >= 400,
+        at: h.gridTimestamp
+      });
     }
     return {
       correlationId: id,
@@ -1122,7 +1138,7 @@ export async function pipelineRunTrace(userId, dir) {
       source: 'host',
       title: `Result sent to Appmixer: ${m[3]}`,
       detail: `attempt ${m[2]} → ${m[4]}`,
-      status: /^2\d\d$/.test(m[4]) ? 'ok' : 'error'
+      status: /^2\d\d\b/.test(m[4]) ? 'ok' : 'error'
     });
   }
   if (run.result === 'running') {
@@ -1137,8 +1153,34 @@ export async function pipelineRunTrace(userId, dir) {
       instanceNamed(baseUrl, token, PIPELINE_RESULT)
     ]);
     const designer = (/** @type {string} */ flowId) => `${uiUrl}/designer/${flowId}`;
+    // What a run did with a stage result: the comment it wrote and where the card went
+    const resultEvent = (
+      /** @type {any} */ r,
+      /** @type {string} */ title,
+      /** @type {string} */ flowId
+    ) => {
+      const card = r.steps.find((/** @type {any} */ s) => s.text.startsWith('set to '));
+      return {
+        at: r.at,
+        source: 'appmixer',
+        title: `${title}${r.stageResult ? `: ${r.stageResult.stage}/${r.stageResult.result}` : ''}`,
+        detail: [
+          ...r.steps
+            .filter((/** @type {any} */ s) => /^(POST|PATCH) .*\/comments/.test(s.text))
+            .map((/** @type {any} */ s) => `comment ${s.text.split(' ')[0]} → ${s.text.split(' → ').pop()}`),
+          ...r.steps.filter((/** @type {any} */ s) => /\/hooks\//.test(s.text)).map((/** @type {any} */ s) => s.text),
+          card ? `card ${card.text}` : 'card stays',
+          ...r.steps
+            .filter((/** @type {any} */ s) => s.error && !s.text.startsWith('set to '))
+            .map((/** @type {any} */ s) => s.text)
+        ].join(' · '),
+        status: r.failed ? 'error' : 'ok',
+        steps: r.steps,
+        flowId: designer(flowId)
+      };
+    };
     if (dispatcher) {
-      const runs = await cardRuns(
+      const logged = await cardRuns(
         baseUrl,
         token,
         dispatcher.flowId,
@@ -1146,15 +1188,33 @@ export async function pipelineRunTrace(userId, dir) {
         iso(start - 15 * 60000),
         iso(end + 15 * 60000)
       );
+      // A Call Hook result arrives under the correlation id of the move that started the stage,
+      // so one logged run holds the start, every report and its handling. Split it at each report
+      // (Call Hook Progress / Done, or the in-flow Pre-release result): the part before is the
+      // start, every part after is the handling of one result.
+      const isReport = (/** @type {any} */ s) =>
+        /^(progress|done): /.test(s.text) || s.label === 'Pre-release result';
+      const parts = logged.flatMap((r) => {
+        /** @type {any[]} */
+        const out = [{ ...r, steps: [], report: '' }];
+        for (const step of r.steps) {
+          if (isReport(step)) out.push({ ...r, at: step.at, move: null, steps: [], report: step.text });
+          out[out.length - 1].steps.push(step);
+        }
+        return out
+          .filter((part) => part.steps.length)
+          .map((part) => ({ ...part, failed: part.steps.some((/** @type {any} */ x) => x.error) }));
+      });
+      const starts = parts.filter((part) => !part.report);
       // The move that started this stage: the last one before the run that called its hook
       const hookPath = `/hooks/${run.hookId}`;
-      const starter = runs
+      const starter = starts
         .filter((r) => Date.parse(r.at || '') <= start)
-        .filter((r) => r.steps.some((s) => s.text.includes(hookPath)))
+        .filter((r) => r.steps.some((/** @type {any} */ s) => s.text.includes(hookPath)))
         .pop();
       // The move the result led to: the first one after the run finished
       const next = run.finishedAt
-        ? runs.find((r) => r.move && Date.parse(r.at || '') >= end - 5000)
+        ? starts.find((r) => r.move && Date.parse(r.at || '') >= end - 5000)
         : null;
       for (const [r, role] of /** @type {const} */ ([
         [starter, 'started this stage'],
@@ -1176,8 +1236,8 @@ export async function pipelineRunTrace(userId, dir) {
           title: PIPELINE_DISPATCHER,
           // What it did: the comment it wrote and the hook it called
           detail: r.steps
-            .filter((s) => /^(POST|PATCH) .*\/comments|\/hooks\//.test(s.text) || s.error)
-            .map((s) => s.text.replace(/^(\w+) https?:\/\/[^/]+/, '$1 '))
+            .filter((/** @type {any} */ s) => /^(POST|PATCH) .*\/comments|\/hooks\//.test(s.text) || s.error)
+            .map((/** @type {any} */ s) => s.text.replace(/^(\w+) https?:\/\/[^/]+/, '$1 '))
             .join(' · '),
           status: r.failed ? 'error' : 'ok',
           steps: r.steps,
@@ -1193,7 +1253,22 @@ export async function pipelineRunTrace(userId, dir) {
           status: 'info'
         });
       }
+      // Since the pipeline runs on Call Hook (components#3007) the host reports to the
+      // dispatcher's Call Hook, and the dispatcher handles each report in the same flow
+      for (const part of parts.filter(
+        (part) =>
+          part.report.includes(`: ${run.name}/`) && Date.parse(part.at || '') >= start - 60000
+      )) {
+        events.push(
+          resultEvent(
+            { ...part, stageResult: null },
+            `${PIPELINE_DISPATCHER} (${part.report.replace(/^(\w+):/, 'Call Hook $1:')})`,
+            dispatcher.flowId
+          )
+        );
+      }
     }
+    // Before that, a separate integration took the results; its instance may still exist
     if (result) {
       const runs = await cardRuns(
         baseUrl,
@@ -1205,25 +1280,7 @@ export async function pipelineRunTrace(userId, dir) {
       );
       // Only the results of this stage: the next stage reports to the same card soon after
       for (const r of runs.filter((r) => !r.stageResult || r.stageResult.stage === run.name)) {
-        const card = r.steps.find((s) => s.text.startsWith('set to '));
-        events.push({
-          at: r.at,
-          source: 'appmixer',
-          title: `${PIPELINE_RESULT}${
-            r.stageResult ? `: ${r.stageResult.stage}/${r.stageResult.result}` : ''
-          }`,
-          detail: [
-            ...r.steps
-              .filter((s) => /^(POST|PATCH) .*\/comments/.test(s.text))
-              .map((s) => `comment ${s.text.split(' ')[0]} → ${s.text.split(' → ').pop()}`),
-            ...r.steps.filter((s) => /\/hooks\//.test(s.text)).map((s) => s.text),
-            card ? `card ${card.text}` : 'card stays',
-            ...r.steps.filter((s) => s.error && !s.text.startsWith('set to ')).map((s) => s.text)
-          ].join(' · '),
-          status: r.failed ? 'error' : 'ok',
-          steps: r.steps,
-          flowId: designer(result.flowId)
-        });
+        events.push(resultEvent(r, PIPELINE_RESULT, result.flowId));
       }
     }
   }
