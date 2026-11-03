@@ -967,6 +967,274 @@ export async function collectOpenClaw() {
   return { configured: true, ...(await response.json()) };
 }
 
+// The two Appmixer integrations around a pipeline stage: the dispatcher reacts to a card move
+// and calls the OpenClaw hook, the stage result integration takes what the host reports back.
+const PIPELINE_DISPATCHER = 'CI - project status -> pipeline';
+const PIPELINE_RESULT = 'CI - pipeline stage result';
+
+/** @param {any} value */
+const parseMsg = (value) => {
+  if (typeof value !== 'string') return value || {};
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
+  }
+};
+
+/**
+ * The running instance of an integration, by its name.
+ * @param {string} baseUrl @param {string} token @param {string} name
+ */
+async function instanceNamed(baseUrl, token, name) {
+  const flows = await appmixerGet(baseUrl, token, '/flows', {
+    filter: `name:${name}`,
+    projection: 'flowId,name,stage,type'
+  });
+  const instances = (flows || []).filter(
+    (/** @type {any} */ f) => f.type === 'integration-instance' && f.name === name
+  );
+  return instances.find((/** @type {any} */ f) => f.stage === 'running') || instances[0] || null;
+}
+
+/**
+ * The runs of a flow that touched a project card within a time window, oldest first: each one
+ * is its log entries and what the pipeline cares about in them.
+ * @param {string} baseUrl @param {string} token @param {string} flowId
+ * @param {string} itemNodeId @param {string} from @param {string} to - ISO times
+ */
+async function cardRuns(baseUrl, token, flowId, itemNodeId, from, to) {
+  const heads = await appmixerGet(baseUrl, token, '/logs', {
+    flowId,
+    query: `"${itemNodeId}" AND gridTimestamp:["${from}" TO "${to}"]`,
+    sort: 'gridTimestamp:asc',
+    size: '200'
+  });
+  const ids = [
+    ...new Set((heads.hits || []).map((/** @type {any} */ h) => h.correlationId).filter(Boolean))
+  ];
+  if (!ids.length) return [];
+  const [entries, definition] = await Promise.all([
+    appmixerGet(baseUrl, token, '/logs', {
+      flowId,
+      query: `correlationId:(${ids.map((id) => `"${id}"`).join(' OR ')})`,
+      sort: 'gridTimestamp:asc',
+      size: '1000'
+    }),
+    appmixerGet(baseUrl, token, `/flows/${flowId}`, { projection: 'flow' })
+  ]);
+  /** @type {Record<string, any>} */
+  const components = definition?.flow || {};
+  return ids.map((id) => {
+    const hits = (entries.hits || []).filter((/** @type {any} */ h) => h.correlationId === id);
+    /** @type {{ label: string, port: string, text: string, error: boolean }[]} */
+    const steps = [];
+    let move = null;
+    let stageResult = null;
+    for (const h of hits) {
+      const type = String(h.componentType || '').split('.').pop();
+      const label = components[h.componentId]?.label || type || 'flow';
+      const msg = parseMsg(h.msg);
+      if (h.severity === 'error') {
+        steps.push({ label, port: 'error', text: firstLine(h.err) || String(h.msg || ''), error: true });
+        continue;
+      }
+      if (h.portType !== 'out') continue;
+      if (type === 'OnProjectItemChanged') {
+        // Only a change of the Status field moves the card (not e.g. "Linked pull requests")
+        const change = msg.changes?.field_value || {};
+        if (change.field_name === 'Status' && change.to) {
+          move = { from: change.from || '', to: change.to, by: msg.sender?.login || '' };
+        }
+      }
+      const result = parseMsg(msg.result);
+      if (type === 'CodeBlock' && result.stage && result.result) stageResult = result;
+      const inEntry = hits.find(
+        (/** @type {any} */ e) => e.componentId === h.componentId && e.portType === 'in'
+      );
+      const input = parseMsg(inEntry?.msg);
+      const status = type === 'UpdateProjectItemField' ? null : (msg.status ?? msg.statusCode);
+      const text =
+        type === 'UpdateProjectItemField'
+          ? `set to ${input.value || '?'}`
+          : status != null
+            ? `${input.method || (type === 'Post' ? 'POST' : '')} ${input.url || ''} → ${status}`
+            : '';
+      steps.push({ label, port: h.port || '', text, error: status != null && Number(status) >= 400 });
+    }
+    return {
+      correlationId: id,
+      at: hits[0]?.gridTimestamp || null,
+      move,
+      stageResult,
+      steps,
+      failed: steps.some((s) => s.error)
+    };
+  });
+}
+
+/**
+ * Everything that happened around one stage run, in order: the card move on GitHub, the
+ * dispatcher's run in Appmixer and its call of the OpenClaw hook, the run on the host, every
+ * result the host sent back and what the result integration did with it (comment, card move),
+ * and the move that came of it.
+ * @param {string} userId - caller's email
+ * @param {string} dir - the run directory, e.g. 3001-20261103-083518
+ */
+export async function pipelineRunTrace(userId, dir) {
+  const status = await collectOpenClaw();
+  const run = (status.pipelineRuns || []).find((/** @type {any} */ r) => r.dir === dir);
+  if (!run) throw new Error(`Run ${dir} is not in the host status`);
+  /** @type {{ at: string, source: string, title: string, detail?: string, status: string, steps?: any[], flowId?: string }[]} */
+  const events = [];
+  const iso = (/** @type {number} */ ms) => new Date(ms).toISOString();
+  const start = Date.parse(run.at);
+  const end = run.finishedAt ? Date.parse(run.finishedAt) : Date.now();
+
+  // The host side, from the status the host builds
+  for (const call of run.hookCalls || []) {
+    events.push({
+      at: call.at,
+      source: 'openclaw',
+      title: `Gateway took POST /hooks/${call.hook}`,
+      detail: `HTTP ${call.status}`,
+      status: call.status < 300 ? 'ok' : 'error'
+    });
+  }
+  events.push({ at: run.at, source: 'host', title: `${run.name} run ${run.dir} started`, status: 'ok' });
+  if (run.agent?.startedAt) {
+    events.push({
+      at: run.agent.startedAt,
+      source: 'host',
+      title: `Agent turn (${run.agent.model})`,
+      detail: `${run.agent.steps?.length || 0} steps, ${run.agent.durationSec ?? '?'} s${
+        run.agent.costUsd ? `, $${run.agent.costUsd.toFixed(2)}` : ''
+      }`,
+      status: 'ok'
+    });
+  }
+  for (const line of run.callback || []) {
+    // "<time> attempt <n> <Stage>/<result> → <status>"
+    const m = String(line).match(/^(\S+) attempt (\d+) (\S+) → (.+)$/);
+    if (!m) continue;
+    events.push({
+      at: m[1],
+      source: 'host',
+      title: `Result sent to Appmixer: ${m[3]}`,
+      detail: `attempt ${m[2]} → ${m[4]}`,
+      status: /^2\d\d$/.test(m[4]) ? 'ok' : 'error'
+    });
+  }
+  if (run.result === 'running') {
+    events.push({ at: iso(Date.now()), source: 'host', title: 'Still running', status: 'running' });
+  }
+
+  // The Appmixer side, from the log of the two integrations
+  if (run.itemNodeId) {
+    const { baseUrl, token, uiUrl } = await getAppmixerSession(userId);
+    const [dispatcher, result] = await Promise.all([
+      instanceNamed(baseUrl, token, PIPELINE_DISPATCHER),
+      instanceNamed(baseUrl, token, PIPELINE_RESULT)
+    ]);
+    const designer = (/** @type {string} */ flowId) => `${uiUrl}/designer/${flowId}`;
+    if (dispatcher) {
+      const runs = await cardRuns(
+        baseUrl,
+        token,
+        dispatcher.flowId,
+        run.itemNodeId,
+        iso(start - 15 * 60000),
+        iso(end + 15 * 60000)
+      );
+      // The move that started this stage: the last one before the run that called its hook
+      const hookPath = `/hooks/${run.hookId}`;
+      const starter = runs
+        .filter((r) => Date.parse(r.at || '') <= start)
+        .filter((r) => r.steps.some((s) => s.text.includes(hookPath)))
+        .pop();
+      // The move the result led to: the first one after the run finished
+      const next = run.finishedAt
+        ? runs.find((r) => r.move && Date.parse(r.at || '') >= end - 5000)
+        : null;
+      for (const [r, role] of /** @type {const} */ ([
+        [starter, 'started this stage'],
+        [next, 'came of the result']
+      ])) {
+        if (!r) continue;
+        if (r.move) {
+          events.push({
+            at: r.at,
+            source: 'github',
+            title: `Card moved ${r.move.from || '—'} → ${r.move.to}`,
+            detail: `${r.move.by ? `by ${r.move.by} · ` : ''}the move that ${role}`,
+            status: 'ok'
+          });
+        }
+        events.push({
+          at: r.at,
+          source: 'appmixer',
+          title: PIPELINE_DISPATCHER,
+          // What it did: the comment it wrote and the hook it called
+          detail: r.steps
+            .filter((s) => /^(POST|PATCH) .*\/comments|\/hooks\//.test(s.text) || s.error)
+            .map((s) => s.text.replace(/^(\w+) https?:\/\/[^/]+/, '$1 '))
+            .join(' · '),
+          status: r.failed ? 'error' : 'ok',
+          steps: r.steps,
+          flowId: designer(dispatcher.flowId)
+        });
+      }
+      if (!starter) {
+        events.push({
+          at: run.at,
+          source: 'appmixer',
+          title: `No ${PIPELINE_DISPATCHER} run found that called ${hookPath}`,
+          detail: 'the stage was started by hand, or the log no longer has it',
+          status: 'info'
+        });
+      }
+    }
+    if (result) {
+      const runs = await cardRuns(
+        baseUrl,
+        token,
+        result.flowId,
+        run.itemNodeId,
+        iso(start - 60000),
+        iso(end + 15 * 60000)
+      );
+      // Only the results of this stage: the next stage reports to the same card soon after
+      for (const r of runs.filter((r) => !r.stageResult || r.stageResult.stage === run.name)) {
+        const card = r.steps.find((s) => s.text.startsWith('set to '));
+        events.push({
+          at: r.at,
+          source: 'appmixer',
+          title: `${PIPELINE_RESULT}${
+            r.stageResult ? `: ${r.stageResult.stage}/${r.stageResult.result}` : ''
+          }`,
+          detail: [
+            ...r.steps
+              .filter((s) => /^(POST|PATCH) .*\/comments/.test(s.text))
+              .map((s) => `comment ${s.text.split(' ')[0]} → ${s.text.split(' → ').pop()}`),
+            ...r.steps.filter((s) => /\/hooks\//.test(s.text)).map((s) => s.text),
+            card ? `card ${card.text}` : 'card stays',
+            ...r.steps.filter((s) => s.error && !s.text.startsWith('set to ')).map((s) => s.text)
+          ].join(' · '),
+          status: r.failed ? 'error' : 'ok',
+          steps: r.steps,
+          flowId: designer(result.flowId)
+        });
+      }
+    }
+  }
+  // callback.log stamps a result when Appmixer answered, after the result integration started
+  // on it: sort a sent result before the run it caused
+  const sortAt = (/** @type {{ at: string, title: string }} */ e) =>
+    Date.parse(e.at) - (e.title.startsWith('Result sent to Appmixer') ? 3000 : 0);
+  events.sort((a, b) => sortAt(a) - sortAt(b));
+  return { dir, itemNodeId: run.itemNodeId || null, events };
+}
+
 /**
  * @template T
  * @param {() => Promise<T>} fn
