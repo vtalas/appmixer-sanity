@@ -127,6 +127,7 @@
     const dir = linkedRun;
     if (!dir || !pipelineRuns.some((run) => run.dir === dir)) return;
     openPipelineRuns[dir] = true;
+    loadTrace(dir);
     tick().then(() =>
       document.getElementById(`run-${dir}`)?.scrollIntoView({ block: 'center' })
     );
@@ -135,6 +136,45 @@
   const seconds = (sec) => (sec == null ? '' : duration(sec * 1000));
   /** @param {string} value */
   const stamp = (value) => new Date(value).toLocaleString();
+
+  // The trace of an expanded run, from /api/ops/pipeline-run: the card move, the Appmixer
+  // integrations and the OpenClaw hook around it, in order. Loaded once per run.
+  /** @type {Record<string, { loading: boolean, error: string | null, events: any[] }>} */
+  let traces = $state({});
+  /** @type {Record<string, boolean>} */
+  let openTraceSteps = $state({});
+  /** @param {string} dir */
+  async function loadTrace(dir) {
+    if (traces[dir] && !traces[dir].error) return;
+    traces[dir] = { loading: true, error: null, events: [] };
+    try {
+      const response = await fetch(`/api/ops/pipeline-run?dir=${encodeURIComponent(dir)}`);
+      const body = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(body?.message || `HTTP ${response.status}`);
+      traces[dir] = { loading: false, error: null, events: body.events || [] };
+    } catch (err) {
+      traces[dir] = {
+        loading: false,
+        error: err instanceof Error ? err.message : String(err),
+        events: []
+      };
+    }
+  }
+  /** Where an event of a trace happened, as a short tag and its colour */
+  const SOURCES = /** @type {Record<string, { tag: string, cls: string }>} */ ({
+    github: { tag: 'GitHub', cls: 'bg-slate-100 text-slate-700 border-slate-300' },
+    appmixer: { tag: 'Appmixer', cls: 'bg-violet-50 text-violet-700 border-violet-200' },
+    openclaw: { tag: 'OpenClaw', cls: 'bg-orange-50 text-orange-700 border-orange-200' },
+    host: { tag: 'host', cls: 'bg-orange-50 text-orange-800 border-orange-200' }
+  });
+  /** @param {string} value */
+  const clock = (value) =>
+    new Date(value).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23'
+    });
 
   /**
    * Loads the newest runs of an instance, or with `more` the page after the ones shown.
@@ -649,7 +689,10 @@
             <button
               type="button"
               class="flex flex-wrap items-center gap-3 w-full text-left"
-              onclick={() => (openPipelineRuns[run.dir] = !open)}
+              onclick={() => {
+                openPipelineRuns[run.dir] = !open;
+                if (!open) loadTrace(run.dir);
+              }}
             >
               {@render chevron(!!open)}
               <span
@@ -721,6 +764,79 @@
                   run <code>{run.dir}</code> · {run.hookId} · started {stamp(run.at)}{#if run.finishedAt}
                     · finished {stamp(run.finishedAt)}{/if}{#if run.agent}
                     · {run.agent.model}{/if}
+                </div>
+                <!-- The trace: card move → dispatcher integration → OpenClaw hook → host run →
+                     results back → result integration (comment, card move) → next move -->
+                <div class="border rounded p-2 space-y-1">
+                  <div class="text-muted-foreground">Trace</div>
+                  {#if !traces[run.dir] || traces[run.dir].loading}
+                    <div class="text-muted-foreground">Searching the Appmixer log…</div>
+                  {:else if traces[run.dir].error}
+                    <div class="text-red-700">
+                      {traces[run.dir].error}
+                      <button
+                        type="button"
+                        class="underline ml-2"
+                        onclick={() => loadTrace(run.dir)}>retry</button
+                      >
+                    </div>
+                  {:else}
+                    <ol class="space-y-1">
+                      {#each traces[run.dir].events as event, i (i)}
+                        {@const source = SOURCES[event.source] || SOURCES.host}
+                        {@const key = `${run.dir}:${i}`}
+                        <li class="flex flex-wrap items-baseline gap-2">
+                          <span class="font-mono text-muted-foreground w-16 shrink-0"
+                            >{clock(event.at)}</span
+                          >
+                          <span class="px-1.5 py-0.5 rounded border w-20 text-center shrink-0 {source.cls}"
+                            >{source.tag}</span
+                          >
+                          <span
+                            class={event.status === 'error'
+                              ? 'text-red-700 font-medium'
+                              : event.status === 'running'
+                                ? 'text-amber-800 font-medium'
+                                : event.status === 'info'
+                                  ? 'text-muted-foreground italic'
+                                  : 'font-medium'}
+                            >{event.status === 'error' ? '✗ ' : ''}{event.title}</span
+                          >
+                          {#if event.detail}<span class="text-muted-foreground">{event.detail}</span
+                            >{/if}
+                          {#if event.steps?.length}
+                            <button
+                              type="button"
+                              class="text-muted-foreground underline"
+                              onclick={() => (openTraceSteps[key] = !openTraceSteps[key])}
+                              >{openTraceSteps[key] ? 'hide' : `${event.steps.length} steps`}</button
+                            >
+                          {/if}
+                          {#if event.flowId}
+                            <a
+                              class="text-muted-foreground hover:underline inline-flex items-center gap-0.5"
+                              href={event.flowId}
+                              target="_blank"
+                              rel="noreferrer">designer <ExternalLink class="h-3 w-3" /></a
+                            >
+                          {/if}
+                        </li>
+                        {#if openTraceSteps[key]}
+                          <li class="pl-40">
+                            <ol class="list-decimal pl-4 text-muted-foreground">
+                              {#each event.steps as step}
+                                <li class={step.error ? 'text-red-700' : ''}>
+                                  {step.label}{step.port ? ` → ${step.port}` : ''}{step.text
+                                    ? ` · ${step.text}`
+                                    : ''}
+                                </li>
+                              {/each}
+                            </ol>
+                          </li>
+                        {/if}
+                      {/each}
+                    </ol>
+                  {/if}
                 </div>
                 {#if run.result === 'running'}
                   <div class="text-amber-800">
