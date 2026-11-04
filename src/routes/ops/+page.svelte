@@ -8,7 +8,10 @@
     Check,
     ChevronDown,
     ChevronRight,
+    Copy,
     ExternalLink,
+    Maximize2,
+    Minimize2,
     RefreshCw,
     RotateCcw,
     ScrollText,
@@ -188,6 +191,19 @@
   let agentSteps = $state({});
   /** @type {Record<string, boolean>} */
   let openAgentSteps = $state({});
+  /** Text blocks just copied, by key: the copy icon turns into a check for a moment */
+  /** @type {Record<string, boolean>} */
+  let copied = $state({});
+  /** @param {string} key @param {string} text */
+  async function copyText(key, text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      copied[key] = true;
+      setTimeout(() => delete copied[key], 1500);
+    } catch {
+      /* the browser refused the clipboard */
+    }
+  }
   /** Text blocks shown whole after a double click, by key */
   /** @type {Record<string, boolean>} */
   let wholeText = $state({});
@@ -455,17 +471,49 @@
   <title>Operations - Appmixer Sanity Check</title>
 </svelte:head>
 
-<!-- A block of text cut to a few lines; a double click (or double tap) shows it whole -->
+<!-- The icons in the top right corner of a text block: show it whole (or cut it again), copy it -->
+{#snippet blockTools(/** @type {string} */ key, /** @type {string} */ text)}
+  <div
+    class="absolute top-1 right-1 flex gap-0.5 opacity-60 group-hover:opacity-100 transition-opacity"
+  >
+    <button
+      type="button"
+      class="p-1 rounded border bg-background text-muted-foreground hover:text-foreground"
+      title={wholeText[key] ? 'Shorten (or double-click the text)' : 'Show all (or double-click the text)'}
+      aria-label={wholeText[key] ? 'Shorten' : 'Show all'}
+      onclick={() => (wholeText[key] = !wholeText[key])}
+    >
+      {#if wholeText[key]}<Minimize2 size={12} />{:else}<Maximize2 size={12} />{/if}
+    </button>
+    <button
+      type="button"
+      class="p-1 rounded border bg-background {copied[key]
+        ? 'text-green-600'
+        : 'text-muted-foreground hover:text-foreground'}"
+      title={copied[key] ? 'Copied' : 'Copy'}
+      aria-label="Copy"
+      onclick={() => copyText(key, text)}
+    >
+      {#if copied[key]}<Check size={12} />{:else}<Copy size={12} />{/if}
+    </button>
+  </div>
+{/snippet}
+
+<!-- A block of text cut to a few lines; the icon in its corner or a double click (or double tap)
+     shows it whole -->
 {#snippet textBlock(/** @type {string} */ key, /** @type {string} */ text, /** @type {string} */ height)}
-  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-  <pre
-    title={wholeText[key] ? 'Double-click to shorten' : 'Double-click to show all'}
-    ondblclick={() => (wholeText[key] = !wholeText[key])}
-    class="p-2 bg-muted/30 border rounded text-[11px] font-mono whitespace-pre-wrap break-all {wholeText[
-      key
-    ]
-      ? ''
-      : `${height} overflow-auto`}">{text}</pre>
+  <div class="relative group">
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <pre
+      title={wholeText[key] ? 'Double-click to shorten' : 'Double-click to show all'}
+      ondblclick={() => (wholeText[key] = !wholeText[key])}
+      class="p-2 pr-16 bg-muted/30 border rounded text-[11px] font-mono whitespace-pre-wrap break-all {wholeText[
+        key
+      ]
+        ? ''
+        : `${height} overflow-auto`}">{text}</pre>
+    {@render blockTools(key, text)}
+  </div>
 {/snippet}
 
 <!-- One step of an agent turn: a row with its outcome, title, tool and time; opened, the code it
@@ -676,17 +724,20 @@
               >
             </button>
             {#if panel.open[entryKey]}
-              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-              <pre
-                title={wholeText[entryKey] ? 'Double-click to shorten' : 'Double-click to show all'}
-                ondblclick={() => (wholeText[entryKey] = !wholeText[entryKey])}
-                class="mt-1 ml-5 p-2 bg-muted/30 border rounded text-[11px] whitespace-pre-wrap break-all {wholeText[
-                  entryKey
-                ]
-                  ? ''
-                  : 'max-h-80 overflow-auto'}">{#each jsonTokens(entry.detail) as token}{#if token.kind}<span
-                      class={tokenClass[token.kind]}>{token.text}</span
-                    >{:else}{token.text}{/if}{/each}</pre>
+              <div class="relative group mt-1 ml-5">
+                <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                <pre
+                  title={wholeText[entryKey] ? 'Double-click to shorten' : 'Double-click to show all'}
+                  ondblclick={() => (wholeText[entryKey] = !wholeText[entryKey])}
+                  class="p-2 pr-16 bg-muted/30 border rounded text-[11px] whitespace-pre-wrap break-all {wholeText[
+                    entryKey
+                  ]
+                    ? ''
+                    : 'max-h-80 overflow-auto'}">{#each jsonTokens(entry.detail) as token}{#if token.kind}<span
+                        class={tokenClass[token.kind]}>{token.text}</span
+                      >{:else}{token.text}{/if}{/each}</pre>
+                {@render blockTools(entryKey, entry.detail)}
+              </div>
             {/if}
           </div>
         {/each}
