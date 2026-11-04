@@ -1084,7 +1084,10 @@ async function cardRuns(baseUrl, token, flowId, itemNodeId, from, to) {
       move,
       stageResult,
       steps,
-      failed: steps.some((s) => s.error)
+      failed: steps.some((s) => s.error),
+      // The log entries themselves, for the run tree /ops draws as for an integration's runs
+      hits,
+      components
     };
   });
 }
@@ -1101,7 +1104,7 @@ export async function pipelineRunTrace(userId, dir) {
   const status = await collectOpenClaw();
   const run = (status.pipelineRuns || []).find((/** @type {any} */ r) => r.dir === dir);
   if (!run) throw new Error(`Run ${dir} is not in the host status`);
-  /** @type {{ at: string, source: string, title: string, detail?: string, status: string, steps?: any[], flowId?: string }[]} */
+  /** @type {{ at: string, source: string, title: string, detail?: string, status: string, steps?: any[], flowId?: string, hits?: any[], components?: Record<string, any>, run?: any }[]} */
   const events = [];
   const iso = (/** @type {number} */ ms) => new Date(ms).toISOString();
   const start = Date.parse(run.at);
@@ -1176,6 +1179,8 @@ export async function pipelineRunTrace(userId, dir) {
         ].join(' · '),
         status: r.failed ? 'error' : 'ok',
         steps: r.steps,
+        hits: r.hits,
+        components: r.components,
         flowId: designer(flowId)
       };
     };
@@ -1196,10 +1201,16 @@ export async function pipelineRunTrace(userId, dir) {
         /^(progress|done): /.test(s.text) || s.label === 'Pre-release result';
       const parts = logged.flatMap((r) => {
         /** @type {any[]} */
-        const out = [{ ...r, steps: [], report: '' }];
+        const out = [{ ...r, steps: [], hits: [], report: '' }];
         for (const step of r.steps) {
-          if (isReport(step)) out.push({ ...r, at: step.at, move: null, steps: [], report: step.text });
+          if (isReport(step))
+            out.push({ ...r, at: step.at, move: null, steps: [], hits: [], report: step.text });
           out[out.length - 1].steps.push(step);
+        }
+        // The log entries go with the part that was under way when they were written
+        for (const hit of r.hits) {
+          const part = out.findLast((p, i) => i === 0 || Date.parse(p.at) <= Date.parse(hit.gridTimestamp));
+          (part || out[0]).hits.push(hit);
         }
         return out
           .filter((part) => part.steps.length)
@@ -1241,6 +1252,8 @@ export async function pipelineRunTrace(userId, dir) {
             .join(' · '),
           status: r.failed ? 'error' : 'ok',
           steps: r.steps,
+          hits: r.hits,
+          components: r.components,
           flowId: designer(dispatcher.flowId)
         });
       }
@@ -1283,6 +1296,31 @@ export async function pipelineRunTrace(userId, dir) {
         events.push(resultEvent(r, PIPELINE_RESULT, result.flowId));
       }
     }
+  }
+  // Each Appmixer run as the tree the integration panels draw: every component with what it
+  // received and sent
+  const withRun = events.filter((e) => e.hits?.length);
+  if (withRun.length) {
+    const { baseUrl, token } = await getAppmixerSession(userId);
+    const types = [
+      ...new Set(
+        withRun.flatMap((e) =>
+          /** @type {any[]} */ (e.hits).map(
+            (h) => h.componentType || e.components?.[h.componentId]?.type
+          )
+        )
+      )
+    ].filter(Boolean);
+    const ports = Object.fromEntries(
+      await Promise.all(types.map(async (type) => [type, await outPortNames(baseUrl, token, type)]))
+    );
+    for (const e of withRun) {
+      e.run = buildRun({ id: `${e.at}`, hits: e.hits || [] }, e.components || {}, ports);
+    }
+  }
+  for (const e of events) {
+    delete e.hits;
+    delete e.components;
   }
   // callback.log stamps a result when Appmixer answered, after the result integration started
   // on it: sort a sent result before the run it caused

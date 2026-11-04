@@ -170,6 +170,8 @@
   let traces = $state({});
   /** @type {Record<string, boolean>} */
   let openTraceSteps = $state({});
+  /** What is expanded in the run trees of the traces, as `panel` of the step snippet */
+  let tracePanel = $state({ open: /** @type {Record<string, boolean>} */ ({}) });
   /** @param {string} dir */
   async function loadTrace(dir) {
     if (traces[dir] && !traces[dir].error) return;
@@ -723,8 +725,10 @@
               type="button"
               class="flex flex-wrap items-center gap-3 w-full text-left"
               onclick={() => {
-                openPipelineRuns[run.dir] = !open;
-                if (!open) loadTrace(run.dir);
+                // `open` is derived from openPipelineRuns: read it before the toggle changes it
+                const opening = !openPipelineRuns[run.dir];
+                openPipelineRuns[run.dir] = opening;
+                if (opening) loadTrace(run.dir);
               }}
             >
               {@render chevron(!!open)}
@@ -837,7 +841,7 @@
                           >
                           {#if event.detail}<span class="text-muted-foreground">{event.detail}</span
                             >{/if}
-                          {#if event.steps?.length}
+                          {#if event.steps?.length && !event.run}
                             <button
                               type="button"
                               class="text-muted-foreground underline"
@@ -854,7 +858,13 @@
                             >
                           {/if}
                         </li>
-                        {#if openTraceSteps[key]}
+                        {#if event.run}
+                          <!-- The run as the integration panels draw it: open it for every
+                               component and what it received and sent -->
+                          <li class="ml-40 border rounded bg-background px-2">
+                            {@render step(tracePanel, key, event.run.root, event.run, true)}
+                          </li>
+                        {:else if openTraceSteps[key]}
                           <li class="pl-40">
                             <ol class="list-decimal pl-4 text-muted-foreground">
                               {#each event.steps as step}
