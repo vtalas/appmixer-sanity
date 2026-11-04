@@ -967,6 +967,26 @@ export async function collectOpenClaw() {
   return { configured: true, ...(await response.json()) };
 }
 
+/**
+ * Every agent step of one pipeline run in full: the host's build-status.js writes them to
+ * runs/<dir>.json next to the status, served behind the same token.
+ * @param {string} dir - the run directory, e.g. 3013-20261104-074925
+ * @returns {Promise<{ dir: string, model: string | null, steps: any[] } | null>} null when the
+ *   host has no detail file for the run (older runs, or a host without it)
+ */
+export async function pipelineRunSteps(dir) {
+  const url = env.OPENCLAW_STATUS_URL;
+  const token = env.OPENCLAW_STATUS_TOKEN;
+  if (!url || !token) return null;
+  const response = await fetch(url.replace(/[^/]+\.json$/, `runs/${dir}.json`), {
+    headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(20000)
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`OpenClaw run steps: HTTP ${response.status}`);
+  return response.json();
+}
+
 // The two Appmixer integrations around a pipeline stage: the dispatcher reacts to a card move
 // and calls the OpenClaw hook, the stage result integration takes what the host reports back.
 const PIPELINE_DISPATCHER = 'CI - project status -> pipeline';

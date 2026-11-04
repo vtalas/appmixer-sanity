@@ -3,7 +3,7 @@
   import { Button } from '$lib/components/ui/button';
   import { invalidateAll } from '$app/navigation';
   import { page } from '$app/state';
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import {
     Check,
     ChevronDown,
@@ -136,7 +136,8 @@
     const dir = linkedRun;
     if (!dir || !pipelineRuns.some((run) => run.dir === dir)) return;
     openPipelineRuns[dir] = true;
-    loadTrace(dir);
+    // Untracked: loadTrace reads the load state, and its changes must not run this effect again
+    untrack(() => loadTrace(dir));
     tick().then(() =>
       document.getElementById(`run-${dir}`)?.scrollIntoView({ block: 'center' })
     );
@@ -181,8 +182,36 @@
   let openTraceSteps = $state({});
   /** What is expanded in the run trees of the traces, as `panel` of the step snippet */
   let tracePanel = $state({ open: /** @type {Record<string, boolean>} */ ({}) });
+  // Every step of a run's agent turn in full, from /api/ops/agent-steps; null steps = the host
+  // keeps no detail file for the run, so only the titles from the status show
+  /** @type {Record<string, { loading: boolean, error: string | null, steps: any[] | null }>} */
+  let agentSteps = $state({});
+  /** @type {Record<string, boolean>} */
+  let openAgentSteps = $state({});
+  /** Text blocks shown whole after a double click, by key */
+  /** @type {Record<string, boolean>} */
+  let wholeText = $state({});
+  /** @param {string} dir @param {boolean} [retry] - load again after an error */
+  async function loadAgentSteps(dir, retry = false) {
+    if (agentSteps[dir] && !(retry && agentSteps[dir].error)) return;
+    agentSteps[dir] = { loading: true, error: null, steps: null };
+    try {
+      const response = await fetch(`/api/ops/agent-steps?dir=${encodeURIComponent(dir)}`);
+      const body = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(body?.message || `HTTP ${response.status}`);
+      agentSteps[dir] = { loading: false, error: null, steps: body.steps };
+    } catch (err) {
+      agentSteps[dir] = {
+        loading: false,
+        error: err instanceof Error ? err.message : String(err),
+        steps: null
+      };
+    }
+  }
+
   /** @param {string} dir */
   async function loadTrace(dir) {
+    loadAgentSteps(dir);
     if (traces[dir] && !traces[dir].error) return;
     traces[dir] = { loading: true, error: null, events: [] };
     try {
@@ -426,6 +455,89 @@
   <title>Operations - Appmixer Sanity Check</title>
 </svelte:head>
 
+<!-- A block of text cut to a few lines; a double click (or double tap) shows it whole -->
+{#snippet textBlock(/** @type {string} */ key, /** @type {string} */ text, /** @type {string} */ height)}
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <pre
+    title={wholeText[key] ? 'Double-click to shorten' : 'Double-click to show all'}
+    ondblclick={() => (wholeText[key] = !wholeText[key])}
+    class="p-2 bg-muted/30 border rounded text-[11px] font-mono whitespace-pre-wrap break-all {wholeText[
+      key
+    ]
+      ? ''
+      : `${height} overflow-auto`}">{text}</pre>
+{/snippet}
+
+<!-- One step of an agent turn: a row with its outcome, title, tool and time; opened, the code it
+     ran, the calls that code made with their output, and what it returned -->
+{#snippet agentStep(/** @type {string} */ dir, /** @type {any} */ s, /** @type {number} */ i)}
+  {@const key = `${dir}#${i}`}
+  {@const failedCalls = (s.calls || []).filter((/** @type {any} */ c) => c.error).length}
+  <li>
+    <button
+      type="button"
+      class="w-full flex items-center gap-2 py-0.5 text-left"
+      onclick={() => (openAgentSteps[key] = !openAgentSteps[key])}
+    >
+      {@render chevron(!!openAgentSteps[key])}
+      <span class="text-muted-foreground w-6 text-right shrink-0">{i + 1}.</span>
+      {#if s.error}
+        <X size={14} strokeWidth={3} class="shrink-0 text-red-600" aria-label="error" />
+      {:else if s.output === null}
+        <span class="w-3.5 shrink-0 text-amber-600" title="no result recorded">…</span>
+      {:else}
+        <Check size={14} strokeWidth={3} class="shrink-0 text-green-600" aria-label="ok" />
+      {/if}
+      <span class="font-medium truncate">{s.title}</span>
+      <code class="text-muted-foreground">{s.tool}</code>
+      {#if s.calls?.length}
+        <span class="text-muted-foreground whitespace-nowrap"
+          >{s.calls.length} {s.calls.length === 1 ? 'call' : 'calls'}{#if failedCalls}<span
+              class="text-red-700"> · {failedCalls} failed</span
+            >{/if}</span
+        >
+      {/if}
+      {#if s.durationMs != null}
+        <span class="ml-auto text-muted-foreground whitespace-nowrap"
+          >{duration(s.durationMs)}</span
+        >
+      {/if}
+    </button>
+    {#if openAgentSteps[key]}
+      <div class="ml-12 my-1 space-y-1">
+        {#if s.input}
+          <div class="text-muted-foreground">code</div>
+          {@render textBlock(`${key}:in`, s.input, 'max-h-48')}
+        {/if}
+        {#each s.calls || [] as call, j (j)}
+          <div class="border-l-2 pl-2 space-y-1 {call.error ? 'border-red-300' : 'border-border'}">
+            <div class="flex items-center gap-2">
+              {#if call.error}
+                <X size={12} strokeWidth={3} class="shrink-0 text-red-600" />
+              {:else}
+                <Check size={12} strokeWidth={3} class="shrink-0 text-green-600" />
+              {/if}
+              <code class="font-medium">{call.tool}</code>
+              {#if call.exitCode != null}<span
+                  class={call.exitCode ? 'text-red-700' : 'text-muted-foreground'}
+                  >exit {call.exitCode}</span
+                >{/if}
+            </div>
+            {@render textBlock(`${key}:c${j}:in`, call.input, 'max-h-32')}
+            {#if call.output}
+              {@render textBlock(`${key}:c${j}:out`, call.output, 'max-h-48')}
+            {/if}
+          </div>
+        {/each}
+        {#if s.output}
+          <div class="text-muted-foreground">result</div>
+          {@render textBlock(`${key}:out`, s.output, 'max-h-48')}
+        {/if}
+      </div>
+    {/if}
+  </li>
+{/snippet}
+
 {#snippet chevron(/** @type {boolean} */ open)}
   {#if open}
     <ChevronDown size={12} class="shrink-0" />
@@ -564,8 +676,15 @@
               >
             </button>
             {#if panel.open[entryKey]}
+              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
               <pre
-                class="mt-1 ml-5 p-2 bg-muted/30 border rounded text-[11px] whitespace-pre-wrap break-all max-h-80 overflow-auto">{#each jsonTokens(entry.detail) as token}{#if token.kind}<span
+                title={wholeText[entryKey] ? 'Double-click to shorten' : 'Double-click to show all'}
+                ondblclick={() => (wholeText[entryKey] = !wholeText[entryKey])}
+                class="mt-1 ml-5 p-2 bg-muted/30 border rounded text-[11px] whitespace-pre-wrap break-all {wholeText[
+                  entryKey
+                ]
+                  ? ''
+                  : 'max-h-80 overflow-auto'}">{#each jsonTokens(entry.detail) as token}{#if token.kind}<span
                       class={tokenClass[token.kind]}>{token.text}</span
                     >{:else}{token.text}{/if}{/each}</pre>
             {/if}
@@ -941,13 +1060,30 @@
                   </div>
                 {/if}
                 {#if run.agent?.steps?.length}
+                  {@const full = agentSteps[run.dir]}
                   <div>
                     <div class="text-muted-foreground">
-                      Agent steps ({seconds(run.agent.durationSec)})
+                      Agent steps ({seconds(run.agent.durationSec)}{#if run.agent.toolCalls}, {run.agent
+                          .toolCalls} calls{/if}){#if full?.loading}
+                        · loading the details…{:else if full?.error}
+                        · <span class="text-red-700">{full.error}</span>
+                        <button
+                          type="button"
+                          class="underline"
+                          onclick={() => loadAgentSteps(run.dir, true)}>retry</button
+                        >{/if}
                     </div>
-                    <ol class="list-decimal pl-4 text-muted-foreground">
-                      {#each run.agent.steps as step}<li>{step}</li>{/each}
-                    </ol>
+                    {#if full?.steps?.length}
+                      <ol class="text-xs">
+                        {#each full.steps as s, i (i)}
+                          {@render agentStep(run.dir, s, i)}
+                        {/each}
+                      </ol>
+                    {:else}
+                      <ol class="list-decimal pl-4 text-muted-foreground">
+                        {#each run.agent.steps as step}<li>{step}</li>{/each}
+                      </ol>
+                    {/if}
                   </div>
                 {/if}
                 {#if run.callback?.length}
