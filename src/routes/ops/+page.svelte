@@ -540,16 +540,27 @@
                     severityClass.info}">{entry.severity}</span
                 >
               {/if}
+              <!-- What the entry is: a message the component received (input), one it sent from
+                   a port (output), or a line it logged itself (context.log), shown quieter -->
               {#if entry.port}
-                <span class="text-muted-foreground whitespace-nowrap"
+                <span
+                  class="px-1.5 rounded border whitespace-nowrap {entry.direction === 'in'
+                    ? 'bg-sky-50 text-sky-700 border-sky-200'
+                    : 'bg-emerald-50 text-emerald-700 border-emerald-200'}"
                   >{entry.direction === 'in' ? 'input' : 'output'}
                   <code>{entry.port}</code></span
+                >
+              {:else if entry.severity === 'info'}
+                <span class="px-1.5 rounded border border-dashed whitespace-nowrap text-muted-foreground/70"
+                  >log</span
                 >
               {/if}
               <span
                 class="truncate {entry.severity === 'error'
                   ? 'text-red-700'
-                  : 'text-muted-foreground'}">{entry.summary}</span
+                  : entry.port
+                    ? 'text-muted-foreground'
+                    : 'text-muted-foreground/60 italic'}">{entry.summary}</span
               >
             </button>
             {#if panel.open[entryKey]}
