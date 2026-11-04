@@ -1371,7 +1371,59 @@ export async function buildOpsOverview(userId) {
     settle(() => collectOpenClaw())
   ]);
   linkHooksToCallers(openclaw.data, appmixer.data);
-  return { generatedAt: new Date().toISOString(), appmixer, workflows, openclaw };
+  // The board cards the pipeline runs worked on, for the runs grouped by card
+  const cards = await settle(() => collectBoardCards(userId, openclaw.data));
+  return { generatedAt: new Date().toISOString(), appmixer, workflows, openclaw, cards };
+}
+
+/**
+ * Where each card the pipeline ran on stands on the project board now, and what it is: its status,
+ * and the issue (or pull request) it holds. One GraphQL query for all of them.
+ * @param {string} userId - caller's email
+ * @param {any} openclaw - the host status
+ * @returns {Promise<Record<string, { status: string | null, number: number | null, title: string, url: string, state: string | null, repo: string | null }>>}
+ */
+async function collectBoardCards(userId, openclaw) {
+  const ids = [
+    ...new Set(
+      (openclaw?.pipelineRuns || [])
+        .map((/** @type {any} */ r) => r.itemNodeId)
+        .filter((/** @type {any} */ id) => /^PVTI_[\w-]+$/.test(id || ''))
+    )
+  ].slice(0, 100);
+  if (!ids.length) return {};
+  const { token } = await getGitHubConfig(userId);
+  if (!token) throw new Error('No GitHub token to read the project board');
+  const query = `query { nodes(ids: ${JSON.stringify(ids)}) { ... on ProjectV2Item { id
+    status: fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+    content { ... on Issue { number title url state repository { name } }
+              ... on PullRequest { number title url state repository { name } } } } } }`;
+  const response = await fetch('https://api.github.com/graphql', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'User-Agent': 'appmixer-sanity-check'
+    },
+    body: JSON.stringify({ query }),
+    signal: AbortSignal.timeout(15000)
+  });
+  if (!response.ok) throw new Error(`GitHub board cards: HTTP ${response.status}`);
+  const body = await response.json();
+  /** @type {Record<string, any>} */
+  const cards = {};
+  for (const node of body?.data?.nodes || []) {
+    if (!node?.id) continue;
+    cards[node.id] = {
+      status: node.status?.name || null,
+      number: node.content?.number ?? null,
+      title: node.content?.title || '',
+      url: node.content?.url || '',
+      state: node.content?.state || null,
+      repo: node.content?.repository?.name || null
+    };
+  }
+  return cards;
 }
 
 /**

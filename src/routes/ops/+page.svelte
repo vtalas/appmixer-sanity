@@ -117,9 +117,8 @@
   );
 
   // Runs of the pipeline stages on the OpenClaw host, newest first, running ones included. A
-  // stage line of the pipeline comment on GitHub links here with ?run=<dir>: that run opens and
-  // the page scrolls to it. Older runs past the first few stay behind "Show all".
-  const PIPELINE_RUNS_SHOWN = 15;
+  // stage line of the pipeline comment on GitHub links here with ?run=<dir>: its card and the run
+  // open and the page scrolls to it. Older cards past the first few stay behind "Show all".
   /** @type {any[]} */
   const pipelineRuns = $derived(openclaw?.pipelineRuns || []);
   const linkedRun = $derived(page.url.searchParams.get('run') || '');
@@ -127,17 +126,82 @@
   /** @type {Record<string, boolean>} */
   let openPipelineRuns = $state({});
   let allPipelineRuns = $state(false);
-  const shownPipelineRuns = $derived(
+  const pipelineRunning = $derived(pipelineRuns.filter((run) => run.result === 'running').length);
+
+  // The runs grouped by the board card they worked on: one card per issue, with every stage run
+  // for it (Build on the issue, Testing and Fix on its PR) and the @apx-vero mentions on that PR,
+  // newest first. The card's place on the board comes from GitHub (data.cards).
+  /** @type {Record<string, any>} */
+  const boardCards = $derived(data.cards?.data || {});
+  /** Statuses a card waits on a person in */
+  const WAITING = ['Needs input', 'Review'];
+  const cards = $derived.by(() => {
+    /** @type {Map<string, any>} */
+    const byKey = new Map();
+    for (const run of pipelineRuns) {
+      const key = run.itemNodeId || run.target || run.issue || (run.pr ? `pr:${run.pr}` : run.dir);
+      if (!byKey.has(key)) {
+        byKey.set(key, { key, itemNodeId: run.itemNodeId || null, runs: [], mentions: [] });
+      }
+      byKey.get(key).runs.push(run);
+    }
+    /** @param {any} run */
+    const prOf = (run) => run.pr || Number(String(run.prUrl || '').split('/').pop()) || null;
+    const list = [...byKey.values()].map((card) => {
+      const board = card.itemNodeId ? boardCards[card.itemNodeId] || null : null;
+      const prs = [...new Set(card.runs.map(prOf).filter(Boolean))];
+      const target = card.runs.find((/** @type {any} */ r) => r.target)?.target || card.runs[0].issue;
+      return {
+        ...card,
+        board,
+        target,
+        prs,
+        last: card.runs[0],
+        lastAt: card.runs[0].at,
+        running: card.runs.some((/** @type {any} */ r) => r.result === 'running'),
+        costUsd: card.runs.reduce(
+          (/** @type {number} */ sum, /** @type {any} */ r) => sum + (r.agent?.costUsd || 0),
+          0
+        )
+      };
+    });
+    // The mentions on a card's PR: the mention responder keeps the last few runs
+    for (const mention of openclaw?.mentionResponder?.recent || []) {
+      const card = list.find((c) => c.prs.includes(mention.pr));
+      if (card) card.mentions.push(mention);
+    }
+    for (const card of list) {
+      // One timeline: stage runs and mentions by time, newest first
+      card.items = [
+        ...card.runs.map((/** @type {any} */ run) => ({ kind: 'run', at: run.at, run })),
+        ...card.mentions.map((/** @type {any} */ mention) => ({ kind: 'mention', at: mention.at, mention }))
+      ].sort((a, b) => b.at.localeCompare(a.at));
+      if (card.mentions.length && card.mentions[0].at > card.lastAt) card.lastAt = card.mentions[0].at;
+    }
+    // Work under way first, then cards waiting on a person, then the rest; newest first in each
+    /** @param {any} c */
+    const rank = (c) => (c.running ? 0 : WAITING.includes(c.board?.status) ? 1 : 2);
+    return list.sort((a, b) => rank(a) - rank(b) || b.lastAt.localeCompare(a.lastAt));
+  });
+  const CARDS_SHOWN = 10;
+  /** Cards expanded to their runs, by key */
+  /** @type {Record<string, boolean>} */
+  let openCards = $state({});
+  const shownCards = $derived(
     allPipelineRuns
-      ? pipelineRuns
-      : pipelineRuns.filter(
-          (run, i) => i < PIPELINE_RUNS_SHOWN || run.result === 'running' || run.dir === linkedRun
+      ? cards
+      : cards.filter(
+          (card, i) =>
+            i < CARDS_SHOWN ||
+            card.running ||
+            card.runs.some((/** @type {any} */ r) => r.dir === linkedRun)
         )
   );
-  const pipelineRunning = $derived(pipelineRuns.filter((run) => run.result === 'running').length);
   $effect(() => {
     const dir = linkedRun;
     if (!dir || !pipelineRuns.some((run) => run.dir === dir)) return;
+    const card = cards.find((c) => c.runs.some((/** @type {any} */ r) => r.dir === dir));
+    if (card) untrack(() => (openCards[card.key] = true));
     openPipelineRuns[dir] = true;
     // Untracked: loadTrace reads the load state, and its changes must not run this effect again
     untrack(() => loadTrace(dir));
@@ -884,7 +948,8 @@
     <div class="flex items-baseline gap-4">
       <h2 class="text-xl font-semibold">Pipeline runs</h2>
       <span class="text-xs text-muted-foreground">
-        stage runs on the OpenClaw host, last 14 days{#if openclaw?.generatedAt}
+        by board card: every stage run on the OpenClaw host and the mentions on its PR, last 14
+        days{#if openclaw?.generatedAt}
           · host status {ago(openclaw.generatedAt)}, rebuilt every 5 min{/if}
       </span>
     </div>
@@ -913,8 +978,100 @@
       <!-- One row per run of a stage (Build, Testing, Fix, Doc&Verification): what it ran on,
            its result and summary. A row expands to the stage report, the tail of the runner
            log, the agent's steps and the result callbacks to Appmixer. -->
+      <!-- One row per board card: where it stands, its issue and PR, the last result, what it cost.
+           Opened, its timeline: every stage run (as below) and the mentions on its PR. -->
       <div class="border rounded-lg divide-y">
-        {#each shownPipelineRuns as run (run.hookId + run.dir)}
+        {#each shownCards as card (card.key)}
+          {@const cardOpen = !!openCards[card.key]}
+          {@const status = card.board?.status}
+          <div class="text-xs">
+            <button
+              type="button"
+              class="flex flex-wrap items-center gap-3 w-full text-left px-3 py-2 hover:bg-muted/30"
+              onclick={() => (openCards[card.key] = !cardOpen)}
+            >
+              {@render chevron(cardOpen)}
+              <span
+                class="px-2 py-0.5 rounded border whitespace-nowrap {card.running
+                  ? 'bg-sky-50 text-sky-800 border-sky-300 animate-pulse'
+                  : WAITING.includes(status)
+                    ? 'bg-amber-50 text-amber-800 border-amber-300'
+                    : /done|released/i.test(status || '') || card.board?.state === 'CLOSED'
+                      ? 'bg-green-50 text-green-700 border-green-200'
+                      : 'bg-muted text-muted-foreground border-border'}"
+                title={status
+                  ? 'Status on the board now'
+                  : 'The card is no longer on the board (removed, or its issue was moved)'}
+                >{status || (card.running ? 'running' : 'off the board')}</span
+              >
+              {#if card.target}
+                {@const [repo, number] = card.target.split('#')}
+                <a
+                  class="font-semibold hover:underline whitespace-nowrap"
+                  href="https://github.com/{repo}/issues/{number}"
+                  target="_blank"
+                  rel="noreferrer"
+                  onclick={(e) => e.stopPropagation()}
+                  >{repo.replace('Appmixer-ai/appmixer-', '')}#{number}</a
+                >
+              {/if}
+              {#if card.board?.title}<span class="font-medium truncate max-w-xl" title={card.board.title}
+                  >{card.board.title}</span
+                >{/if}
+              {#each card.prs as pr (pr)}
+                <a
+                  class="hover:underline whitespace-nowrap"
+                  href="https://github.com/Appmixer-ai/appmixer-connectors/pull/{pr}"
+                  target="_blank"
+                  rel="noreferrer"
+                  onclick={(e) => e.stopPropagation()}>PR #{pr}</a
+                >
+              {/each}
+              <span class="text-muted-foreground whitespace-nowrap"
+                >last: {card.last.name}
+                <span
+                  class={card.last.result === 'passed'
+                    ? 'text-green-700'
+                    : card.last.result === 'running'
+                      ? 'text-sky-700'
+                      : card.last.result === 'blocked'
+                        ? 'text-amber-800'
+                        : 'text-red-700'}>{card.last.result}</span
+                ></span
+              >
+              <span class="ml-auto text-muted-foreground whitespace-nowrap" title={stamp(card.lastAt)}
+                >{ago(card.lastAt)} · {card.runs.length}
+                {card.runs.length === 1 ? 'run' : 'runs'}{#if card.mentions.length}
+                  · {card.mentions.length}
+                  {card.mentions.length === 1 ? 'mention' : 'mentions'}{/if}{#if card.costUsd}
+                  · ${card.costUsd.toFixed(2)}{/if}</span
+              >
+            </button>
+            {#if cardOpen}
+              <div class="ml-5 mb-2 mr-2 border-l pl-2 divide-y">
+                {#each card.items as item (item.kind + item.at + (item.run?.dir || item.mention?.pr))}
+                  {#if item.kind === 'mention'}
+                    {@const m = item.mention}
+                    <div class="px-3 py-2 flex flex-wrap items-center gap-3">
+                      <span
+                        class="px-2 py-0.5 rounded border {m.status === 'replied'
+                          ? 'bg-green-50 text-green-700 border-green-200'
+                          : m.status === 'failed'
+                            ? 'bg-red-50 text-red-700 border-red-200'
+                            : 'bg-muted text-muted-foreground border-border'}">{m.status}</span
+                      >
+                      <span class="font-medium">@apx-vero mention</span>
+                      <a class="hover:underline" href={m.url} target="_blank" rel="noreferrer"
+                        >PR #{m.pr}</a
+                      >
+                      <span title={stamp(m.at)}>{ago(m.at)}</span>
+                      <span class="text-muted-foreground"
+                        >{m.mentions?.length || 0} asked · {m.replies?.length || 0} answered{#if m.code_changed}
+                          · code changed{/if}{#if m.reason} · {m.reason}{/if}</span
+                      >
+                    </div>
+                  {:else}
+          {@const run = item.run}
           {@const open = openPipelineRuns[run.dir]}
           <div
             id="run-{run.dir}"
@@ -1149,15 +1306,27 @@
               </div>
             {/if}
           </div>
+                  {/if}
+                {/each}
+              </div>
+            {/if}
+          </div>
         {/each}
       </div>
-      {#if pipelineRuns.length > shownPipelineRuns.length || allPipelineRuns}
+      {#if cards.length > shownCards.length || allPipelineRuns}
         <button
           type="button"
           class="text-xs text-muted-foreground hover:underline"
           onclick={() => (allPipelineRuns = !allPipelineRuns)}
-          >{allPipelineRuns ? 'Show fewer' : `Show all ${pipelineRuns.length} runs`}</button
+          >{allPipelineRuns
+            ? 'Show fewer'
+            : `Show all ${cards.length} cards (${pipelineRuns.length} runs)`}</button
         >
+      {/if}
+      {#if data.cards?.error}
+        <p class="text-xs text-muted-foreground">
+          Board status not loaded: {data.cards.error}
+        </p>
       {/if}
     {/if}
   </section>
