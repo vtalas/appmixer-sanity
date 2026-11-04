@@ -3,8 +3,20 @@
   import { Button } from '$lib/components/ui/button';
   import { invalidateAll } from '$app/navigation';
   import { page } from '$app/state';
-  import { onMount, tick } from 'svelte';
-  import { ChevronDown, ChevronRight, ExternalLink, RefreshCw, ScrollText } from 'lucide-svelte';
+  import { onMount, tick, untrack } from 'svelte';
+  import {
+    Check,
+    ChevronDown,
+    ChevronRight,
+    Copy,
+    ExternalLink,
+    Maximize2,
+    Minimize2,
+    RefreshCw,
+    RotateCcw,
+    ScrollText,
+    X
+  } from 'lucide-svelte';
 
   let { data } = $props();
 
@@ -91,23 +103,11 @@
   // a component, one of its ports, its data, an entry.
   /** @type {Record<string, { errorsOnly: boolean, loading: boolean, more: boolean, error: string | null, runs: any[], next: string | null, open: Record<string, boolean> }>} */
   let logPanels = $state({});
-  /** Hook runs expanded to their steps and closing text, by the run's timestamp. */
-  /** @type {Record<string, boolean>} */
-  let openHookRuns = $state({});
-  /** Hook runs that started from one hook, newest first; the builder stamps each run's hookId. */
-  const runsOfHook = (/** @type {string} */ id) =>
-    (openclaw?.hookRuns || []).filter((/** @type {any} */ run) => run.hookId === id);
-  const strayResponderRuns = $derived(
-    (openclaw?.mentionResponder?.recent || []).filter((/** @type {any} */ r) => !r.hookRunAt)
-  );
-  const unmatchedRuns = $derived(
-    (openclaw?.hookRuns || []).filter((/** @type {any} */ run) => !run.hookId)
-  );
+  let showDeployLog = $state(false);
 
   // Runs of the pipeline stages on the OpenClaw host, newest first, running ones included. A
-  // stage line of the pipeline comment on GitHub links here with ?run=<dir>: that run opens and
-  // the page scrolls to it. Older runs past the first few stay behind "Show all".
-  const PIPELINE_RUNS_SHOWN = 15;
+  // stage line of the pipeline comment on GitHub links here with ?run=<dir>: its card and the run
+  // open and the page scrolls to it. Older cards past the first few stay behind "Show all".
   /** @type {any[]} */
   const pipelineRuns = $derived(openclaw?.pipelineRuns || []);
   const linkedRun = $derived(page.url.searchParams.get('run') || '');
@@ -115,19 +115,91 @@
   /** @type {Record<string, boolean>} */
   let openPipelineRuns = $state({});
   let allPipelineRuns = $state(false);
-  const shownPipelineRuns = $derived(
+  const pipelineRunning = $derived(pipelineRuns.filter((run) => run.result === 'running').length);
+
+  // The runs grouped by the board card they worked on: one card per issue, with every stage run
+  // for it (Build on the issue, Testing and Fix on its PR) and the @apx-vero mentions on that PR,
+  // newest first. The card's place on the board comes from GitHub (data.cards).
+  /** @type {Record<string, any>} */
+  const boardCards = $derived(data.cards?.data || {});
+  /** Statuses a card waits on a person in */
+  const WAITING = ['Needs input', 'Review'];
+  const cards = $derived.by(() => {
+    /** @type {Map<string, any>} */
+    const byKey = new Map();
+    for (const run of pipelineRuns) {
+      const key = run.itemNodeId || run.target || run.issue || (run.pr ? `pr:${run.pr}` : run.dir);
+      if (!byKey.has(key)) {
+        byKey.set(key, { key, itemNodeId: run.itemNodeId || null, runs: [], mentions: [] });
+      }
+      byKey.get(key).runs.push(run);
+    }
+    /** @param {any} run */
+    const prOf = (run) => run.pr || Number(String(run.prUrl || '').split('/').pop()) || null;
+    const list = [...byKey.values()].map((card) => {
+      const board = card.itemNodeId ? boardCards[card.itemNodeId] || null : null;
+      const prs = [...new Set(card.runs.map(prOf).filter(Boolean))];
+      const target = card.runs.find((/** @type {any} */ r) => r.target)?.target || card.runs[0].issue;
+      return {
+        ...card,
+        board,
+        target,
+        prs,
+        last: card.runs[0],
+        lastAt: card.runs[0].at,
+        running: card.runs.some((/** @type {any} */ r) => r.result === 'running'),
+        costUsd: card.runs.reduce(
+          (/** @type {number} */ sum, /** @type {any} */ r) => sum + (r.agent?.costUsd || 0),
+          0
+        )
+      };
+    });
+    // The mentions on a card's PR: the mention responder keeps the last few runs
+    for (const mention of openclaw?.mentionResponder?.recent || []) {
+      const card = list.find((c) => c.prs.includes(mention.pr));
+      if (card) card.mentions.push(mention);
+    }
+    for (const card of list) {
+      // One timeline: stage runs and mentions by time, newest first
+      card.items = [
+        ...card.runs.map((/** @type {any} */ run) => ({ kind: 'run', at: run.at, run })),
+        ...card.mentions.map((/** @type {any} */ mention) => ({ kind: 'mention', at: mention.at, mention }))
+      ].sort((a, b) => b.at.localeCompare(a.at));
+      if (card.mentions.length && card.mentions[0].at > card.lastAt) card.lastAt = card.mentions[0].at;
+    }
+    // Work under way first, then cards waiting on a person, then the rest; newest first in each
+    /** @param {any} c */
+    const rank = (c) => (c.running ? 0 : WAITING.includes(c.board?.status) ? 1 : 2);
+    return list.sort((a, b) => rank(a) - rank(b) || b.lastAt.localeCompare(a.lastAt));
+  });
+  /** Mentions on PRs that belong to no card, shown under the OpenClaw host */
+  const looseMentions = $derived(
+    (openclaw?.mentionResponder?.recent || []).filter(
+      (/** @type {any} */ m) => !cards.some((c) => c.prs.includes(m.pr))
+    )
+  );
+  const CARDS_SHOWN = 10;
+  /** Cards expanded to their runs, by key */
+  /** @type {Record<string, boolean>} */
+  let openCards = $state({});
+  const shownCards = $derived(
     allPipelineRuns
-      ? pipelineRuns
-      : pipelineRuns.filter(
-          (run, i) => i < PIPELINE_RUNS_SHOWN || run.result === 'running' || run.dir === linkedRun
+      ? cards
+      : cards.filter(
+          (card, i) =>
+            i < CARDS_SHOWN ||
+            card.running ||
+            card.runs.some((/** @type {any} */ r) => r.dir === linkedRun)
         )
   );
-  const pipelineRunning = $derived(pipelineRuns.filter((run) => run.result === 'running').length);
   $effect(() => {
     const dir = linkedRun;
     if (!dir || !pipelineRuns.some((run) => run.dir === dir)) return;
+    const card = cards.find((c) => c.runs.some((/** @type {any} */ r) => r.dir === dir));
+    if (card) untrack(() => (openCards[card.key] = true));
     openPipelineRuns[dir] = true;
-    loadTrace(dir);
+    // Untracked: loadTrace reads the load state, and its changes must not run this effect again
+    untrack(() => loadTrace(dir));
     tick().then(() =>
       document.getElementById(`run-${dir}`)?.scrollIntoView({ block: 'center' })
     );
@@ -141,7 +213,7 @@
   const linkedRunMissing = $derived(
     !!linkedRun && !!openclaw?.pipelineRuns && !pipelineRuns.some((run) => run.dir === linkedRun)
   );
-  // Started after the status was built: it shows up with one of the next builds (every 5 min)
+  // Started after the status was built: it shows up with the next build (every minute)
   const linkedRunPending = $derived(
     linkedRunMissing &&
       !!linkedRunAt &&
@@ -170,8 +242,51 @@
   let traces = $state({});
   /** @type {Record<string, boolean>} */
   let openTraceSteps = $state({});
+  /** What is expanded in the run trees of the traces, as `panel` of the step snippet */
+  let tracePanel = $state({ open: /** @type {Record<string, boolean>} */ ({}) });
+  // Every step of a run's agent turn in full, from /api/ops/agent-steps; null steps = the host
+  // keeps no detail file for the run, so only the titles from the status show
+  /** @type {Record<string, { loading: boolean, error: string | null, steps: any[] | null }>} */
+  let agentSteps = $state({});
+  /** @type {Record<string, boolean>} */
+  let openAgentSteps = $state({});
+  /** Text blocks just copied, by key: the copy icon turns into a check for a moment */
+  /** @type {Record<string, boolean>} */
+  let copied = $state({});
+  /** @param {string} key @param {string} text */
+  async function copyText(key, text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      copied[key] = true;
+      setTimeout(() => delete copied[key], 1500);
+    } catch {
+      /* the browser refused the clipboard */
+    }
+  }
+  /** Text blocks shown whole after a double click, by key */
+  /** @type {Record<string, boolean>} */
+  let wholeText = $state({});
+  /** @param {string} dir @param {boolean} [retry] - load again after an error */
+  async function loadAgentSteps(dir, retry = false) {
+    if (agentSteps[dir] && !(retry && agentSteps[dir].error)) return;
+    agentSteps[dir] = { loading: true, error: null, steps: null };
+    try {
+      const response = await fetch(`/api/ops/agent-steps?dir=${encodeURIComponent(dir)}`);
+      const body = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(body?.message || `HTTP ${response.status}`);
+      agentSteps[dir] = { loading: false, error: null, steps: body.steps };
+    } catch (err) {
+      agentSteps[dir] = {
+        loading: false,
+        error: err instanceof Error ? err.message : String(err),
+        steps: null
+      };
+    }
+  }
+
   /** @param {string} dir */
   async function loadTrace(dir) {
+    loadAgentSteps(dir);
     if (traces[dir] && !traces[dir].error) return;
     traces[dir] = { loading: true, error: null, events: [] };
     try {
@@ -415,6 +530,121 @@
   <title>Operations - Appmixer Sanity Check</title>
 </svelte:head>
 
+<!-- The icons in the top right corner of a text block: show it whole (or cut it again), copy it -->
+{#snippet blockTools(/** @type {string} */ key, /** @type {string} */ text)}
+  <div
+    class="absolute top-1 right-1 flex gap-0.5 opacity-60 group-hover:opacity-100 transition-opacity"
+  >
+    <button
+      type="button"
+      class="p-1 rounded border bg-background text-muted-foreground hover:text-foreground"
+      title={wholeText[key] ? 'Shorten (or double-click the text)' : 'Show all (or double-click the text)'}
+      aria-label={wholeText[key] ? 'Shorten' : 'Show all'}
+      onclick={() => (wholeText[key] = !wholeText[key])}
+    >
+      {#if wholeText[key]}<Minimize2 size={12} />{:else}<Maximize2 size={12} />{/if}
+    </button>
+    <button
+      type="button"
+      class="p-1 rounded border bg-background {copied[key]
+        ? 'text-green-600'
+        : 'text-muted-foreground hover:text-foreground'}"
+      title={copied[key] ? 'Copied' : 'Copy'}
+      aria-label="Copy"
+      onclick={() => copyText(key, text)}
+    >
+      {#if copied[key]}<Check size={12} />{:else}<Copy size={12} />{/if}
+    </button>
+  </div>
+{/snippet}
+
+<!-- A block of text cut to a few lines; the icon in its corner or a double click (or double tap)
+     shows it whole -->
+{#snippet textBlock(/** @type {string} */ key, /** @type {string} */ text, /** @type {string} */ height)}
+  <div class="relative group">
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <pre
+      title={wholeText[key] ? 'Double-click to shorten' : 'Double-click to show all'}
+      ondblclick={() => (wholeText[key] = !wholeText[key])}
+      class="p-2 pr-16 bg-muted/30 border rounded text-[11px] font-mono whitespace-pre-wrap break-all {wholeText[
+        key
+      ]
+        ? ''
+        : `${height} overflow-auto`}">{text}</pre>
+    {@render blockTools(key, text)}
+  </div>
+{/snippet}
+
+<!-- One step of an agent turn: a row with its outcome, title, tool and time; opened, the code it
+     ran, the calls that code made with their output, and what it returned -->
+{#snippet agentStep(/** @type {string} */ dir, /** @type {any} */ s, /** @type {number} */ i)}
+  {@const key = `${dir}#${i}`}
+  {@const failedCalls = (s.calls || []).filter((/** @type {any} */ c) => c.error).length}
+  <li>
+    <button
+      type="button"
+      class="w-full flex items-center gap-2 py-0.5 text-left"
+      onclick={() => (openAgentSteps[key] = !openAgentSteps[key])}
+    >
+      {@render chevron(!!openAgentSteps[key])}
+      <span class="text-muted-foreground w-6 text-right shrink-0">{i + 1}.</span>
+      {#if s.error}
+        <X size={14} strokeWidth={3} class="shrink-0 text-red-600" aria-label="error" />
+      {:else if s.output === null}
+        <span class="w-3.5 shrink-0 text-amber-600" title="no result recorded">…</span>
+      {:else}
+        <Check size={14} strokeWidth={3} class="shrink-0 text-green-600" aria-label="ok" />
+      {/if}
+      <span class="font-medium truncate">{s.title}</span>
+      <code class="text-muted-foreground">{s.tool}</code>
+      {#if s.calls?.length}
+        <span class="text-muted-foreground whitespace-nowrap"
+          >{s.calls.length} {s.calls.length === 1 ? 'call' : 'calls'}{#if failedCalls}<span
+              class="text-red-700"> · {failedCalls} failed</span
+            >{/if}</span
+        >
+      {/if}
+      {#if s.durationMs != null}
+        <span class="ml-auto text-muted-foreground whitespace-nowrap"
+          >{duration(s.durationMs)}</span
+        >
+      {/if}
+    </button>
+    {#if openAgentSteps[key]}
+      <div class="ml-12 my-1 space-y-1">
+        {#if s.input}
+          <div class="text-muted-foreground">code</div>
+          {@render textBlock(`${key}:in`, s.input, 'max-h-48')}
+        {/if}
+        {#each s.calls || [] as call, j (j)}
+          <div class="border-l-2 pl-2 space-y-1 {call.error ? 'border-red-300' : 'border-border'}">
+            <div class="flex items-center gap-2">
+              {#if call.error}
+                <X size={12} strokeWidth={3} class="shrink-0 text-red-600" />
+              {:else}
+                <Check size={12} strokeWidth={3} class="shrink-0 text-green-600" />
+              {/if}
+              <code class="font-medium">{call.tool}</code>
+              {#if call.exitCode != null}<span
+                  class={call.exitCode ? 'text-red-700' : 'text-muted-foreground'}
+                  >exit {call.exitCode}</span
+                >{/if}
+            </div>
+            {@render textBlock(`${key}:c${j}:in`, call.input, 'max-h-32')}
+            {#if call.output}
+              {@render textBlock(`${key}:c${j}:out`, call.output, 'max-h-48')}
+            {/if}
+          </div>
+        {/each}
+        {#if s.output}
+          <div class="text-muted-foreground">result</div>
+          {@render textBlock(`${key}:out`, s.output, 'max-h-48')}
+        {/if}
+      </div>
+    {/if}
+  </li>
+{/snippet}
+
 {#snippet chevron(/** @type {boolean} */ open)}
   {#if open}
     <ChevronDown size={12} class="shrink-0" />
@@ -465,8 +695,19 @@
               : ''}
           </span>
         {/if}
-        <span class="px-1.5 rounded border whitespace-nowrap {statusClass[status]}">{status}</span>
-        <span class="font-medium whitespace-nowrap" title={node.type}>{node.label}</span>
+        <!-- The outcome as an icon: a green check, a red cross, amber for a retry that went through -->
+        {#if status === 'ok'}
+          <Check size={14} strokeWidth={3} class="shrink-0 text-green-600" aria-label="ok" />
+        {:else if status === 'error'}
+          <X size={14} strokeWidth={3} class="shrink-0 text-red-600" aria-label="error" />
+        {:else if status === 'retried'}
+          <RotateCcw size={13} strokeWidth={2.5} class="shrink-0 text-amber-600" aria-label="retried" />
+        {:else}
+          <span class="px-1.5 rounded border whitespace-nowrap {statusClass[status]}">{status}</span>
+        {/if}
+        <span class="font-medium whitespace-nowrap px-1.5 rounded border border-border/70" title={node.type}
+          >{node.label}</span
+        >
         {#if node.type}
           <code class="text-muted-foreground whitespace-nowrap">{componentType(node.type)}</code>
         {/if}
@@ -518,23 +759,44 @@
                     severityClass.info}">{entry.severity}</span
                 >
               {/if}
+              <!-- What the entry is: a message the component received (input), one it sent from
+                   a port (output), or a line it logged itself (context.log), shown quieter -->
               {#if entry.port}
-                <span class="text-muted-foreground whitespace-nowrap"
+                <span
+                  class="px-1.5 rounded border whitespace-nowrap {entry.direction === 'in'
+                    ? 'bg-sky-50 text-sky-700 border-sky-200'
+                    : 'bg-emerald-50 text-emerald-700 border-emerald-200'}"
                   >{entry.direction === 'in' ? 'input' : 'output'}
                   <code>{entry.port}</code></span
+                >
+              {:else if entry.severity === 'info'}
+                <span class="px-1.5 rounded border border-dashed whitespace-nowrap text-muted-foreground/70"
+                  >log</span
                 >
               {/if}
               <span
                 class="truncate {entry.severity === 'error'
                   ? 'text-red-700'
-                  : 'text-muted-foreground'}">{entry.summary}</span
+                  : entry.port
+                    ? 'text-muted-foreground'
+                    : 'text-muted-foreground/60 italic'}">{entry.summary}</span
               >
             </button>
             {#if panel.open[entryKey]}
-              <pre
-                class="mt-1 ml-5 p-2 bg-muted/30 border rounded text-[11px] whitespace-pre-wrap break-all max-h-80 overflow-auto">{#each jsonTokens(entry.detail) as token}{#if token.kind}<span
-                      class={tokenClass[token.kind]}>{token.text}</span
-                    >{:else}{token.text}{/if}{/each}</pre>
+              <div class="relative group mt-1 ml-5">
+                <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                <pre
+                  title={wholeText[entryKey] ? 'Double-click to shorten' : 'Double-click to show all'}
+                  ondblclick={() => (wholeText[entryKey] = !wholeText[entryKey])}
+                  class="p-2 pr-16 bg-muted/30 border rounded text-[11px] whitespace-pre-wrap break-all {wholeText[
+                    entryKey
+                  ]
+                    ? ''
+                    : 'max-h-80 overflow-auto'}">{#each jsonTokens(entry.detail) as token}{#if token.kind}<span
+                        class={tokenClass[token.kind]}>{token.text}</span
+                      >{:else}{token.text}{/if}{/each}</pre>
+                {@render blockTools(entryKey, entry.detail)}
+              </div>
             {/if}
           </div>
         {/each}
@@ -681,8 +943,9 @@
     <div class="flex items-baseline gap-4">
       <h2 class="text-xl font-semibold">Pipeline runs</h2>
       <span class="text-xs text-muted-foreground">
-        stage runs on the OpenClaw host, last 14 days{#if openclaw?.generatedAt}
-          · host status {ago(openclaw.generatedAt)}, rebuilt every 5 min{/if}
+        by board card: every stage run on the OpenClaw host and the mentions on its PR, last 14
+        days{#if openclaw?.generatedAt}
+          · host status {ago(openclaw.generatedAt)}, rebuilt every minute{/if}
       </span>
     </div>
     {#if data.openclaw?.error}
@@ -698,7 +961,7 @@
       {#if linkedRunPending}
         <p class="text-sm text-amber-800">
           Run {linkedRun} started at {stamp(linkedRunAt)}, after the host status was last built
-          ({stamp(openclaw.generatedAt)}). The host rebuilds it every 5 minutes; this page checks
+          ({stamp(openclaw.generatedAt)}). The host rebuilds it every minute; this page checks
           every 30 seconds and opens the run as soon as it is there.
         </p>
       {:else if linkedRunMissing}
@@ -710,8 +973,100 @@
       <!-- One row per run of a stage (Build, Testing, Fix, Doc&Verification): what it ran on,
            its result and summary. A row expands to the stage report, the tail of the runner
            log, the agent's steps and the result callbacks to Appmixer. -->
+      <!-- One row per board card: where it stands, its issue and PR, the last result, what it cost.
+           Opened, its timeline: every stage run (as below) and the mentions on its PR. -->
       <div class="border rounded-lg divide-y">
-        {#each shownPipelineRuns as run (run.hookId + run.dir)}
+        {#each shownCards as card (card.key)}
+          {@const cardOpen = !!openCards[card.key]}
+          {@const status = card.board?.status}
+          <div class="text-xs">
+            <button
+              type="button"
+              class="flex flex-wrap items-center gap-3 w-full text-left px-3 py-2 hover:bg-muted/30"
+              onclick={() => (openCards[card.key] = !cardOpen)}
+            >
+              {@render chevron(cardOpen)}
+              <span
+                class="px-2 py-0.5 rounded border whitespace-nowrap {card.running
+                  ? 'bg-sky-50 text-sky-800 border-sky-300 animate-pulse'
+                  : WAITING.includes(status)
+                    ? 'bg-amber-50 text-amber-800 border-amber-300'
+                    : /done|released/i.test(status || '') || card.board?.state === 'CLOSED'
+                      ? 'bg-green-50 text-green-700 border-green-200'
+                      : 'bg-muted text-muted-foreground border-border'}"
+                title={status
+                  ? 'Status on the board now'
+                  : 'The card is no longer on the board (removed, or its issue was moved)'}
+                >{status || (card.running ? 'running' : 'off the board')}</span
+              >
+              {#if card.target}
+                {@const [repo, number] = card.target.split('#')}
+                <a
+                  class="font-semibold hover:underline whitespace-nowrap"
+                  href="https://github.com/{repo}/issues/{number}"
+                  target="_blank"
+                  rel="noreferrer"
+                  onclick={(e) => e.stopPropagation()}
+                  >{repo.replace('Appmixer-ai/appmixer-', '')}#{number}</a
+                >
+              {/if}
+              {#if card.board?.title}<span class="font-medium truncate max-w-xl" title={card.board.title}
+                  >{card.board.title}</span
+                >{/if}
+              {#each card.prs as pr (pr)}
+                <a
+                  class="hover:underline whitespace-nowrap"
+                  href="https://github.com/Appmixer-ai/appmixer-connectors/pull/{pr}"
+                  target="_blank"
+                  rel="noreferrer"
+                  onclick={(e) => e.stopPropagation()}>PR #{pr}</a
+                >
+              {/each}
+              <span class="text-muted-foreground whitespace-nowrap"
+                >last: {card.last.name}
+                <span
+                  class={card.last.result === 'passed'
+                    ? 'text-green-700'
+                    : card.last.result === 'running'
+                      ? 'text-sky-700'
+                      : card.last.result === 'blocked'
+                        ? 'text-amber-800'
+                        : 'text-red-700'}>{card.last.result}</span
+                ></span
+              >
+              <span class="ml-auto text-muted-foreground whitespace-nowrap" title={stamp(card.lastAt)}
+                >{ago(card.lastAt)} · {card.runs.length}
+                {card.runs.length === 1 ? 'run' : 'runs'}{#if card.mentions.length}
+                  · {card.mentions.length}
+                  {card.mentions.length === 1 ? 'mention' : 'mentions'}{/if}{#if card.costUsd}
+                  · ${card.costUsd.toFixed(2)}{/if}</span
+              >
+            </button>
+            {#if cardOpen}
+              <div class="ml-5 mb-2 mr-2 border-l pl-2 divide-y">
+                {#each card.items as item (item.kind + item.at + (item.run?.dir || item.mention?.pr))}
+                  {#if item.kind === 'mention'}
+                    {@const m = item.mention}
+                    <div class="px-3 py-2 flex flex-wrap items-center gap-3">
+                      <span
+                        class="px-2 py-0.5 rounded border {m.status === 'replied'
+                          ? 'bg-green-50 text-green-700 border-green-200'
+                          : m.status === 'failed'
+                            ? 'bg-red-50 text-red-700 border-red-200'
+                            : 'bg-muted text-muted-foreground border-border'}">{m.status}</span
+                      >
+                      <span class="font-medium">@apx-vero mention</span>
+                      <a class="hover:underline" href={m.url} target="_blank" rel="noreferrer"
+                        >PR #{m.pr}</a
+                      >
+                      <span title={stamp(m.at)}>{ago(m.at)}</span>
+                      <span class="text-muted-foreground"
+                        >{m.mentions?.length || 0} asked · {m.replies?.length || 0} answered{#if m.code_changed}
+                          · code changed{/if}{#if m.reason} · {m.reason}{/if}</span
+                      >
+                    </div>
+                  {:else}
+          {@const run = item.run}
           {@const open = openPipelineRuns[run.dir]}
           <div
             id="run-{run.dir}"
@@ -723,8 +1078,10 @@
               type="button"
               class="flex flex-wrap items-center gap-3 w-full text-left"
               onclick={() => {
-                openPipelineRuns[run.dir] = !open;
-                if (!open) loadTrace(run.dir);
+                // `open` is derived from openPipelineRuns: read it before the toggle changes it
+                const opening = !openPipelineRuns[run.dir];
+                openPipelineRuns[run.dir] = opening;
+                if (opening) loadTrace(run.dir);
               }}
             >
               {@render chevron(!!open)}
@@ -837,7 +1194,7 @@
                           >
                           {#if event.detail}<span class="text-muted-foreground">{event.detail}</span
                             >{/if}
-                          {#if event.steps?.length}
+                          {#if event.steps?.length && !event.run}
                             <button
                               type="button"
                               class="text-muted-foreground underline"
@@ -854,7 +1211,13 @@
                             >
                           {/if}
                         </li>
-                        {#if openTraceSteps[key]}
+                        {#if event.run}
+                          <!-- The run as the integration panels draw it: open it for every
+                               component and what it received and sent -->
+                          <li class="ml-40 border rounded bg-background px-2">
+                            {@render step(tracePanel, key, event.run.root, event.run, true)}
+                          </li>
+                        {:else if openTraceSteps[key]}
                           <li class="pl-40">
                             <ol class="list-decimal pl-4 text-muted-foreground">
                               {#each event.steps as step}
@@ -874,7 +1237,7 @@
                 {#if run.result === 'running'}
                   <div class="text-amber-800">
                     Still running. The agent's steps show here once its turn ends; the host status is
-                    rebuilt every 5 min, so refresh for news.
+                    rebuilt every minute, so refresh for news.
                   </div>
                 {:else if run.result === 'unfinished'}
                   <div class="text-red-700">
@@ -900,13 +1263,30 @@
                   </div>
                 {/if}
                 {#if run.agent?.steps?.length}
+                  {@const full = agentSteps[run.dir]}
                   <div>
                     <div class="text-muted-foreground">
-                      Agent steps ({seconds(run.agent.durationSec)})
+                      Agent steps ({seconds(run.agent.durationSec)}{#if run.agent.toolCalls}, {run.agent
+                          .toolCalls} calls{/if}){#if full?.loading}
+                        · loading the details…{:else if full?.error}
+                        · <span class="text-red-700">{full.error}</span>
+                        <button
+                          type="button"
+                          class="underline"
+                          onclick={() => loadAgentSteps(run.dir, true)}>retry</button
+                        >{/if}
                     </div>
-                    <ol class="list-decimal pl-4 text-muted-foreground">
-                      {#each run.agent.steps as step}<li>{step}</li>{/each}
-                    </ol>
+                    {#if full?.steps?.length}
+                      <ol class="text-xs">
+                        {#each full.steps as s, i (i)}
+                          {@render agentStep(run.dir, s, i)}
+                        {/each}
+                      </ol>
+                    {:else}
+                      <ol class="list-decimal pl-4 text-muted-foreground">
+                        {#each run.agent.steps as step}<li>{step}</li>{/each}
+                      </ol>
+                    {/if}
                   </div>
                 {/if}
                 {#if run.callback?.length}
@@ -921,15 +1301,27 @@
               </div>
             {/if}
           </div>
+                  {/if}
+                {/each}
+              </div>
+            {/if}
+          </div>
         {/each}
       </div>
-      {#if pipelineRuns.length > shownPipelineRuns.length || allPipelineRuns}
+      {#if cards.length > shownCards.length || allPipelineRuns}
         <button
           type="button"
           class="text-xs text-muted-foreground hover:underline"
           onclick={() => (allPipelineRuns = !allPipelineRuns)}
-          >{allPipelineRuns ? 'Show fewer' : `Show all ${pipelineRuns.length} runs`}</button
+          >{allPipelineRuns
+            ? 'Show fewer'
+            : `Show all ${cards.length} cards (${pipelineRuns.length} runs)`}</button
         >
+      {/if}
+      {#if data.cards?.error}
+        <p class="text-xs text-muted-foreground">
+          Board status not loaded: {data.cards.error}
+        </p>
       {/if}
     {/if}
   </section>
@@ -1264,152 +1656,9 @@
   </section>
 
   <!-- OpenClaw -->
-  {#snippet hookRunRows(/** @type {any[]} */ runs)}
-    <!-- One row per hook call (a gateway journal line), with what the agent's session
-         transcript says about it: the PR, how long it took, model calls and cost. A row
-         expands to the exec steps by title and the agent's closing text. -->
-    <div class="border rounded-lg divide-y">
-      {#each runs as run (run.at)}
-        {@const details = run.steps?.length || run.result || run.stage?.report}
-        <div class="px-3 py-2 text-xs space-y-1">
-          <button
-            type="button"
-            class="flex flex-wrap items-center gap-3 w-full text-left {details
-              ? ''
-              : 'cursor-default'}"
-            onclick={() => {
-              if (details) openHookRuns[run.at] = !openHookRuns[run.at];
-            }}
-          >
-            {#if details}
-              {#if openHookRuns[run.at]}<ChevronDown class="h-3 w-3" />{:else}<ChevronRight
-                  class="h-3 w-3"
-                />{/if}
-            {/if}
-            <span
-              class="px-2 py-0.5 rounded border {run.status === 'ok'
-                ? 'bg-green-50 text-green-700 border-green-200'
-                : 'bg-red-50 text-red-700 border-red-200'}">{run.status}</span
-            >
-            <span>{ago(run.at)}</span>
-            {#if run.pr}
-              <a
-                class="hover:underline font-medium"
-                href="https://github.com/Appmixer-ai/appmixer-connectors/pull/{run.pr}"
-                target="_blank"
-                rel="noreferrer"
-                onclick={(e) => e.stopPropagation()}>PR #{run.pr}</a
-              >
-            {/if}
-            <!-- The pipeline stage this hook call started (Build of an issue, Testing, Fix,
-                 Doc&Verification of a PR) and what it decided -->
-            {#if run.stage}
-              <span
-                class="px-1.5 py-0.5 rounded border {run.stage.result === 'passed'
-                  ? 'border-green-400 text-green-700'
-                  : run.stage.result === 'running'
-                    ? 'border-amber-400 text-amber-800'
-                    : 'border-red-400 text-red-700'}"
-                >{run.stage.name}: {run.stage.result}{#if run.stage.durationSec != null}{` · ${
-                    run.stage.durationSec < 120
-                      ? `${run.stage.durationSec} s`
-                      : `${Math.round(run.stage.durationSec / 60)} min`
-                  }`}{/if}</span
-              >
-              {#if run.stage.issue}
-                {@const [repo, number] = run.stage.issue.split('#')}
-                <a
-                  class="hover:underline font-medium"
-                  href="https://github.com/{repo}/issues/{number}"
-                  target="_blank"
-                  rel="noreferrer"
-                  onclick={(e) => e.stopPropagation()}
-                  >{repo.replace('Appmixer-ai/appmixer-', '')}#{number}</a
-                >
-              {/if}
-              {#if run.stage.prUrl && !run.pr}
-                <a
-                  class="hover:underline font-medium"
-                  href={run.stage.prUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  onclick={(e) => e.stopPropagation()}
-                  >→ PR #{run.stage.prUrl.split('/').pop()}</a
-                >
-              {/if}
-            {/if}
-            {#if run.durationSec != null}<span class="text-muted-foreground"
-                >{run.durationSec} s</span
-              >{/if}
-            {#if run.modelCalls}<span class="text-muted-foreground"
-                >{run.modelCalls} model calls · {run.toolCalls} steps</span
-              >{/if}
-            {#if run.costUsd}<span class="text-muted-foreground"
-                >${run.costUsd.toFixed(3)}</span
-              >{/if}
-            <span class="text-muted-foreground">{run.model}</span>
-            {#each run.responder || [] as r (r.at)}
-              <span
-                class="px-1.5 py-0.5 rounded border border-dashed {r.status === 'replied'
-                  ? 'border-green-400 text-green-700'
-                  : r.status === 'failed'
-                    ? 'border-red-400 text-red-700'
-                    : r.status === 'skipped'
-                      ? 'border-muted-foreground/40 text-muted-foreground'
-                      : 'border-amber-400 text-amber-800'}"
-                title="resolve.sh run {r.at}{r.reason ? ' — ' + r.reason : ''}"
-                >resolve.sh: {r.status}{#if r.reason}
-                  · {r.reason}{/if}{#if r.code_changed}
-                  · pushed{/if}</span
-              >
-            {/each}
-            {#if run.summary || run.stage?.summary}<span
-                class="text-muted-foreground truncate max-w-2xl"
-                title={run.summary || run.stage.summary}>{run.summary || run.stage.summary}</span
-              >{/if}
-          </button>
-          {#if details && openHookRuns[run.at]}
-            <div class="pl-6 space-y-1">
-              {#if run.stage?.report}
-                <div class="whitespace-pre-wrap border-l-2 border-amber-300 pl-2">
-                  {run.stage.name} report: {run.stage.report}
-                </div>
-              {/if}
-              {#if run.steps?.length}
-                <ol class="list-decimal pl-4 text-muted-foreground">
-                  {#each run.steps as step}<li>{step}</li>{/each}
-                </ol>
-              {/if}
-              {#if run.result}
-                <div class="whitespace-pre-wrap border-l-2 pl-2">{run.result}</div>
-              {/if}
-              {#if run.commentUrl}
-                <a class="hover:underline" href={run.commentUrl} target="_blank" rel="noreferrer"
-                  >the reply on GitHub</a
-                >
-              {/if}
-              {#each run.responder || [] as r (r.at)}
-                {#if r.replies?.length || r.mentions}
-                  <div class="border border-dashed rounded px-2 py-1 space-y-1">
-                    <div class="text-muted-foreground">
-                      resolve.sh {when(r.at)}: {r.mentions} mention{r.mentions === 1 ? '' : 's'}
-                      {#if r.durationMs != null}· replied after {Math.round(r.durationMs / 1000)} s{/if}
-                    </div>
-                    {#each r.replies || [] as reply}
-                      <div class="whitespace-pre-wrap">{reply.body}</div>
-                    {/each}
-                  </div>
-                {/if}
-              {/each}
-            </div>
-          {/if}
-        </div>
-      {/each}
-    </div>
-  {/snippet}
 
   <section id="openclaw" class="space-y-3">
-    <h2 class="text-xl font-semibold">OpenClaw agents</h2>
+    <h2 class="text-xl font-semibold">OpenClaw host</h2>
     {#if data.openclaw?.error}
       <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
         {data.openclaw.error}
@@ -1419,220 +1668,130 @@
         Not configured: set <code>OPENCLAW_STATUS_URL</code> and <code>OPENCLAW_STATUS_TOKEN</code>.
       </div>
     {:else}
-      <div class="grid md:grid-cols-3 gap-3">
-        <div class="border rounded-lg p-3 space-y-1 text-sm">
-          <div class="font-medium">Gateway</div>
-          <div>
-            {openclaw.gateway?.active ? '🟢 running' : '🔴 not running'} · {openclaw.version}
-          </div>
-          <div class="text-xs text-muted-foreground">
-            host {openclaw.host} · status {ago(openclaw.generatedAt)}
-          </div>
-          <div class="text-xs text-muted-foreground">
-            Node {openclaw.node} · disk {openclaw.disk}
-          </div>
-          {#if openclaw.update}
-            <div
-              class="text-xs {openclaw.update.available
-                ? 'text-amber-800'
-                : 'text-muted-foreground'}"
+      <!-- The host in one box: the gateway, what of components dev it runs, the hooks it maps and
+           the mentions that belong to no card above. The runs themselves are in Pipeline runs. -->
+      {@const deploy = openclaw.deploy}
+      <div class="border rounded-lg p-3 space-y-3 text-sm">
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span class="font-medium"
+            >{openclaw.gateway?.active ? '🟢 Gateway running' : '🔴 Gateway not running'}</span
+          >
+          <span class="text-xs text-muted-foreground"
+            >OpenClaw {openclaw.version} · host {openclaw.host} · Node {openclaw.node} · disk {openclaw.disk}
+            · status {ago(openclaw.generatedAt)}</span
+          >
+          {#if openclaw.update?.available}
+            <Badge variant="outline" class="text-amber-800"
+              >update available: {openclaw.update.latest}</Badge
             >
-              {openclaw.update.available
-                ? `update available: ${openclaw.update.latest}`
-                : 'up to date'}
-            </div>
           {/if}
         </div>
-        <div class="border rounded-lg p-3 space-y-1 text-sm">
-          <div class="font-medium">Agents & hooks</div>
-          <div class="text-xs">agents {(openclaw.agents || []).join(', ')}</div>
-          <div class="text-xs text-muted-foreground">
-            {(openclaw.hooks || []).length} hook{(openclaw.hooks || []).length === 1 ? '' : 's'} on
-            {openclaw.publicHost || 'the gateway'}
-          </div>
-        </div>
-        <div class="border rounded-lg p-3 space-y-1 text-sm">
-          <div class="font-medium">
-            Mention responder {#if openclaw.mentionResponder?.shadow}<Badge
-                variant="outline"
-                class="ml-1 text-amber-800">shadow</Badge
-              >{/if}
-          </div>
-          <div class="text-xs text-muted-foreground">
-            {(openclaw.mentionResponder?.recent || []).filter(
-              (/** @type {any} */ r) => r.status === 'replied'
-            ).length} replied of the last {openclaw.mentionResponder?.recent?.length ?? 0} ·
-            {openclaw.mentionResponder?.runs ?? 0} runs on disk
-          </div>
-        </div>
-      </div>
-      <!-- The OpenClaw cron job openclaw-deploy keeps the host on appmixer-components dev:
-           its last run, the dev commit it deployed, and deploy.log (newest first). -->
-      {#if openclaw.deploy}
-        {@const deploy = openclaw.deploy}
-        <div class="border rounded-lg p-3 space-y-1 text-sm">
-          <div class="flex flex-wrap items-center gap-3">
-            <span class="font-medium">Deploy from dev</span>
-            {#if !deploy.cron}
-              <Badge variant="outline" class="text-red-700">cron job missing</Badge>
-            {:else if !deploy.cron.enabled}
-              <Badge variant="outline" class="text-amber-800">disabled</Badge>
-            {:else if deploy.cron.lastStatus && deploy.cron.lastStatus !== 'ok'}
-              <Badge variant="outline" class="text-red-700">last run {deploy.cron.lastStatus}</Badge>
-            {/if}
-            {#if deploy.restartPending}
-              <Badge variant="outline" class="text-amber-800">gateway restart pending</Badge>
-            {/if}
-          </div>
-          {#if deploy.cron}
-            <div class="text-xs text-muted-foreground">
-              cron <code>openclaw-deploy</code> every {deploy.cron.everyMin} min · last run
-              {ago(deploy.cron.lastRunAt)}
-              {#if deploy.cron.lastStatus}({deploy.cron.lastStatus}){/if}
-            </div>
-          {/if}
-          {#if deploy.commit}
-            <div class="text-xs text-muted-foreground">
-              dev <a
-                class="hover:underline"
-                href="https://github.com/Appmixer-ai/appmixer-components/commit/{deploy.commit
-                  .sha}"
-                target="_blank"
-                rel="noreferrer"><code>{deploy.commit.sha.slice(0, 8)}</code></a
-              >
-              {deploy.commit.subject} · {ago(deploy.commit.at)}
-            </div>
-          {/if}
-          {#if deploy.log?.length}
-            <div class="text-xs space-y-0.5 pt-1">
-              {#each deploy.log as entry, i (i)}
-                <div class={/FAILED|not deployed/.test(entry.text) ? 'text-red-700' : ''}>
-                  <span class="text-muted-foreground">{ago(entry.at)}</span>
-                  {entry.text}
-                </div>
-              {/each}
-            </div>
-          {:else}
-            <div class="text-xs text-muted-foreground">deploy.log is empty</div>
-          {/if}
-        </div>
-      {/if}
-      <!-- Every hook the gateway maps: what it is (URL, agent, model, how the transform runs the
-           agent) and which Appmixer integration instance calls it. A hook nothing calls, or a
-           hook that nginx does not expose, is flagged. -->
-      {#each openclaw.hooks || [] as hook (hook.id)}
-        {@const runs = runsOfHook(hook.id)}
-        <div class="border rounded-lg p-3 space-y-1 text-sm">
-          <div class="flex flex-wrap items-center gap-3">
-            <span class="font-medium">{hook.id}</span>
-            <code class="text-xs">{hook.url}</code>
-            {#if hook.exposed === false}
-              <Badge variant="outline" class="text-red-700">not exposed by nginx</Badge>
-            {/if}
-          </div>
-          <div class="text-xs text-muted-foreground">
-            POST → agent <span class="text-foreground">{hook.agentId}</span> · {hook.model}
-            {#if hook.transform}· transform <code>{hook.transform}</code>{/if}
-            {#if hook.sessionMode}· {hook.sessionMode} session{/if}
-            {#if hook.sessionKey}<code class="ml-1">{hook.sessionKey}</code>{/if}
-            {#if hook.timeoutSeconds}· timeout {Math.round(hook.timeoutSeconds / 60)} min{/if}
-          </div>
-          {#if hook.description}
-            <div class="text-xs text-muted-foreground">{hook.description}</div>
-          {/if}
-          <div class="text-xs flex flex-wrap items-center gap-2">
-            <span class="text-muted-foreground">called by</span>
-            {#if hook.callers?.length}
-              {#each hook.callers as caller (caller.flowId)}
-                <Badge
-                  variant="outline"
-                  class={caller.stage === 'running' ? 'text-green-700' : 'text-red-700'}
-                  >{caller.stage}</Badge
-                >
-                {#if designer(caller.flowId)}
-                  <a
+
+        <!-- The OpenClaw cron job openclaw-deploy keeps the host on appmixer-components dev -->
+        {#if deploy}
+          <div class="space-y-0.5 text-xs">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="font-medium text-sm">Deploy from dev</span>
+              {#if !deploy.cron}
+                <Badge variant="outline" class="text-red-700">cron job missing</Badge>
+              {:else if !deploy.cron.enabled}
+                <Badge variant="outline" class="text-amber-800">disabled</Badge>
+              {:else if deploy.cron.lastStatus && deploy.cron.lastStatus !== 'ok'}
+                <Badge variant="outline" class="text-red-700">last run {deploy.cron.lastStatus}</Badge>
+              {/if}
+              {#if deploy.restartPending}
+                <Badge variant="outline" class="text-amber-800">gateway restart pending</Badge>
+              {/if}
+              {#if deploy.commit}
+                <span class="text-muted-foreground"
+                  >runs <a
                     class="hover:underline"
-                    href={designer(caller.flowId)}
+                    href="https://github.com/Appmixer-ai/appmixer-components/commit/{deploy.commit.sha}"
                     target="_blank"
-                    rel="noreferrer">{caller.name}</a
+                    rel="noreferrer"><code>{deploy.commit.sha.slice(0, 8)}</code></a
                   >
-                {:else}
-                  <span>{caller.name}</span>
-                {/if}
-                <span class="text-muted-foreground">({caller.component})</span>
-              {/each}
-            {:else if data.appmixer?.error}
-              <span class="text-muted-foreground">unknown — Appmixer: {data.appmixer.error}</span>
-            {:else}
-              <span class="text-red-700">no Appmixer integration instance posts to this URL</span>
+                  {deploy.commit.subject} · {ago(deploy.commit.at)}</span
+                >
+              {/if}
+              {#if deploy.cron}
+                <span class="text-muted-foreground"
+                  >· checks every {deploy.cron.everyMin} min, last {ago(deploy.cron.lastRunAt)}</span
+                >
+              {/if}
+            </div>
+            {#each (deploy.log || []).slice(0, showDeployLog ? undefined : 3) as entry, i (i)}
+              <div class={/FAILED|not deployed/.test(entry.text) ? 'text-red-700' : ''}>
+                <span class="text-muted-foreground">{ago(entry.at)}</span>
+                {entry.text}
+              </div>
+            {/each}
+            {#if (deploy.log || []).length > 3}
+              <button
+                type="button"
+                class="text-muted-foreground hover:underline"
+                onclick={() => (showDeployLog = !showDeployLog)}
+                >{showDeployLog ? 'less' : `${deploy.log.length - 3} more`}</button
+              >
             {/if}
           </div>
-          {#if runs.length}
-            <div class="text-xs text-muted-foreground pt-1">
-              {runs.length} run{runs.length === 1 ? '' : 's'} in the last 7 days
-            </div>
-            {@render hookRunRows(runs)}
-          {:else}
-            <div class="text-xs text-muted-foreground pt-1">no run in the last 7 days</div>
-          {/if}
+        {/if}
+
+        <!-- Every hook the gateway maps, one line each -->
+        <div class="text-xs">
+          <div class="font-medium text-sm mb-1">Hooks on {openclaw.publicHost || 'the gateway'}</div>
+          <table class="w-full">
+            <tbody class="divide-y">
+              {#each openclaw.hooks || [] as hook (hook.id)}
+                <tr title={hook.description || ''}>
+                  <td class="py-1 pr-3 font-medium whitespace-nowrap">
+                    {hook.id}
+                    {#if hook.exposed === false}<Badge variant="outline" class="ml-1 text-red-700"
+                        >not exposed by nginx</Badge
+                      >{/if}
+                  </td>
+                  <td class="py-1 pr-3 whitespace-nowrap">{hook.agentId}</td>
+                  <td class="py-1 pr-3 text-muted-foreground whitespace-nowrap"
+                    >{String(hook.model || '').replace(/^anthropic\//, '')}</td
+                  >
+                  <td class="py-1 pr-3 text-muted-foreground whitespace-nowrap"
+                    >{hook.sessionMode || '—'}{#if hook.sessionMode === 'persistent' && hook.sessionKey}
+                      <code class="ml-1">{hook.sessionKey}</code>{/if}</td
+                  >
+                  <td class="py-1 text-muted-foreground whitespace-nowrap text-right"
+                    >{#if hook.timeoutSeconds}{Math.round(hook.timeoutSeconds / 60)} min{/if}</td
+                  >
+                </tr>
+              {/each}
+            </tbody>
+          </table>
         </div>
-      {/each}
-      {#if unmatchedRuns.length}
-        <div class="space-y-1">
-          <div class="text-sm font-medium">Hook runs matched to no hook</div>
-          {@render hookRunRows(unmatchedRuns)}
-        </div>
-      {/if}
-      {#if strayResponderRuns.length}
-        <!-- Runs of the mention responder (one per resolve.sh call) that fall into no hook run
-             above — normally none: a run started by hand on the host, or one whose hook run is
-             older than the transcripts kept. skipped = resolve.sh found nothing to do (PR closed,
-             not by apx-vero, or every mention answered), pending = the agent is still working,
-             failed = it never wrote its replies, shadow = answered into the shadow log only. -->
-        <div class="text-sm font-medium">Responder runs outside any hook call</div>
-        <div class="border rounded-lg divide-y">
-          {#each strayResponderRuns as entry}
-            <div class="px-3 py-2 text-xs space-y-1">
+
+        <!-- Mentions on PRs that belong to no card above: they would show nowhere else -->
+        {#if looseMentions.length}
+          <div class="text-xs space-y-1">
+            <div class="font-medium text-sm">Mentions outside the pipeline cards</div>
+            {#each looseMentions as m (m.at + m.pr)}
               <div class="flex flex-wrap items-center gap-3">
                 <span
-                  class="px-2 py-0.5 rounded border {entry.status === 'replied'
+                  class="px-2 py-0.5 rounded border {m.status === 'replied'
                     ? 'bg-green-50 text-green-700 border-green-200'
-                    : entry.status === 'failed'
+                    : m.status === 'failed'
                       ? 'bg-red-50 text-red-700 border-red-200'
-                      : entry.status === 'skipped'
-                        ? 'bg-muted text-muted-foreground'
-                        : 'bg-amber-50 text-amber-800 border-amber-200'}">{entry.status}</span
+                      : 'bg-muted text-muted-foreground border-border'}">{m.status}</span
                 >
-                <a
-                  class="hover:underline font-medium"
-                  href={entry.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  >PR #{entry.pr}{#if entry.title}
-                    · {entry.title}{/if}</a
+                <a class="hover:underline font-medium" href={m.url} target="_blank" rel="noreferrer"
+                  >PR #{m.pr}{#if m.title} · {m.title}{/if}</a
                 >
-                <span class="text-muted-foreground">{ago(entry.at)}</span>
-                {#if entry.reason}<span class="text-muted-foreground">{entry.reason}</span>{/if}
-                {#if entry.mentions?.length}
-                  <span class="text-muted-foreground">
-                    {entry.mentions.length} mention{entry.mentions.length === 1 ? '' : 's'} by
-                    {[...new Set(entry.mentions.map((/** @type {any} */ m) => m.author))].join(
-                      ', '
-                    )}
-                  </span>
-                {/if}
-                {#if entry.durationMs != null}
-                  <span class="text-muted-foreground">{Math.round(entry.durationMs / 1000)} s</span>
-                {/if}
-                {#if entry.code_changed}<span class="text-amber-800">pushed a change</span>{/if}
+                <span class="text-muted-foreground" title={stamp(m.at)}>{ago(m.at)}</span>
+                <span class="text-muted-foreground"
+                  >{m.mentions?.length || 0} asked · {m.replies?.length || 0} answered{#if m.reason}
+                    · {m.reason}{/if}</span
+                >
               </div>
-              {#each entry.replies || [] as reply}
-                <div class="whitespace-pre-wrap pl-2 border-l-2">{reply.body}</div>
-              {/each}
-            </div>
-          {/each}
-        </div>
-      {/if}
+            {/each}
+          </div>
+        {/if}
+      </div>
     {/if}
   </section>
 </div>

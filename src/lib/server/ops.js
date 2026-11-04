@@ -967,6 +967,26 @@ export async function collectOpenClaw() {
   return { configured: true, ...(await response.json()) };
 }
 
+/**
+ * Every agent step of one pipeline run in full: the host's build-status.js writes them to
+ * runs/<dir>.json next to the status, served behind the same token.
+ * @param {string} dir - the run directory, e.g. 3013-20261104-074925
+ * @returns {Promise<{ dir: string, model: string | null, steps: any[] } | null>} null when the
+ *   host has no detail file for the run (older runs, or a host without it)
+ */
+export async function pipelineRunSteps(dir) {
+  const url = env.OPENCLAW_STATUS_URL;
+  const token = env.OPENCLAW_STATUS_TOKEN;
+  if (!url || !token) return null;
+  const response = await fetch(url.replace(/[^/]+\.json$/, `runs/${dir}.json`), {
+    headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(20000)
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`OpenClaw run steps: HTTP ${response.status}`);
+  return response.json();
+}
+
 // The two Appmixer integrations around a pipeline stage: the dispatcher reacts to a card move
 // and calls the OpenClaw hook, the stage result integration takes what the host reports back.
 const PIPELINE_DISPATCHER = 'CI - project status -> pipeline';
@@ -1084,7 +1104,10 @@ async function cardRuns(baseUrl, token, flowId, itemNodeId, from, to) {
       move,
       stageResult,
       steps,
-      failed: steps.some((s) => s.error)
+      failed: steps.some((s) => s.error),
+      // The log entries themselves, for the run tree /ops draws as for an integration's runs
+      hits,
+      components
     };
   });
 }
@@ -1101,7 +1124,7 @@ export async function pipelineRunTrace(userId, dir) {
   const status = await collectOpenClaw();
   const run = (status.pipelineRuns || []).find((/** @type {any} */ r) => r.dir === dir);
   if (!run) throw new Error(`Run ${dir} is not in the host status`);
-  /** @type {{ at: string, source: string, title: string, detail?: string, status: string, steps?: any[], flowId?: string }[]} */
+  /** @type {{ at: string, source: string, title: string, detail?: string, status: string, steps?: any[], flowId?: string, hits?: any[], components?: Record<string, any>, run?: any }[]} */
   const events = [];
   const iso = (/** @type {number} */ ms) => new Date(ms).toISOString();
   const start = Date.parse(run.at);
@@ -1176,6 +1199,8 @@ export async function pipelineRunTrace(userId, dir) {
         ].join(' · '),
         status: r.failed ? 'error' : 'ok',
         steps: r.steps,
+        hits: r.hits,
+        components: r.components,
         flowId: designer(flowId)
       };
     };
@@ -1196,10 +1221,16 @@ export async function pipelineRunTrace(userId, dir) {
         /^(progress|done): /.test(s.text) || s.label === 'Pre-release result';
       const parts = logged.flatMap((r) => {
         /** @type {any[]} */
-        const out = [{ ...r, steps: [], report: '' }];
+        const out = [{ ...r, steps: [], hits: [], report: '' }];
         for (const step of r.steps) {
-          if (isReport(step)) out.push({ ...r, at: step.at, move: null, steps: [], report: step.text });
+          if (isReport(step))
+            out.push({ ...r, at: step.at, move: null, steps: [], hits: [], report: step.text });
           out[out.length - 1].steps.push(step);
+        }
+        // The log entries go with the part that was under way when they were written
+        for (const hit of r.hits) {
+          const part = out.findLast((p, i) => i === 0 || Date.parse(p.at) <= Date.parse(hit.gridTimestamp));
+          (part || out[0]).hits.push(hit);
         }
         return out
           .filter((part) => part.steps.length)
@@ -1241,6 +1272,8 @@ export async function pipelineRunTrace(userId, dir) {
             .join(' · '),
           status: r.failed ? 'error' : 'ok',
           steps: r.steps,
+          hits: r.hits,
+          components: r.components,
           flowId: designer(dispatcher.flowId)
         });
       }
@@ -1284,6 +1317,31 @@ export async function pipelineRunTrace(userId, dir) {
       }
     }
   }
+  // Each Appmixer run as the tree the integration panels draw: every component with what it
+  // received and sent
+  const withRun = events.filter((e) => e.hits?.length);
+  if (withRun.length) {
+    const { baseUrl, token } = await getAppmixerSession(userId);
+    const types = [
+      ...new Set(
+        withRun.flatMap((e) =>
+          /** @type {any[]} */ (e.hits).map(
+            (h) => h.componentType || e.components?.[h.componentId]?.type
+          )
+        )
+      )
+    ].filter(Boolean);
+    const ports = Object.fromEntries(
+      await Promise.all(types.map(async (type) => [type, await outPortNames(baseUrl, token, type)]))
+    );
+    for (const e of withRun) {
+      e.run = buildRun({ id: `${e.at}`, hits: e.hits || [] }, e.components || {}, ports);
+    }
+  }
+  for (const e of events) {
+    delete e.hits;
+    delete e.components;
+  }
   // callback.log stamps a result when Appmixer answered, after the result integration started
   // on it: sort a sent result before the run it caused
   const sortAt = (/** @type {{ at: string, title: string }} */ e) =>
@@ -1313,7 +1371,59 @@ export async function buildOpsOverview(userId) {
     settle(() => collectOpenClaw())
   ]);
   linkHooksToCallers(openclaw.data, appmixer.data);
-  return { generatedAt: new Date().toISOString(), appmixer, workflows, openclaw };
+  // The board cards the pipeline runs worked on, for the runs grouped by card
+  const cards = await settle(() => collectBoardCards(userId, openclaw.data));
+  return { generatedAt: new Date().toISOString(), appmixer, workflows, openclaw, cards };
+}
+
+/**
+ * Where each card the pipeline ran on stands on the project board now, and what it is: its status,
+ * and the issue (or pull request) it holds. One GraphQL query for all of them.
+ * @param {string} userId - caller's email
+ * @param {any} openclaw - the host status
+ * @returns {Promise<Record<string, { status: string | null, number: number | null, title: string, url: string, state: string | null, repo: string | null }>>}
+ */
+async function collectBoardCards(userId, openclaw) {
+  const ids = [
+    ...new Set(
+      (openclaw?.pipelineRuns || [])
+        .map((/** @type {any} */ r) => r.itemNodeId)
+        .filter((/** @type {any} */ id) => /^PVTI_[\w-]+$/.test(id || ''))
+    )
+  ].slice(0, 100);
+  if (!ids.length) return {};
+  const { token } = await getGitHubConfig(userId);
+  if (!token) throw new Error('No GitHub token to read the project board');
+  const query = `query { nodes(ids: ${JSON.stringify(ids)}) { ... on ProjectV2Item { id
+    status: fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+    content { ... on Issue { number title url state repository { name } }
+              ... on PullRequest { number title url state repository { name } } } } } }`;
+  const response = await fetch('https://api.github.com/graphql', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'User-Agent': 'appmixer-sanity-check'
+    },
+    body: JSON.stringify({ query }),
+    signal: AbortSignal.timeout(15000)
+  });
+  if (!response.ok) throw new Error(`GitHub board cards: HTTP ${response.status}`);
+  const body = await response.json();
+  /** @type {Record<string, any>} */
+  const cards = {};
+  for (const node of body?.data?.nodes || []) {
+    if (!node?.id) continue;
+    cards[node.id] = {
+      status: node.status?.name || null,
+      number: node.content?.number ?? null,
+      title: node.content?.title || '',
+      url: node.content?.url || '',
+      state: node.content?.state || null,
+      repo: node.content?.repository?.name || null
+    };
+  }
+  return cards;
 }
 
 /**
