@@ -218,7 +218,7 @@
   const linkedRunMissing = $derived(
     !!linkedRun && !!openclaw?.pipelineRuns && !pipelineRuns.some((run) => run.dir === linkedRun)
   );
-  // Started after the status was built: it shows up with one of the next builds (every 5 min)
+  // Started after the status was built: it shows up with the next build (every minute)
   const linkedRunPending = $derived(
     linkedRunMissing &&
       !!linkedRunAt &&
@@ -950,7 +950,7 @@
       <span class="text-xs text-muted-foreground">
         by board card: every stage run on the OpenClaw host and the mentions on its PR, last 14
         days{#if openclaw?.generatedAt}
-          · host status {ago(openclaw.generatedAt)}, rebuilt every 5 min{/if}
+          · host status {ago(openclaw.generatedAt)}, rebuilt every minute{/if}
       </span>
     </div>
     {#if data.openclaw?.error}
@@ -966,7 +966,7 @@
       {#if linkedRunPending}
         <p class="text-sm text-amber-800">
           Run {linkedRun} started at {stamp(linkedRunAt)}, after the host status was last built
-          ({stamp(openclaw.generatedAt)}). The host rebuilds it every 5 minutes; this page checks
+          ({stamp(openclaw.generatedAt)}). The host rebuilds it every minute; this page checks
           every 30 seconds and opens the run as soon as it is there.
         </p>
       {:else if linkedRunMissing}
@@ -1242,7 +1242,7 @@
                 {#if run.result === 'running'}
                   <div class="text-amber-800">
                     Still running. The agent's steps show here once its turn ends; the host status is
-                    rebuilt every 5 min, so refresh for news.
+                    rebuilt every minute, so refresh for news.
                   </div>
                 {:else if run.result === 'unfinished'}
                   <div class="text-red-700">
