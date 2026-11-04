@@ -132,6 +132,33 @@
       document.getElementById(`run-${dir}`)?.scrollIntoView({ block: 'center' })
     );
   });
+  // A run directory is named <issue or PR>-<yyyymmdd>-<hhmmss> (UTC), so a linked run that is not in
+  // the host status yet can be told apart from one that is too old for it.
+  const linkedRunAt = $derived.by(() => {
+    const m = /^c?\d+-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/.exec(linkedRun);
+    return m ? `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z` : '';
+  });
+  const linkedRunMissing = $derived(
+    !!linkedRun && !!openclaw?.pipelineRuns && !pipelineRuns.some((run) => run.dir === linkedRun)
+  );
+  // Started after the status was built: it shows up with one of the next builds (every 5 min)
+  const linkedRunPending = $derived(
+    linkedRunMissing &&
+      !!linkedRunAt &&
+      !!openclaw?.generatedAt &&
+      Date.parse(linkedRunAt) >= Date.parse(openclaw.generatedAt) - 60000
+  );
+  // While it is pending, reload the page data every 30 s for up to 10 minutes; the effect that
+  // opens a linked run takes over once it is there
+  $effect(() => {
+    if (!linkedRunPending) return;
+    const started = Date.now();
+    const timer = setInterval(() => {
+      if (Date.now() - started > 10 * 60000) clearInterval(timer);
+      else invalidateAll();
+    }, 30000);
+    return () => clearInterval(timer);
+  });
   /** @param {number | null | undefined} sec */
   const seconds = (sec) => (sec == null ? '' : duration(sec * 1000));
   /** @param {string} value */
@@ -668,10 +695,16 @@
           (the host status has no pipeline runs yet: its builder predates them){/if}.
       </p>
     {:else}
-      {#if linkedRun && !pipelineRuns.some((run) => run.dir === linkedRun)}
+      {#if linkedRunPending}
         <p class="text-sm text-amber-800">
-          Run {linkedRun} is not in the host status: older than 14 days, or it started after the
-          status was built ({ago(openclaw.generatedAt)}).
+          Run {linkedRun} started at {stamp(linkedRunAt)}, after the host status was last built
+          ({stamp(openclaw.generatedAt)}). The host rebuilds it every 5 minutes; this page checks
+          every 30 seconds and opens the run as soon as it is there.
+        </p>
+      {:else if linkedRunMissing}
+        <p class="text-sm text-amber-800">
+          Run {linkedRun}{#if linkedRunAt}, started {stamp(linkedRunAt)},{/if} is not in the host status:
+          it keeps the runs of the last 14 days.
         </p>
       {/if}
       <!-- One row per run of a stage (Build, Testing, Fix, Doc&Verification): what it ran on,
