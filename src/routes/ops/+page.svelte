@@ -4,7 +4,16 @@
   import { invalidateAll } from '$app/navigation';
   import { page } from '$app/state';
   import { onMount, tick } from 'svelte';
-  import { ChevronDown, ChevronRight, ExternalLink, RefreshCw, ScrollText } from 'lucide-svelte';
+  import {
+    Check,
+    ChevronDown,
+    ChevronRight,
+    ExternalLink,
+    RefreshCw,
+    RotateCcw,
+    ScrollText,
+    X
+  } from 'lucide-svelte';
 
   let { data } = $props();
 
@@ -467,8 +476,19 @@
               : ''}
           </span>
         {/if}
-        <span class="px-1.5 rounded border whitespace-nowrap {statusClass[status]}">{status}</span>
-        <span class="font-medium whitespace-nowrap" title={node.type}>{node.label}</span>
+        <!-- The outcome as an icon: a green check, a red cross, amber for a retry that went through -->
+        {#if status === 'ok'}
+          <Check size={14} strokeWidth={3} class="shrink-0 text-green-600" aria-label="ok" />
+        {:else if status === 'error'}
+          <X size={14} strokeWidth={3} class="shrink-0 text-red-600" aria-label="error" />
+        {:else if status === 'retried'}
+          <RotateCcw size={13} strokeWidth={2.5} class="shrink-0 text-amber-600" aria-label="retried" />
+        {:else}
+          <span class="px-1.5 rounded border whitespace-nowrap {statusClass[status]}">{status}</span>
+        {/if}
+        <span class="font-medium whitespace-nowrap px-1.5 rounded border border-border/70" title={node.type}
+          >{node.label}</span
+        >
         {#if node.type}
           <code class="text-muted-foreground whitespace-nowrap">{componentType(node.type)}</code>
         {/if}
