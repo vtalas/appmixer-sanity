@@ -4,6 +4,8 @@
  * - Appmixer: the integration templates in the `appmixer-sanity-hub` category (the GitHub
  *   responders, PR labels, PR hygiene) with their instances, revision drift and errors.
  * - GitHub Actions: the latest runs of every workflow of the connectors repo.
+ * - Watched flows: any flow the viewer added by its id (`ops_watched_flows` user setting), shown
+ *   with the same errors, activity and run tree as an integration instance.
  * - OpenClaw: the agent gateway on hetzner-appmixer-agents, through the status JSON the host
  *   publishes (`OPENCLAW_STATUS_URL` + `OPENCLAW_STATUS_TOKEN`).
  *
@@ -18,6 +20,7 @@ import {
   listCategoryTemplates
 } from '$lib/api/appmixer.js';
 import { getGitHubConfig } from '$lib/api/github.js';
+import { getUserSetting, setUserSetting, SETTING_KEYS } from '$lib/db/settings.js';
 
 export const HUB_CATEGORY = 'appmixer-sanity-hub';
 const ERROR_WINDOW_DAYS = 7;
@@ -869,6 +872,133 @@ export async function collectAppmixer(userId) {
   };
 }
 
+// Watched flows: the viewer's own list of flows to follow on /ops, kept per Appmixer instance
+// (a flow id means nothing on another one).
+const FLOW_ID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+const MAX_WATCHED = 30;
+
+/**
+ * @typedef {{ flowId: string, label: string, baseUrl: string, addedAt: string }} WatchedFlow
+ */
+
+/**
+ * @param {string} userId
+ * @returns {Promise<WatchedFlow[]>}
+ */
+async function readWatched(userId) {
+  if (!userId) return [];
+  try {
+    const list = JSON.parse((await getUserSetting(userId, SETTING_KEYS.OPS_WATCHED_FLOWS)) || '[]');
+    return Array.isArray(list) ? list.filter((w) => w && FLOW_ID.test(w.flowId)) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The flows the viewer watches on the configured instance, each with its state, errors and
+ * last activity. A flow the account cannot read (someone else's, deleted) stays in the list
+ * with `unreachable`, so it can be removed.
+ * @param {string} userId - caller's email
+ */
+export async function collectWatchedFlows(userId) {
+  const { baseUrl, token } = await getAppmixerSession(userId);
+  const all = await readWatched(userId);
+  const here = all.filter((w) => w.baseUrl === baseUrl);
+  const flows = await Promise.all(
+    here.map(async (watched) => {
+      const [flow, errors, active] = await Promise.all([
+        appmixerGet(baseUrl, token, `/flows/${watched.flowId}`, {
+          projection: 'flowId,name,stage,type,templateId'
+        }).catch((err) => ({ error: message(err) })),
+        flowErrors(baseUrl, token, watched.flowId).catch((err) => ({ error: message(err) })),
+        lastActivity(baseUrl, token, watched.flowId).catch(() => null)
+      ]);
+      return {
+        flowId: watched.flowId,
+        label: watched.label || '',
+        name: flow?.name || '',
+        stage: flow?.stage || null,
+        type: flow?.type || null,
+        unreachable: flow?.error ? unreachable(flow.error) : null,
+        errors,
+        lastActivity: active
+      };
+    })
+  );
+  return { instanceUrl: baseUrl, flows, elsewhere: all.length - here.length };
+}
+
+/** @param {string} error - "/flows/<id>: HTTP 404" */
+function unreachable(error) {
+  const status = /HTTP (\d+)/.exec(error)?.[1];
+  if (status === '404') return 'not found on this instance (deleted?)';
+  if (status === '401' || status === '403')
+    return "not readable with the configured Appmixer account (someone else's flow?)";
+  return error;
+}
+
+/**
+ * Adds a flow to the viewer's watched flows on the configured instance. `input` is the flow
+ * id or anything holding it, e.g. the designer URL. The flow must be readable with the
+ * configured account, otherwise its logs would not be either.
+ * @param {string} userId
+ * @param {string} input
+ * @param {string} [label]
+ * @returns {Promise<WatchedFlow>}
+ */
+export async function addWatchedFlow(userId, input, label = '') {
+  const flowId = FLOW_ID.exec(String(input || ''))?.[0]?.toLowerCase();
+  if (!flowId) throw new WatchError(400, 'No flow id (UUID) found in the input');
+  const { baseUrl, token } = await getAppmixerSession(userId);
+  const flow = await appmixerGet(baseUrl, token, `/flows/${flowId}`, {
+    projection: 'flowId,name'
+  }).catch((err) => {
+    throw new WatchError(400, `Flow ${flowId} is ${unreachable(message(err))}`);
+  });
+  const all = await readWatched(userId);
+  const others = all.filter((w) => !(w.flowId === flowId && w.baseUrl === baseUrl));
+  if (others.filter((w) => w.baseUrl === baseUrl).length >= MAX_WATCHED) {
+    throw new WatchError(400, `At most ${MAX_WATCHED} watched flows per instance`);
+  }
+  /** @type {WatchedFlow} */
+  const watched = {
+    flowId,
+    label: String(label || '')
+      .trim()
+      .slice(0, 100),
+    baseUrl,
+    addedAt: new Date().toISOString()
+  };
+  await setUserSetting(
+    userId,
+    SETTING_KEYS.OPS_WATCHED_FLOWS,
+    JSON.stringify([...others, watched])
+  );
+  return { ...watched, label: watched.label || flow?.name || '' };
+}
+
+/**
+ * @param {string} userId
+ * @param {string} flowId
+ */
+export async function removeWatchedFlow(userId, flowId) {
+  const { baseUrl } = await getAppmixerSession(userId);
+  const all = await readWatched(userId);
+  const left = all.filter((w) => !(w.flowId === flowId && w.baseUrl === baseUrl));
+  await setUserSetting(userId, SETTING_KEYS.OPS_WATCHED_FLOWS, JSON.stringify(left));
+  return { removed: all.length - left.length };
+}
+
+/** A refusal of a watched-flow change, with the HTTP status the API answers it with. */
+export class WatchError extends Error {
+  /** @param {number} status @param {string} msg */
+  constructor(status, msg) {
+    super(msg);
+    this.status = status;
+  }
+}
+
 /** The release repo, where the marketplace workflows run (same default as the release page). */
 const RELEASE_REPO = env.RELEASE_TARGET_REPO || 'Appmixer-ai/appmixer-components';
 
@@ -1365,15 +1495,16 @@ async function settle(fn) {
 
 /** @param {string} userId - caller's email, or '' for the env configuration */
 export async function buildOpsOverview(userId) {
-  const [appmixer, workflows, openclaw] = await Promise.all([
+  const [appmixer, watched, workflows, openclaw] = await Promise.all([
     settle(() => collectAppmixer(userId)),
+    settle(() => collectWatchedFlows(userId)),
     settle(() => collectWorkflows(userId)),
     settle(() => collectOpenClaw())
   ]);
   linkHooksToCallers(openclaw.data, appmixer.data);
   // The board cards the pipeline runs worked on, for the runs grouped by card
   const cards = await settle(() => collectBoardCards(userId, openclaw.data));
-  return { generatedAt: new Date().toISOString(), appmixer, workflows, openclaw, cards };
+  return { generatedAt: new Date().toISOString(), appmixer, watched, workflows, openclaw, cards };
 }
 
 /**

@@ -74,5 +74,7 @@ export const SETTING_KEYS = {
     GITHUB_TOKEN: 'github_token',
     APPMIXER_BASE_URL: 'appmixer_base_url',
     APPMIXER_USERNAME: 'appmixer_username',
-    APPMIXER_PASSWORD: 'appmixer_password'
+    APPMIXER_PASSWORD: 'appmixer_password',
+    /** JSON list of the flows /ops shows next to the hub integrations: [{flowId, label, baseUrl, addedAt}] */
+    OPS_WATCHED_FLOWS: 'ops_watched_flows'
 };

@@ -23,6 +23,7 @@
   const appmixer = $derived(data.appmixer?.data);
   const workflows = $derived(data.workflows?.data);
   const openclaw = $derived(data.openclaw?.data);
+  const watched = $derived(data.watched?.data);
 
   const instances = $derived((appmixer?.templates || []).flatMap((t) => t.instances));
 
@@ -481,6 +482,53 @@
     literal: 'text-amber-700'
   };
 
+  // Watched flows: any flow added by its id or designer URL, kept in the viewer's settings
+  let watchInput = $state('');
+  let watchLabel = $state('');
+  let watching = $state(false);
+  /** @type {string | null} */
+  let watchError = $state(null);
+  /** @type {Record<string, boolean>} */
+  let unwatching = $state({});
+
+  async function watch(/** @type {SubmitEvent} */ event) {
+    event.preventDefault();
+    if (!watchInput.trim()) return;
+    watching = true;
+    watchError = null;
+    try {
+      const response = await fetch('/api/ops/watched', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ flow: watchInput, label: watchLabel })
+      });
+      const body = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(body?.message || `HTTP ${response.status}`);
+      watchInput = '';
+      watchLabel = '';
+      await invalidateAll();
+    } catch (e) {
+      watchError = /** @type {Error} */ (e).message;
+    } finally {
+      watching = false;
+    }
+  }
+
+  /** @param {string} flowId */
+  async function unwatch(flowId) {
+    unwatching[flowId] = true;
+    try {
+      const response = await fetch(`/api/ops/watched?flowId=${flowId}`, { method: 'DELETE' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      delete logPanels[flowId];
+      await invalidateAll();
+    } catch (e) {
+      watchError = /** @type {Error} */ (e).message;
+    } finally {
+      delete unwatching[flowId];
+    }
+  }
+
   let refreshing = $state(false);
   async function refresh() {
     refreshing = true;
@@ -529,6 +577,216 @@
 <svelte:head>
   <title>Operations - Appmixer Sanity Check</title>
 </svelte:head>
+
+<!-- One flow on /ops — an integration instance or a watched flow: its state, errors, last
+     activity, and the run tree loaded on demand. -->
+{#snippet flowRow(/** @type {any} */ instance, watched = false)}
+<div
+  class="flex flex-wrap items-center gap-3 text-sm pl-3 border-l-2 {instance.stage === 'running' && !instance.unreachable
+    ? 'border-green-400'
+    : 'border-red-400'}"
+>
+  {#if watched}
+    <span class="font-medium" title={instance.flowId}
+      >{instance.label || instance.name || instance.flowId}</span
+    >
+    {#if instance.label && instance.name && instance.label !== instance.name}
+      <span class="text-xs text-muted-foreground">{instance.name}</span>
+    {/if}
+  {/if}
+  {#if instance.unreachable}
+    <span class="text-xs text-red-700">{instance.unreachable}</span>
+  {:else}
+    <Badge
+      variant="outline"
+      class={instance.stage === 'running' ? 'text-green-700' : 'text-red-700'}
+      >{instance.stage}</Badge
+    >
+  {/if}
+  {#if watched}
+    {#if instance.type === 'integration-instance'}
+      <span class="text-xs text-muted-foreground">integration instance</span>
+    {/if}
+  {:else}
+    <span class="text-xs text-muted-foreground">rev {instance.revision ?? '—'}</span>
+  {/if}
+  {#if instance.outdated}
+    <Badge variant="outline" class="text-amber-800 bg-amber-50"
+      >behind template — recreate</Badge
+    >
+  {/if}
+  <span class="text-xs text-muted-foreground"
+    >last activity {ago(instance.lastActivity)}</span
+  >
+  {#each instance.hooks || [] as hookId}
+    <a class="text-xs hover:underline" href="#openclaw">→ OpenClaw hook {hookId}</a>
+  {/each}
+  {#if instance.errors?.error}
+    <span class="text-xs text-red-700">errors: {instance.errors.error}</span>
+  {:else if instance.errors?.total}
+    {@const recent = recentErrors(instance)}
+    {@const last = instance.errors.last}
+    <span
+      class="inline-flex items-end gap-0.5 h-4"
+      title="errors per day, last 7 days; grey: before the last {errorWindow.label}"
+    >
+      {#each instance.errors.buckets as bucket}
+        <span
+          class="w-1.5 rounded-sm {dayInWindow(bucket.day)
+            ? 'bg-red-400'
+            : 'bg-muted-foreground/25'}"
+          style="height: {Math.max(
+            2,
+            Math.round((bucket.count / maxBucket(instance.errors.buckets)) * 16)
+          )}px"
+          title="{bucket.day}: {bucket.count}"
+        ></span>
+      {/each}
+    </span>
+    {#if recent}
+      {#if isNew(last?.at)}
+        <span
+          class="px-1.5 rounded bg-red-600 text-white text-[10px] font-semibold uppercase"
+          title="an error in the last hour">new</span
+        >
+      {/if}
+      <button
+        type="button"
+        class="text-xs text-red-700 underline decoration-dotted hover:decoration-solid"
+        onclick={() => toggleLogs(instance.flowId, true)}
+        >{recent} error{recent === 1 ? '' : 's'} / {errorWindow.label}</button
+      >
+      {#if last}
+        <span
+          class="text-xs text-muted-foreground truncate {watched ? 'basis-0 grow min-w-0' : 'max-w-xl'}"
+          title={last.message}
+        >
+          last {ago(last.at)} in {last.component}: {last.message}
+        </span>
+      {/if}
+    {:else}
+      <span class="text-xs text-green-700">no errors / {errorWindow.label}</span>
+      <!-- Older ones stay reachable, without drawing the eye -->
+      <button
+        type="button"
+        class="text-xs text-muted-foreground/70 underline decoration-dotted hover:text-foreground"
+        title={last
+          ? `last ${ago(last.at)} in ${last.component}: ${last.message}`
+          : ''}
+        onclick={() => toggleLogs(instance.flowId, true)}
+        >{instance.errors.total} older, last {ago(last?.at)}</button
+      >
+    {/if}
+  {:else}
+    <span class="text-xs text-green-700">no errors / {errorWindow.label}</span>
+  {/if}
+  <button
+    type="button"
+    class="ml-auto inline-flex items-center gap-1 text-xs hover:text-foreground {logPanels[
+      instance.flowId
+    ]
+      ? 'text-foreground font-medium'
+      : 'text-muted-foreground'}"
+    onclick={() => toggleLogs(instance.flowId)}
+  >
+    <ScrollText size={12} /> runs
+  </button>
+  {#if designer(instance.flowId)}
+    <a
+      class="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+      href={designer(instance.flowId)}
+      target="_blank"
+      rel="noreferrer"
+    >
+      designer <ExternalLink size={12} />
+    </a>
+  {/if}
+  {#if watched}
+    <button
+      type="button"
+      class="text-xs text-muted-foreground hover:text-red-700"
+      title="Stop watching this flow"
+      disabled={unwatching[instance.flowId]}
+      onclick={() => unwatch(instance.flowId)}><X size={12} /></button
+    >
+  {/if}
+</div>
+{#if logPanels[instance.flowId]}
+  {@const panel = logPanels[instance.flowId]}
+  <div class="ml-3 border rounded-md bg-muted/30">
+    <div class="flex items-center gap-2 px-3 py-2 border-b text-xs">
+      <span class="font-medium"
+        >{panel.loading && !panel.more
+          ? 'Loading…'
+          : `Last ${panel.runs.length} runs${panel.errorsOnly ? ' with errors' : ''}`}</span
+      >
+      <button
+        type="button"
+        class="px-2 py-0.5 rounded border {!panel.errorsOnly
+          ? 'bg-background font-medium'
+          : 'text-muted-foreground'}"
+        onclick={() => loadLogs(instance.flowId, false)}>All</button
+      >
+      <button
+        type="button"
+        class="px-2 py-0.5 rounded border {panel.errorsOnly
+          ? 'bg-background font-medium'
+          : 'text-muted-foreground'}"
+        onclick={() => loadLogs(instance.flowId, true)}>Errors only</button
+      >
+      <button
+        type="button"
+        class="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
+        onclick={() => loadLogs(instance.flowId, panel.errorsOnly)}
+        disabled={panel.loading}
+      >
+        <RefreshCw size={12} class={panel.loading ? 'animate-spin' : ''} /> reload
+      </button>
+      <button
+        type="button"
+        class="ml-auto text-muted-foreground hover:text-foreground"
+        onclick={() => delete logPanels[instance.flowId]}>✕</button
+      >
+    </div>
+    {#if panel.error}
+      <div class="px-3 py-2 text-xs text-red-700">{panel.error}</div>
+    {:else if panel.loading && !panel.runs.length}
+      <div class="px-3 py-2 text-xs text-muted-foreground">Loading…</div>
+    {:else if !panel.runs.length}
+      <div class="px-3 py-2 text-xs text-muted-foreground">
+        {panel.errorsOnly ? 'No runs with errors.' : 'No runs.'}
+      </div>
+    {:else}
+      <div
+        class="max-h-[70vh] overflow-auto divide-y text-xs {panel.loading &&
+        !panel.more
+          ? 'opacity-50'
+          : ''}"
+      >
+        {#each panel.runs as run (run.id)}
+          <!-- Runs before the error window are there for reference only -->
+          <div
+            class="px-3 py-0.5 {withinWindow(run.at) ? '' : 'opacity-50'}"
+            title={withinWindow(run.at) ? '' : `before the last ${errorWindow.label}`}
+          >
+            {@render step(panel, run.id, run.root, run, true)}
+          </div>
+        {/each}
+        {#if panel.next}
+          <button
+            type="button"
+            class="w-full px-3 py-2 text-left text-muted-foreground hover:text-foreground hover:bg-muted/50"
+            disabled={panel.loading}
+            onclick={() => loadLogs(instance.flowId, panel.errorsOnly, true)}
+          >
+            {panel.loading && panel.more ? 'Loading…' : 'Load next…'}
+          </button>
+        {/if}
+      </div>
+    {/if}
+  </div>
+{/if}
+{/snippet}
 
 <!-- The icons in the top right corner of a text block: show it whole (or cut it again), copy it -->
 {#snippet blockTools(/** @type {string} */ key, /** @type {string} */ text)}
@@ -1381,188 +1639,61 @@
               <div class="text-sm text-red-700">No instance — nothing runs this integration.</div>
             {/if}
             {#each template.instances as instance (instance.flowId)}
-              <div
-                class="flex flex-wrap items-center gap-3 text-sm pl-3 border-l-2 {instance.stage ===
-                'running'
-                  ? 'border-green-400'
-                  : 'border-red-400'}"
-              >
-                <Badge
-                  variant="outline"
-                  class={instance.stage === 'running' ? 'text-green-700' : 'text-red-700'}
-                  >{instance.stage}</Badge
-                >
-                <span class="text-xs text-muted-foreground">rev {instance.revision ?? '—'}</span>
-                {#if instance.outdated}
-                  <Badge variant="outline" class="text-amber-800 bg-amber-50"
-                    >behind template — recreate</Badge
-                  >
-                {/if}
-                <span class="text-xs text-muted-foreground"
-                  >last activity {ago(instance.lastActivity)}</span
-                >
-                {#each instance.hooks || [] as hookId}
-                  <a class="text-xs hover:underline" href="#openclaw">→ OpenClaw hook {hookId}</a>
-                {/each}
-                {#if instance.errors?.error}
-                  <span class="text-xs text-red-700">errors: {instance.errors.error}</span>
-                {:else if instance.errors?.total}
-                  {@const recent = recentErrors(instance)}
-                  {@const last = instance.errors.last}
-                  <span
-                    class="inline-flex items-end gap-0.5 h-4"
-                    title="errors per day, last 7 days; grey: before the last {errorWindow.label}"
-                  >
-                    {#each instance.errors.buckets as bucket}
-                      <span
-                        class="w-1.5 rounded-sm {dayInWindow(bucket.day)
-                          ? 'bg-red-400'
-                          : 'bg-muted-foreground/25'}"
-                        style="height: {Math.max(
-                          2,
-                          Math.round((bucket.count / maxBucket(instance.errors.buckets)) * 16)
-                        )}px"
-                        title="{bucket.day}: {bucket.count}"
-                      ></span>
-                    {/each}
-                  </span>
-                  {#if recent}
-                    {#if isNew(last?.at)}
-                      <span
-                        class="px-1.5 rounded bg-red-600 text-white text-[10px] font-semibold uppercase"
-                        title="an error in the last hour">new</span
-                      >
-                    {/if}
-                    <button
-                      type="button"
-                      class="text-xs text-red-700 underline decoration-dotted hover:decoration-solid"
-                      onclick={() => toggleLogs(instance.flowId, true)}
-                      >{recent} error{recent === 1 ? '' : 's'} / {errorWindow.label}</button
-                    >
-                    {#if last}
-                      <span
-                        class="text-xs text-muted-foreground truncate max-w-xl"
-                        title={last.message}
-                      >
-                        last {ago(last.at)} in {last.component}: {last.message}
-                      </span>
-                    {/if}
-                  {:else}
-                    <span class="text-xs text-green-700">no errors / {errorWindow.label}</span>
-                    <!-- Older ones stay reachable, without drawing the eye -->
-                    <button
-                      type="button"
-                      class="text-xs text-muted-foreground/70 underline decoration-dotted hover:text-foreground"
-                      title={last
-                        ? `last ${ago(last.at)} in ${last.component}: ${last.message}`
-                        : ''}
-                      onclick={() => toggleLogs(instance.flowId, true)}
-                      >{instance.errors.total} older, last {ago(last?.at)}</button
-                    >
-                  {/if}
-                {:else}
-                  <span class="text-xs text-green-700">no errors / {errorWindow.label}</span>
-                {/if}
-                <button
-                  type="button"
-                  class="ml-auto inline-flex items-center gap-1 text-xs hover:text-foreground {logPanels[
-                    instance.flowId
-                  ]
-                    ? 'text-foreground font-medium'
-                    : 'text-muted-foreground'}"
-                  onclick={() => toggleLogs(instance.flowId)}
-                >
-                  <ScrollText size={12} /> runs
-                </button>
-                {#if designer(instance.flowId)}
-                  <a
-                    class="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-                    href={designer(instance.flowId)}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    designer <ExternalLink size={12} />
-                  </a>
-                {/if}
-              </div>
-              {#if logPanels[instance.flowId]}
-                {@const panel = logPanels[instance.flowId]}
-                <div class="ml-3 border rounded-md bg-muted/30">
-                  <div class="flex items-center gap-2 px-3 py-2 border-b text-xs">
-                    <span class="font-medium"
-                      >{panel.loading && !panel.more
-                        ? 'Loading…'
-                        : `Last ${panel.runs.length} runs${panel.errorsOnly ? ' with errors' : ''}`}</span
-                    >
-                    <button
-                      type="button"
-                      class="px-2 py-0.5 rounded border {!panel.errorsOnly
-                        ? 'bg-background font-medium'
-                        : 'text-muted-foreground'}"
-                      onclick={() => loadLogs(instance.flowId, false)}>All</button
-                    >
-                    <button
-                      type="button"
-                      class="px-2 py-0.5 rounded border {panel.errorsOnly
-                        ? 'bg-background font-medium'
-                        : 'text-muted-foreground'}"
-                      onclick={() => loadLogs(instance.flowId, true)}>Errors only</button
-                    >
-                    <button
-                      type="button"
-                      class="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
-                      onclick={() => loadLogs(instance.flowId, panel.errorsOnly)}
-                      disabled={panel.loading}
-                    >
-                      <RefreshCw size={12} class={panel.loading ? 'animate-spin' : ''} /> reload
-                    </button>
-                    <button
-                      type="button"
-                      class="ml-auto text-muted-foreground hover:text-foreground"
-                      onclick={() => delete logPanels[instance.flowId]}>✕</button
-                    >
-                  </div>
-                  {#if panel.error}
-                    <div class="px-3 py-2 text-xs text-red-700">{panel.error}</div>
-                  {:else if panel.loading && !panel.runs.length}
-                    <div class="px-3 py-2 text-xs text-muted-foreground">Loading…</div>
-                  {:else if !panel.runs.length}
-                    <div class="px-3 py-2 text-xs text-muted-foreground">
-                      {panel.errorsOnly ? 'No runs with errors.' : 'No runs.'}
-                    </div>
-                  {:else}
-                    <div
-                      class="max-h-[70vh] overflow-auto divide-y text-xs {panel.loading &&
-                      !panel.more
-                        ? 'opacity-50'
-                        : ''}"
-                    >
-                      {#each panel.runs as run (run.id)}
-                        <!-- Runs before the error window are there for reference only -->
-                        <div
-                          class="px-3 py-0.5 {withinWindow(run.at) ? '' : 'opacity-50'}"
-                          title={withinWindow(run.at) ? '' : `before the last ${errorWindow.label}`}
-                        >
-                          {@render step(panel, run.id, run.root, run, true)}
-                        </div>
-                      {/each}
-                      {#if panel.next}
-                        <button
-                          type="button"
-                          class="w-full px-3 py-2 text-left text-muted-foreground hover:text-foreground hover:bg-muted/50"
-                          disabled={panel.loading}
-                          onclick={() => loadLogs(instance.flowId, panel.errorsOnly, true)}
-                        >
-                          {panel.loading && panel.more ? 'Loading…' : 'Load next…'}
-                        </button>
-                      {/if}
-                    </div>
-                  {/if}
-                </div>
-              {/if}
+              {@render flowRow(instance)}
             {/each}
           </div>
         {/each}
+      </div>
+    {/if}
+  </section>
+
+  <!-- Watched flows -->
+  <section id="watched" class="space-y-3">
+    <div class="flex items-baseline justify-between">
+      <h2 class="text-xl font-semibold">Watched flows</h2>
+      {#if watched}
+        <span class="text-xs text-muted-foreground">
+          {watched.instanceUrl} · your list{watched.elsewhere
+            ? ` · ${watched.elsewhere} more on other instances`
+            : ''}
+        </span>
+      {/if}
+    </div>
+    <form class="flex flex-wrap items-center gap-2" onsubmit={watch}>
+      <input
+        class="flex-1 min-w-72 h-8 px-2 text-sm border rounded-md bg-background"
+        placeholder="Flow id or designer URL"
+        bind:value={watchInput}
+      />
+      <input
+        class="w-56 h-8 px-2 text-sm border rounded-md bg-background"
+        placeholder="Label (optional)"
+        bind:value={watchLabel}
+      />
+      <Button type="submit" size="sm" disabled={watching || !watchInput.trim()}>
+        {watching ? 'Adding…' : 'Watch'}
+      </Button>
+    </form>
+    {#if watchError}
+      <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+        {watchError}
+      </div>
+    {/if}
+    {#if data.watched?.error}
+      <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+        {data.watched.error}
+      </div>
+    {:else if watched?.flows?.length}
+      <div class="border rounded-lg divide-y">
+        {#each watched.flows as flow (flow.flowId)}
+          <div class="p-3 space-y-2">
+            {@render flowRow(flow, true)}
+          </div>
+        {/each}
+      </div>
+    {:else}
+      <div class="text-sm text-muted-foreground">
+        No watched flows. Add any flow by its id to see its errors and runs here.
       </div>
     {/if}
   </section>
