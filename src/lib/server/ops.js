@@ -15,6 +15,7 @@
 
 import { env } from '$env/dynamic/private';
 import {
+  getAppmixerConfig,
   getAppmixerSession,
   findCategoryByName,
   listCategoryTemplates
@@ -907,13 +908,16 @@ export async function collectWatchedFlows(userId) {
   const here = all.filter((w) => w.baseUrl === baseUrl);
   const flows = await Promise.all(
     here.map(async (watched) => {
-      const [flow, errors, active] = await Promise.all([
-        appmixerGet(baseUrl, token, `/flows/${watched.flowId}`, {
-          projection: 'flowId,name,stage,type,templateId'
-        }).catch((err) => ({ error: message(err) })),
-        flowErrors(baseUrl, token, watched.flowId).catch((err) => ({ error: message(err) })),
-        lastActivity(baseUrl, token, watched.flowId).catch(() => null)
-      ]);
+      const flow = await appmixerGet(baseUrl, token, `/flows/${watched.flowId}`, {
+        projection: 'flowId,name,stage,type,templateId'
+      }).catch((err) => ({ error: message(err) }));
+      // A flow the account cannot read has no logs it could read either: no searches spent on it
+      const [errors, active] = flow?.error
+        ? [null, null]
+        : await Promise.all([
+            flowErrors(baseUrl, token, watched.flowId).catch((err) => ({ error: message(err) })),
+            lastActivity(baseUrl, token, watched.flowId).catch(() => null)
+          ]);
       return {
         flowId: watched.flowId,
         label: watched.label || '',
@@ -983,7 +987,8 @@ export async function addWatchedFlow(userId, input, label = '') {
  * @param {string} flowId
  */
 export async function removeWatchedFlow(userId, flowId) {
-  const { baseUrl } = await getAppmixerSession(userId);
+  // Only the instance URL, no sign-in: a flow can be removed while the instance is down
+  const baseUrl = (await getAppmixerConfig(userId)).baseUrl.replace(/\/+$/, '');
   const all = await readWatched(userId);
   const left = all.filter((w) => !(w.flowId === flowId && w.baseUrl === baseUrl));
   await setUserSetting(userId, SETTING_KEYS.OPS_WATCHED_FLOWS, JSON.stringify(left));

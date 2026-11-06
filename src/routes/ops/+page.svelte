@@ -580,13 +580,13 @@
 
 <!-- One flow on /ops — an integration instance or a watched flow: its state, errors, last
      activity, and the run tree loaded on demand. -->
-{#snippet flowRow(/** @type {any} */ instance, watched = false)}
+{#snippet flowRow(/** @type {any} */ instance, isWatched = false)}
 <div
   class="flex flex-wrap items-center gap-3 text-sm pl-3 border-l-2 {instance.stage === 'running' && !instance.unreachable
     ? 'border-green-400'
     : 'border-red-400'}"
 >
-  {#if watched}
+  {#if isWatched}
     <span class="font-medium" title={instance.flowId}
       >{instance.label || instance.name || instance.flowId}</span
     >
@@ -603,7 +603,7 @@
       >{instance.stage}</Badge
     >
   {/if}
-  {#if watched}
+  {#if isWatched}
     {#if instance.type === 'integration-instance'}
       <span class="text-xs text-muted-foreground">integration instance</span>
     {/if}
@@ -621,7 +621,9 @@
   {#each instance.hooks || [] as hookId}
     <a class="text-xs hover:underline" href="#openclaw">→ OpenClaw hook {hookId}</a>
   {/each}
-  {#if instance.errors?.error}
+  {#if instance.unreachable}
+    <!-- the reason is shown next to the name -->
+  {:else if instance.errors?.error}
     <span class="text-xs text-red-700">errors: {instance.errors.error}</span>
   {:else if instance.errors?.total}
     {@const recent = recentErrors(instance)}
@@ -658,7 +660,7 @@
       >
       {#if last}
         <span
-          class="text-xs text-muted-foreground truncate {watched ? 'basis-0 grow min-w-0' : 'max-w-xl'}"
+          class="text-xs text-muted-foreground truncate {isWatched ? 'basis-0 grow min-w-0' : 'max-w-xl'}"
           title={last.message}
         >
           last {ago(last.at)} in {last.component}: {last.message}
@@ -701,7 +703,7 @@
       designer <ExternalLink size={12} />
     </a>
   {/if}
-  {#if watched}
+  {#if isWatched}
     <button
       type="button"
       class="text-xs text-muted-foreground hover:text-red-700"
