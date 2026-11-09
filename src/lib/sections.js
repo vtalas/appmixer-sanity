@@ -49,6 +49,12 @@ export const SECTIONS = [
       'A map of what each CI automation does: the status-driven pipeline, PR assistants, hygiene, release.'
   },
   {
+    href: '/cloud-flows',
+    label: 'Cloud flows',
+    description:
+      'What appmixer-cloud does in each scenario (signup, login, instances, admin), step by step and linked to the code.'
+  },
+  {
     href: '/ops',
     label: 'Operations',
     description:

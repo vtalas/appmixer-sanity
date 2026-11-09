@@ -1,5 +1,5 @@
 <script>
-  import { FlaskConical, Workflow, GitPullRequest, Rocket, ChartColumn, KeyRound, LayoutGrid, Map, Activity, Settings } from 'lucide-svelte';
+  import { FlaskConical, Workflow, GitPullRequest, Rocket, ChartColumn, KeyRound, LayoutGrid, Map, Cloud, Activity, Settings } from 'lucide-svelte';
   import { SECTIONS } from '$lib/sections.js';
 
   /** @type {Record<string, any>} */
@@ -12,6 +12,7 @@
     '/authub': KeyRound,
     '/automation-hub': LayoutGrid,
     '/automations': Map,
+    '/cloud-flows': Cloud,
     '/ops': Activity,
     '/settings': Settings
   };
