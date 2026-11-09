@@ -3,7 +3,9 @@
   import { signOut } from '@auth/sveltekit/client';
   import { Button } from '$lib/components/ui/button';
   import { navigating, page } from '$app/stores';
-  import { sectionOf } from '$lib/sections.js';
+  import { goto } from '$app/navigation';
+  import { ChevronDown } from 'lucide-svelte';
+  import { SECTIONS, sectionOf } from '$lib/sections.js';
 
   let { children, data } = $props();
 
@@ -39,9 +41,23 @@
           <span class="hidden sm:inline">Appmixer Sanity Check</span>
           <span class="sm:hidden">Sanity Check</span>
         </a>
-        {#if section}
+        {#if data.session?.user}
           <span class="text-muted-foreground" aria-hidden="true">/</span>
-          <a href={section.href} class="truncate text-muted-foreground hover:text-foreground">{section.label}</a>
+          <!-- The current section; pick another one to switch without going through the dashboard -->
+          <span class="relative inline-flex min-w-0 items-center">
+            <select
+              aria-label="Section"
+              value={section?.href ?? ''}
+              onchange={(e) => e.currentTarget.value && goto(e.currentTarget.value)}
+              class="min-w-0 cursor-pointer appearance-none [field-sizing:content] rounded-md border border-transparent bg-transparent py-0.5 pl-1 pr-7 text-xl text-muted-foreground hover:border-input hover:text-foreground focus:border-input focus:outline-none"
+            >
+              {#if !section}<option value="" disabled>Go to…</option>{/if}
+              {#each SECTIONS as s (s.href)}
+                <option value={s.href}>{s.label}</option>
+              {/each}
+            </select>
+            <ChevronDown size={18} class="pointer-events-none absolute right-1.5 text-muted-foreground" />
+          </span>
         {/if}
       </nav>
       <!-- Every page but /login needs a session; the sections are cards on the dashboard -->
