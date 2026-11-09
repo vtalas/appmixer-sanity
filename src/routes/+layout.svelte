@@ -3,30 +3,15 @@
   import { signOut } from '@auth/sveltekit/client';
   import { Button } from '$lib/components/ui/button';
   import { navigating, page } from '$app/stores';
-  import { goto } from '$app/navigation';
+  import { sectionOf } from '$lib/sections.js';
 
   let { children, data } = $props();
 
   // /public/* pages are customer-facing: no app header, navigation or footer
   let bare = $derived($page.url.pathname.startsWith('/public/'));
 
-  const navItems = [
-    { href: '/', label: 'Dashboard' },
-    { href: '/e2e-flows', label: 'E2E Flows' },
-    { href: '/prs', label: 'PRs' },
-    { href: '/releases', label: 'Release' },
-    { href: '/statistics', label: 'Statistics' },
-    { href: '/authub', label: 'Auth Hub' },
-    { href: '/automation-hub', label: 'Automation Hub' },
-    { href: '/ops', label: 'Operations' },
-    { href: '/settings', label: 'Settings' }
-  ];
-
-  // The page the mobile select shows: the item whose path the URL starts with;
-  // everything else (test runs and their connectors) belongs to the Dashboard
-  let currentNav = $derived(
-    navItems.find((item) => item.href !== '/' && $page.url.pathname.startsWith(item.href))?.href ?? '/'
-  );
+  // The sections are cards on the dashboard (/); the header names the one you are in
+  let section = $derived(sectionOf($page.url.pathname));
 </script>
 
 <style>
@@ -49,36 +34,22 @@
 <div class="min-h-screen flex flex-col">
   <header class="border-b bg-background">
     <div class="container mx-auto px-4 py-4 flex items-center justify-between gap-4">
-      <a href="/" class="text-xl font-bold shrink-0">
-        <span class="hidden sm:inline">Appmixer Sanity Check</span>
-        <span class="sm:hidden">Sanity Check</span>
-      </a>
-      <!-- Every page but /login needs a session, so the menu is for signed-in users only -->
+      <nav aria-label="Breadcrumb" class="flex items-baseline gap-2 min-w-0 text-xl">
+        <a href="/" class="font-bold shrink-0" title="Dashboard">
+          <span class="hidden sm:inline">Appmixer Sanity Check</span>
+          <span class="sm:hidden">Sanity Check</span>
+        </a>
+        {#if section}
+          <span class="text-muted-foreground" aria-hidden="true">/</span>
+          <a href={section.href} class="truncate text-muted-foreground hover:text-foreground">{section.label}</a>
+        {/if}
+      </nav>
+      <!-- Every page but /login needs a session; the sections are cards on the dashboard -->
       {#if data.session?.user}
-      <!-- Narrow screens: the pages in a select (native picker on phones) -->
-      <nav class="flex items-center gap-2 min-w-0 xl:hidden">
-        <select
-          aria-label="Page"
-          value={currentNav}
-          onchange={(e) => goto(e.currentTarget.value)}
-          class="h-9 min-w-0 rounded-md border border-input bg-background px-2 text-sm"
-        >
-          {#each navItems as item (item.href)}
-            <option value={item.href}>{item.label}</option>
-          {/each}
-        </select>
+      <div class="flex items-center gap-4 shrink-0">
+        <span class="hidden md:inline text-sm text-muted-foreground">{data.session.user.email}</span>
         <Button variant="outline" size="sm" onclick={() => signOut()} title={data.session.user.email}>Sign out</Button>
-      </nav>
-      <nav class="hidden xl:flex items-center gap-4">
-        {#each navItems as item (item.href)}
-          <a
-            href={item.href}
-            class="text-sm hover:text-foreground {currentNav === item.href ? 'text-foreground font-medium' : 'text-muted-foreground'}"
-          >{item.label}</a>
-        {/each}
-        <span class="text-sm text-muted-foreground">{data.session.user.email}</span>
-        <Button variant="outline" size="sm" onclick={() => signOut()}>Sign out</Button>
-      </nav>
+      </div>
       {/if}
     </div>
   </header>

@@ -69,7 +69,7 @@
 <div class="space-y-6">
   <!-- Breadcrumb -->
   <nav class="text-sm text-muted-foreground">
-    <a href="/" class="hover:text-foreground">Dashboard</a>
+    <a href="/test-runs" class="hover:text-foreground">Test Runs</a>
     <span class="mx-2">/</span>
     <span class="text-foreground">{data.testRun.name}</span>
   </nav>
