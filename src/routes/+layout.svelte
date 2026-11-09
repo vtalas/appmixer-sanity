@@ -4,29 +4,16 @@
   import { Button } from '$lib/components/ui/button';
   import { navigating, page } from '$app/stores';
   import { goto } from '$app/navigation';
+  import { ChevronDown } from 'lucide-svelte';
+  import { SECTIONS, sectionOf } from '$lib/sections.js';
 
   let { children, data } = $props();
 
   // /public/* pages are customer-facing: no app header, navigation or footer
   let bare = $derived($page.url.pathname.startsWith('/public/'));
 
-  const navItems = [
-    { href: '/', label: 'Dashboard' },
-    { href: '/e2e-flows', label: 'E2E Flows' },
-    { href: '/prs', label: 'PRs' },
-    { href: '/releases', label: 'Release' },
-    { href: '/statistics', label: 'Statistics' },
-    { href: '/authub', label: 'Auth Hub' },
-    { href: '/automation-hub', label: 'Automation Hub' },
-    { href: '/ops', label: 'Operations' },
-    { href: '/settings', label: 'Settings' }
-  ];
-
-  // The page the mobile select shows: the item whose path the URL starts with;
-  // everything else (test runs and their connectors) belongs to the Dashboard
-  let currentNav = $derived(
-    navItems.find((item) => item.href !== '/' && $page.url.pathname.startsWith(item.href))?.href ?? '/'
-  );
+  // The sections are cards on the dashboard (/); the header names the one you are in
+  let section = $derived(sectionOf($page.url.pathname));
 </script>
 
 <style>
@@ -49,36 +36,36 @@
 <div class="min-h-screen flex flex-col">
   <header class="border-b bg-background">
     <div class="container mx-auto px-4 py-4 flex items-center justify-between gap-4">
-      <a href="/" class="text-xl font-bold shrink-0">
-        <span class="hidden sm:inline">Appmixer Sanity Check</span>
-        <span class="sm:hidden">Sanity Check</span>
-      </a>
-      <!-- Every page but /login needs a session, so the menu is for signed-in users only -->
+      <nav aria-label="Breadcrumb" class="flex items-baseline gap-2 min-w-0 text-xl">
+        <a href="/" class="font-bold shrink-0" title="Dashboard">
+          <span class="hidden sm:inline">Appmixer Sanity Check</span>
+          <span class="sm:hidden">Sanity Check</span>
+        </a>
+        {#if data.session?.user}
+          <span class="text-muted-foreground" aria-hidden="true">/</span>
+          <!-- The current section; pick another one to switch without going through the dashboard -->
+          <span class="relative inline-flex min-w-0 items-center">
+            <select
+              aria-label="Section"
+              value={section?.href ?? ''}
+              onchange={(e) => e.currentTarget.value && goto(e.currentTarget.value)}
+              class="min-w-0 cursor-pointer appearance-none [field-sizing:content] rounded-md border border-transparent bg-transparent py-0.5 pl-1 pr-7 text-xl text-muted-foreground hover:border-input hover:text-foreground focus:border-input focus:outline-none"
+            >
+              {#if !section}<option value="" disabled>Go to…</option>{/if}
+              {#each SECTIONS as s (s.href)}
+                <option value={s.href}>{s.label}</option>
+              {/each}
+            </select>
+            <ChevronDown size={18} class="pointer-events-none absolute right-1.5 text-muted-foreground" />
+          </span>
+        {/if}
+      </nav>
+      <!-- Every page but /login needs a session; the sections are cards on the dashboard -->
       {#if data.session?.user}
-      <!-- Narrow screens: the pages in a select (native picker on phones) -->
-      <nav class="flex items-center gap-2 min-w-0 xl:hidden">
-        <select
-          aria-label="Page"
-          value={currentNav}
-          onchange={(e) => goto(e.currentTarget.value)}
-          class="h-9 min-w-0 rounded-md border border-input bg-background px-2 text-sm"
-        >
-          {#each navItems as item (item.href)}
-            <option value={item.href}>{item.label}</option>
-          {/each}
-        </select>
+      <div class="flex items-center gap-4 shrink-0">
+        <span class="hidden md:inline text-sm text-muted-foreground">{data.session.user.email}</span>
         <Button variant="outline" size="sm" onclick={() => signOut()} title={data.session.user.email}>Sign out</Button>
-      </nav>
-      <nav class="hidden xl:flex items-center gap-4">
-        {#each navItems as item (item.href)}
-          <a
-            href={item.href}
-            class="text-sm hover:text-foreground {currentNav === item.href ? 'text-foreground font-medium' : 'text-muted-foreground'}"
-          >{item.label}</a>
-        {/each}
-        <span class="text-sm text-muted-foreground">{data.session.user.email}</span>
-        <Button variant="outline" size="sm" onclick={() => signOut()}>Sign out</Button>
-      </nav>
+      </div>
       {/if}
     </div>
   </header>
