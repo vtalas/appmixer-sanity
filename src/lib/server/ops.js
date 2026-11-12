@@ -419,6 +419,7 @@ function buildRun(group, components, ports) {
         node.entries.splice(firstError < 0 ? node.entries.length : firstError, 0, {
           id: `${hit._id}:${messageId}`,
           at: hit.gridTimestamp,
+          message: messageId,
           severity: 'info',
           direction: 'in',
           port,
@@ -447,6 +448,9 @@ function buildRun(group, components, ports) {
     node.entries.push({
       id: hit._id,
       at: hit.gridTimestamp,
+      // The message the component was handling: its input, the outputs it sent in answer and
+      // the errors it ran into all carry the id of the input message
+      message: hit.messageId || null,
       severity: hit.severity || 'info',
       // in = message delivered to the component, out = message it sent from a port
       direction: hit.portType || null,
@@ -514,6 +518,7 @@ function buildRun(group, components, ports) {
       error: node.failed ? node.error : '',
       failing: node.failed || children.some((child) => child.node.failing),
       entries: node.entries,
+      messages: messageGroups(node.entries),
       ports: branches
         ? names.map((name) => ({
             name,
@@ -550,6 +555,43 @@ function buildRun(group, components, ports) {
       : headline(root.output) || summarize(root.output ?? group.hits[0].msg),
     root: tree
   };
+}
+
+/**
+ * A component's entries by the message they belong to, in the order the messages came in: the
+ * input, then what the component sent and logged while handling it. A component inside Each
+ * gets many messages at once and answers them out of order; this is what tells which output
+ * came of which input. Entries with no message id stand on their own.
+ * @param {any[]} entries - one component's entries, oldest first
+ */
+function messageGroups(entries) {
+  /** @type {Map<string, any>} */
+  const groups = new Map();
+  for (const entry of entries) {
+    const key = entry.message || `entry:${entry.id}`;
+    if (!groups.has(key)) groups.set(key, { id: key, input: null, entries: [] });
+    const group = groups.get(key);
+    if (entry.direction === 'in' && !group.input) group.input = entry;
+    else group.entries.push(entry);
+  }
+  return [...groups.values()].map((group) => {
+    const outputs = group.entries.filter((/** @type {any} */ e) => e.direction === 'out');
+    const errors = group.entries.filter((/** @type {any} */ e) => e.severity === 'error');
+    const time = (/** @type {any} */ e) => (e ? new Date(e.at).getTime() : 0);
+    // An error followed by an output is a failed attempt that a retry made good
+    const failed = errors.length > 0 && time(outputs.at(-1)) <= time(errors.at(-1));
+    return {
+      id: group.id,
+      at: (group.input || group.entries[0]).at,
+      status: failed ? 'error' : errors.length ? 'retried' : outputs.length ? 'ok' : 'none',
+      input: group.input,
+      outputs: outputs.length,
+      // Failed attempts, the last one too when nothing made it good
+      retries: errors.length,
+      error: failed ? errors.at(-1).summary : '',
+      entries: group.entries
+    };
+  });
 }
 
 /**
