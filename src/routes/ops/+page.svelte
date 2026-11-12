@@ -1001,65 +1001,66 @@
     </div>
     {#if panel.open[dataKey]}
       <div class="ml-5 mb-1 border rounded bg-background divide-y">
-        {#each node.entries as entry (entry.id)}
-          {@const entryKey = `${key}#${entry.id}`}
-          <div class="px-2 py-1">
-            <button
-              type="button"
-              class="w-full flex items-center gap-2 text-left"
-              onclick={() => (panel.open[entryKey] = !panel.open[entryKey])}
-            >
-              {@render chevron(!!panel.open[entryKey])}
-              <span class="text-muted-foreground whitespace-nowrap" title={entry.at}
-                >{new Date(entry.at).toLocaleTimeString([], { hourCycle: 'h23' })}</span
+        {#if node.messages?.length > 1}
+          <!-- Many messages: each input with what the component sent and logged handling it -->
+          {#each node.messages as message (message.id)}
+            {@const messageKey = `${key}@${message.id}`}
+            {@const input = message.input}
+            <div class="px-2 py-1">
+              <button
+                type="button"
+                class="w-full flex items-center gap-2 text-left"
+                onclick={() => (panel.open[messageKey] = !panel.open[messageKey])}
               >
-              {#if entry.severity !== 'info'}
+                {@render chevron(!!panel.open[messageKey])}
+                <span class="text-muted-foreground whitespace-nowrap" title={message.at}
+                  >{new Date(message.at).toLocaleTimeString([], { hourCycle: 'h23' })}</span
+                >
+                {#if message.status === 'ok'}
+                  <Check size={13} strokeWidth={3} class="shrink-0 text-green-600" aria-label="ok" />
+                {:else if message.status === 'error'}
+                  <X size={13} strokeWidth={3} class="shrink-0 text-red-600" aria-label="error" />
+                {:else if message.status === 'retried'}
+                  <RotateCcw size={12} strokeWidth={2.5} class="shrink-0 text-amber-600" aria-label="retried" />
+                {:else}
+                  <span class="w-[13px] shrink-0 text-center text-muted-foreground" aria-label="no output">–</span>
+                {/if}
+                {#if input}
+                  <span class="px-1.5 rounded border whitespace-nowrap bg-sky-50 text-sky-700 border-sky-200"
+                    >input <code>{input.port}</code></span
+                  >
+                {/if}
+                <span class="truncate text-muted-foreground" title={input?.summary}
+                  >{input ? input.summary : message.entries[0]?.summary}</span
+                >
                 <span
-                  class="px-1.5 rounded border {severityClass[entry.severity] ||
-                    severityClass.info}">{entry.severity}</span
+                  class="ml-auto whitespace-nowrap {message.status === 'error'
+                    ? 'text-red-700'
+                    : 'text-muted-foreground'}"
+                  title={message.error}
+                  >{message.status === 'error'
+                    ? message.error.slice(0, 60)
+                    : message.outputs
+                      ? `→ ${message.outputs} output${message.outputs === 1 ? '' : 's'}`
+                      : 'no output'}{message.retries
+                    ? ` · ${message.retries} failed attempt${message.retries === 1 ? '' : 's'}`
+                    : ''}</span
                 >
+              </button>
+              {#if panel.open[messageKey]}
+                <div class="mt-1 ml-5 border rounded divide-y">
+                  {#each [input, ...message.entries].filter(Boolean) as entry (entry.id)}
+                    {@render entryRow(panel, key, entry)}
+                  {/each}
+                </div>
               {/if}
-              <!-- What the entry is: a message the component received (input), one it sent from
-                   a port (output), or a line it logged itself (context.log), shown quieter -->
-              {#if entry.port}
-                <span
-                  class="px-1.5 rounded border whitespace-nowrap {entry.direction === 'in'
-                    ? 'bg-sky-50 text-sky-700 border-sky-200'
-                    : 'bg-emerald-50 text-emerald-700 border-emerald-200'}"
-                  >{entry.direction === 'in' ? 'input' : 'output'}
-                  <code>{entry.port}</code></span
-                >
-              {:else if entry.severity === 'info'}
-                <span class="px-1.5 rounded border border-dashed whitespace-nowrap text-muted-foreground/70"
-                  >log</span
-                >
-              {/if}
-              <span
-                class="truncate {entry.severity === 'error'
-                  ? 'text-red-700'
-                  : entry.port
-                    ? 'text-muted-foreground'
-                    : 'text-muted-foreground/60 italic'}">{entry.summary}</span
-              >
-            </button>
-            {#if panel.open[entryKey]}
-              <div class="relative group mt-1 ml-5">
-                <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-                <pre
-                  title={wholeText[entryKey] ? 'Double-click to shorten' : 'Double-click to show all'}
-                  ondblclick={() => (wholeText[entryKey] = !wholeText[entryKey])}
-                  class="p-2 pr-16 bg-muted/30 border rounded text-[11px] whitespace-pre-wrap break-all {wholeText[
-                    entryKey
-                  ]
-                    ? ''
-                    : 'max-h-80 overflow-auto'}">{#each jsonTokens(entry.detail) as token}{#if token.kind}<span
-                        class={tokenClass[token.kind]}>{token.text}</span
-                      >{:else}{token.text}{/if}{/each}</pre>
-                {@render blockTools(entryKey, entry.detail)}
-              </div>
-            {/if}
-          </div>
-        {/each}
+            </div>
+          {/each}
+        {:else}
+          {#each node.entries as entry (entry.id)}
+            {@render entryRow(panel, key, entry)}
+          {/each}
+        {/if}
       </div>
     {/if}
     {#if expanded}
@@ -1075,6 +1076,66 @@
   {#if !run && alone && next.length === 1}
     {@render step(panel, key, next[0], null, true)}
   {/if}
+{/snippet}
+
+{#snippet entryRow(/** @type {any} */ panel, /** @type {string} */ key, /** @type {any} */ entry)}
+  {@const entryKey = `${key}#${entry.id}`}
+  <div class="px-2 py-1">
+    <button
+      type="button"
+      class="w-full flex items-center gap-2 text-left"
+      onclick={() => (panel.open[entryKey] = !panel.open[entryKey])}
+    >
+      {@render chevron(!!panel.open[entryKey])}
+      <span class="text-muted-foreground whitespace-nowrap" title={entry.at}
+        >{new Date(entry.at).toLocaleTimeString([], { hourCycle: 'h23' })}</span
+      >
+      {#if entry.severity !== 'info'}
+        <span
+          class="px-1.5 rounded border {severityClass[entry.severity] ||
+            severityClass.info}">{entry.severity}</span
+        >
+      {/if}
+      <!-- What the entry is: a message the component received (input), one it sent from
+           a port (output), or a line it logged itself (context.log), shown quieter -->
+      {#if entry.port}
+        <span
+          class="px-1.5 rounded border whitespace-nowrap {entry.direction === 'in'
+            ? 'bg-sky-50 text-sky-700 border-sky-200'
+            : 'bg-emerald-50 text-emerald-700 border-emerald-200'}"
+          >{entry.direction === 'in' ? 'input' : 'output'}
+          <code>{entry.port}</code></span
+        >
+      {:else if entry.severity === 'info'}
+        <span class="px-1.5 rounded border border-dashed whitespace-nowrap text-muted-foreground/70"
+          >log</span
+        >
+      {/if}
+      <span
+        class="truncate {entry.severity === 'error'
+          ? 'text-red-700'
+          : entry.port
+            ? 'text-muted-foreground'
+            : 'text-muted-foreground/60 italic'}">{entry.summary}</span
+      >
+    </button>
+    {#if panel.open[entryKey]}
+      <div class="relative group mt-1 ml-5">
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <pre
+          title={wholeText[entryKey] ? 'Double-click to shorten' : 'Double-click to show all'}
+          ondblclick={() => (wholeText[entryKey] = !wholeText[entryKey])}
+          class="p-2 pr-16 bg-muted/30 border rounded text-[11px] whitespace-pre-wrap break-all {wholeText[
+            entryKey
+          ]
+            ? ''
+            : 'max-h-80 overflow-auto'}">{#each jsonTokens(entry.detail) as token}{#if token.kind}<span
+                class={tokenClass[token.kind]}>{token.text}</span
+              >{:else}{token.text}{/if}{/each}</pre>
+        {@render blockTools(entryKey, entry.detail)}
+      </div>
+    {/if}
+  </div>
 {/snippet}
 
 <!-- The out ports of a component that set off several others, each with what hangs on it -->
