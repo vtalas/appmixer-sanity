@@ -1048,11 +1048,31 @@
                 >
               </button>
               {#if panel.open[messageKey]}
-                <div class="mt-1 ml-5 border rounded divide-y">
-                  {#each [input, ...message.entries].filter(Boolean) as entry (entry.id)}
-                    {@render entryRow(panel, key, entry)}
-                  {/each}
-                </div>
+                <!-- The row above is the input: open, it shows the whole message, then what followed -->
+                {#if input}
+                  {@const inputKey = `${key}#${input.id}`}
+                  <div class="relative group mt-1 ml-5">
+                    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                    <pre
+                      title={wholeText[inputKey] ? 'Double-click to shorten' : 'Double-click to show all'}
+                      ondblclick={() => (wholeText[inputKey] = !wholeText[inputKey])}
+                      class="p-2 pr-16 bg-muted/30 border rounded text-[11px] whitespace-pre-wrap break-all {wholeText[
+                        inputKey
+                      ]
+                        ? ''
+                        : 'max-h-80 overflow-auto'}">{#each jsonTokens(input.detail) as token}{#if token.kind}<span
+                            class={tokenClass[token.kind]}>{token.text}</span
+                          >{:else}{token.text}{/if}{/each}</pre>
+                    {@render blockTools(inputKey, input.detail)}
+                  </div>
+                {/if}
+                {#if message.entries.length}
+                  <div class="mt-1 ml-5 border rounded divide-y">
+                    {#each message.entries as entry (entry.id)}
+                      {@render entryRow(panel, key, entry)}
+                    {/each}
+                  </div>
+                {/if}
               {/if}
             </div>
           {/each}
