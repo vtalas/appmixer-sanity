@@ -366,6 +366,14 @@
     }
   }
 
+  /** The bar that ties an input to what came of it, by how the message ended */
+  const messageBar = /** @type {Record<string, string>} */ ({
+    ok: 'border-l-green-500/70',
+    retried: 'border-l-amber-500/80',
+    error: 'border-l-red-500/80',
+    none: 'border-l-border'
+  });
+
   /** @type {Record<string, string>} */
   const severityClass = {
     error: 'bg-red-50 text-red-700 border-red-200',
@@ -1002,78 +1010,20 @@
     {#if panel.open[dataKey]}
       <div class="ml-5 mb-1 border rounded bg-background divide-y">
         {#if node.messages?.length > 1}
-          <!-- Many messages: each input with what the component sent and logged handling it -->
+          <!-- Many messages: each input with what the component sent and logged handling it, tied
+               together by a bar in the colour of how it ended -->
           {#each node.messages as message (message.id)}
-            {@const messageKey = `${key}@${message.id}`}
-            {@const input = message.input}
-            <div class="px-2 py-1">
-              <button
-                type="button"
-                class="w-full flex items-center gap-2 text-left"
-                onclick={() => (panel.open[messageKey] = !panel.open[messageKey])}
-              >
-                {@render chevron(!!panel.open[messageKey])}
-                <span class="text-muted-foreground whitespace-nowrap" title={message.at}
-                  >{new Date(message.at).toLocaleTimeString([], { hourCycle: 'h23' })}</span
-                >
-                {#if message.status === 'ok'}
-                  <Check size={13} strokeWidth={3} class="shrink-0 text-green-600" aria-label="ok" />
-                {:else if message.status === 'error'}
-                  <X size={13} strokeWidth={3} class="shrink-0 text-red-600" aria-label="error" />
-                {:else if message.status === 'retried'}
-                  <RotateCcw size={12} strokeWidth={2.5} class="shrink-0 text-amber-600" aria-label="retried" />
-                {:else}
-                  <span class="w-[13px] shrink-0 text-center text-muted-foreground" aria-label="no output">–</span>
-                {/if}
-                {#if input}
-                  <span class="px-1.5 rounded border whitespace-nowrap bg-sky-50 text-sky-700 border-sky-200"
-                    >input <code>{input.port}</code></span
-                  >
-                {/if}
-                <span class="truncate text-muted-foreground" title={input?.summary}
-                  >{input ? input.summary : message.entries[0]?.summary}</span
-                >
-                <span
-                  class="ml-auto whitespace-nowrap {message.status === 'error'
-                    ? 'text-red-700'
-                    : 'text-muted-foreground'}"
-                  title={message.error}
-                  >{message.status === 'error'
-                    ? message.error.slice(0, 60)
-                    : message.outputs
-                      ? `→ ${message.outputs} output${message.outputs === 1 ? '' : 's'}`
-                      : 'no output'}{message.retries
-                    ? ` · ${message.retries} failed attempt${message.retries === 1 ? '' : 's'}`
-                    : ''}</span
-                >
-              </button>
-              {#if panel.open[messageKey]}
-                <!-- The row above is the input: open, it shows the whole message, then what followed -->
-                {#if input}
-                  {@const inputKey = `${key}#${input.id}`}
-                  <div class="relative group mt-1 ml-5">
-                    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-                    <pre
-                      title={wholeText[inputKey] ? 'Double-click to shorten' : 'Double-click to show all'}
-                      ondblclick={() => (wholeText[inputKey] = !wholeText[inputKey])}
-                      class="p-2 pr-16 bg-muted/30 border rounded text-[11px] whitespace-pre-wrap break-all {wholeText[
-                        inputKey
-                      ]
-                        ? ''
-                        : 'max-h-80 overflow-auto'}">{#each jsonTokens(input.detail) as token}{#if token.kind}<span
-                            class={tokenClass[token.kind]}>{token.text}</span
-                          >{:else}{token.text}{/if}{/each}</pre>
-                    {@render blockTools(inputKey, input.detail)}
-                  </div>
-                {/if}
-                {#if message.entries.length}
-                  <div class="mt-1 ml-5 border rounded divide-y">
-                    {#each message.entries as entry (entry.id)}
-                      {@render entryRow(panel, key, entry)}
-                    {/each}
-                  </div>
-                {/if}
-              {/if}
+            <div
+              class="relative ml-1 my-0.5 border-l-2 {messageBar[message.status] || messageBar.none}"
+              title={message.status === 'error'
+                ? `${message.error}${message.retries > 1 ? ` · ${message.retries} failed attempts` : ''}`
+                : message.retries
+                  ? `succeeded after ${message.retries} failed attempt${message.retries === 1 ? '' : 's'}`
+                  : ''}
+            >
+              {#each [message.input, ...message.entries].filter(Boolean) as entry, i (entry.id)}
+                {@render entryRow(panel, key, entry, message.input ? i > 0 : false)}
+              {/each}
             </div>
           {/each}
         {:else}
@@ -1098,7 +1048,12 @@
   {/if}
 {/snippet}
 
-{#snippet entryRow(/** @type {any} */ panel, /** @type {string} */ key, /** @type {any} */ entry)}
+{#snippet entryRow(
+  /** @type {any} */ panel,
+  /** @type {string} */ key,
+  /** @type {any} */ entry,
+  /** @type {boolean} */ linked = false
+)}
   {@const entryKey = `${key}#${entry.id}`}
   <div class="px-2 py-1">
     <button
@@ -1106,6 +1061,10 @@
       class="w-full flex items-center gap-2 text-left"
       onclick={() => (panel.open[entryKey] = !panel.open[entryKey])}
     >
+      {#if linked}
+        <!-- What came of the input on the row above -->
+        <span class="text-muted-foreground/70 -mr-1" aria-hidden="true">↳</span>
+      {/if}
       {@render chevron(!!panel.open[entryKey])}
       <span class="text-muted-foreground whitespace-nowrap" title={entry.at}
         >{new Date(entry.at).toLocaleTimeString([], { hourCycle: 'h23' })}</span
