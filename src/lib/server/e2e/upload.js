@@ -333,3 +333,57 @@ export async function uploadFlowToInstance(userId, cachedFlow, storeIds) {
 
   return { flowId, created, accounts: accountIds, warning };
 }
+
+/**
+ * Bind one account to every component of a flow whose type starts with one of the
+ * given prefixes — used when an account is connected outside of an upload. The
+ * definition is rewritten the same way `reassignAccounts` does it, except on a
+ * running flow, where only the engine binding is changed.
+ * @param {any} userId
+ * @param {string} flowId
+ * @param {string} accountId
+ * @param {Array<string>} typePrefixes - e.g. ["appmixer.google.drive."]
+ * @returns {Promise<number>} number of components bound
+ */
+export async function bindAccountToFlow(userId, flowId, accountId, typePrefixes) {
+  const flow = await fetchFlowById(userId, flowId);
+  const components = flow.flow || {};
+
+  const targets = [];
+  let definitionChanged = false;
+  for (const [compId, comp] of Object.entries(components)) {
+    if (!typePrefixes.some((p) => comp.type?.startsWith(p))) continue;
+    targets.push(compId);
+    if (comp.config?.properties?.account !== accountId) {
+      comp.config = comp.config || {};
+      comp.config.properties = comp.config.properties || {};
+      comp.config.properties.account = accountId;
+      definitionChanged = true;
+    }
+  }
+  if (targets.length === 0) return 0;
+
+  if (definitionChanged && flow.stage !== 'running') {
+    try {
+      await updateFlow(userId, flowId, { flow: components }, { forceUpdate: true });
+    } catch (e) {
+      console.error(
+        `Failed to rewrite accounts in flow ${flowId}:`,
+        /** @type {any} */ (e)?.message
+      );
+    }
+  }
+
+  let assigned = 0;
+  let lastError = null;
+  for (const compId of targets) {
+    try {
+      await assignComponentAccount(userId, compId, accountId);
+      assigned++;
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  if (assigned === 0 && lastError) throw lastError;
+  return assigned;
+}

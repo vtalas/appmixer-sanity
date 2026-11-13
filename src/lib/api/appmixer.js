@@ -680,3 +680,153 @@ export async function getAppmixerInfo(userId) {
     hasCustomCredentials
   };
 }
+
+/**
+ * Authenticated request against the caller's Appmixer instance.
+ * @param {string} userId - User ID (email)
+ * @param {string} path - path with leading slash, query included
+ * @param {RequestInit} [init]
+ * @returns {Promise<Response>}
+ */
+async function appmixerFetch(userId, path, init = {}) {
+  const config = await getAppmixerConfig(userId);
+  const token = await getAccessToken(userId);
+  return fetch(`${config.baseUrl.replace(/\/+$/, '')}${path}`, {
+    ...init,
+    headers: { ...(init.headers || {}), Authorization: `Bearer ${token}` }
+  });
+}
+
+/**
+ * Message of a failed Appmixer response — the engine answers `{ message }` or plain text.
+ * @param {Response} response
+ * @returns {Promise<string>}
+ */
+async function appmixerErrorMessage(response) {
+  const text = await response.text().catch(() => '');
+  try {
+    const body = JSON.parse(text);
+    return body?.message || body?.error || text || `HTTP ${response.status}`;
+  } catch {
+    return text || `HTTP ${response.status}`;
+  }
+}
+
+/**
+ * Component manifests of the given selectors ("appmixer.google.drive" = every component
+ * of that module). The manifests carry `auth: { service, scope }`.
+ * @param {string} userId - User ID (email)
+ * @param {Array<string>} selectors - dot-separated module or component types
+ * @returns {Promise<Array<any>>}
+ */
+export async function fetchComponentManifests(userId, selectors) {
+  // Chunked to keep the query string well below URL length limits, and fetched in
+  // parallel — the manifests are megabytes in total.
+  const chunks = [];
+  for (let i = 0; i < selectors.length; i += 15) chunks.push(selectors.slice(i, i + 15));
+
+  const parts = await Promise.all(
+    chunks.map(async (chunk) => {
+      const params = new URLSearchParams({ manifest: 'yes' });
+      for (const selector of chunk) params.append('selectors[]', selector);
+      const response = await appmixerFetch(userId, `/components?${params}`);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch components: ${await appmixerErrorMessage(response)}`);
+      }
+      const data = await response.json();
+      return Array.isArray(data) ? data : Object.values(data || {});
+    })
+  );
+  return parts.flat();
+}
+
+/**
+ * Accounts of the user that are valid for an auth type — the engine aggregates the
+ * scopes of every component under the type ("appmixer.google.drive") and answers only
+ * the accounts whose token is valid and covers all of them.
+ * @param {string} userId - User ID (email)
+ * @param {string} authType - dot-separated module type
+ * @returns {Promise<Array<{accountId: string, name?: string, displayName?: string}>>}
+ */
+export async function getValidAccountsForAuthType(userId, authType) {
+  const response = await appmixerFetch(userId, `/auth/${encodeURIComponent(authType)}`);
+  if (!response.ok) {
+    throw new Error(await appmixerErrorMessage(response));
+  }
+  const data = await response.json();
+  return Object.entries(data?.auth?.accounts || {}).map(([accountId, a]) => ({
+    accountId,
+    name: /** @type {any} */ (a)?.name,
+    displayName: /** @type {any} */ (a)?.displayName
+  }));
+}
+
+/**
+ * Auth mechanism of a service ("oauth2", "apiKey", "pwd", …).
+ * @param {string} userId - User ID (email)
+ * @param {string} service - colon-separated service name, e.g. "appmixer:google"
+ * @returns {Promise<string|null>}
+ */
+export async function getServiceAuthType(userId, service) {
+  const response = await appmixerFetch(userId, `/auth/${encodeURIComponent(service)}/type`);
+  if (!response.ok) return null;
+  const data = await response.json().catch(() => null);
+  return data?.type || null;
+}
+
+/**
+ * Start connecting an account: a ticket plus the URL the user has to open — the
+ * vendor's consent screen for OAuth, the instance's own form for key/password
+ * services. The redirect goes back to the instance, which creates the account.
+ * @param {string} userId - User ID (email)
+ * @param {string} authType - dot-separated module type; decides the service and scopes
+ * @returns {Promise<{ticket: string, authUrl: string}>}
+ */
+export async function startAccountAuth(userId, authType) {
+  const ticketResponse = await appmixerFetch(userId, '/auth/ticket', { method: 'POST' });
+  if (!ticketResponse.ok) {
+    throw new Error(`Failed to create auth ticket: ${await appmixerErrorMessage(ticketResponse)}`);
+  }
+  const { ticket } = await ticketResponse.json();
+
+  const urlResponse = await appmixerFetch(
+    userId,
+    `/auth/${encodeURIComponent(authType)}/auth-url/${encodeURIComponent(ticket)}`
+  );
+  if (!urlResponse.ok) {
+    throw new Error(await appmixerErrorMessage(urlResponse));
+  }
+  // The engine answers the bare URL, as text or as a JSON string depending on version
+  const raw = (await urlResponse.text()).trim();
+  let authUrl = raw;
+  try {
+    const parsed = JSON.parse(raw);
+    authUrl = typeof parsed === 'string' ? parsed : parsed?.authUrl || parsed?.url || raw;
+  } catch {
+    // plain text
+  }
+  if (!/^https?:\/\//i.test(authUrl)) {
+    throw new Error('The instance did not return an auth URL');
+  }
+  return { ticket, authUrl };
+}
+
+/**
+ * State of an auth ticket. Unknown/expired tickets answer `null`.
+ * @param {string} userId - User ID (email)
+ * @param {string} ticket
+ * @returns {Promise<{finished: boolean, error: string|null, accountId: string|null}|null>}
+ */
+export async function getAccountAuthStatus(userId, ticket) {
+  const response = await appmixerFetch(userId, `/auth/status/${encodeURIComponent(ticket)}`);
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error(await appmixerErrorMessage(response));
+  }
+  const data = await response.json();
+  return {
+    finished: !!data?.finished,
+    error: data?.error || null,
+    accountId: data?.accountId ? String(data.accountId) : null
+  };
+}

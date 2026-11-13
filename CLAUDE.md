@@ -104,6 +104,7 @@ Everything the page shows comes from a DB cache refreshed by an explicit **Scan*
 - **`src/lib/server/e2e/scan.js`** — `scanE2EFlows(userId)`: GitHub tree + contents (incremental — content refetched only when the blob sha changed), instance flow list, hash comparison (`cleanFlowForComparison` + md5, skipped when neither side changed), latest results from the global stores; replaces the `e2e_flows` cache atomically. `fetchLatestResults(userId)`: reads the two result stores ("E2E Failed Tests" / "E2E Succeeded Tests" — same names as the appmixer CLI), newer record wins per test case.
 - **`src/lib/server/e2e/runner.js`** — `tickPass(userId)`: one runner pass — (1) finalize running runs (result record newer than baseline → stop flow + record result; timeout after `E2E_RUN_TIMEOUT_SECONDS` → stop + timeout), (2) atomically claim queued runs (`UPDATE … RETURNING`) up to `E2E_MAX_CONCURRENT` and start them. `tickLoop(userId, budgetMs)`: repeats passes until queue drains or budget runs out (for cron). Ticks are driven by the page (15s interval while active) and/or cron.
 - **`src/lib/db/e2e.js`** — DB helpers for both tables.
+- **`src/lib/server/e2e/accounts.js`** + **`src/lib/components/e2e/AccountsDialog.svelte`** — the **Accounts** dialog: connect the accounts the flows need without opening a flow. Rows are the cached connectors grouped by `(auth.service, union of auth.scope)` from the instance's component manifests (`GET /components?selectors[]=`), aggregated per connector module exactly like the engine does for a module-level auth URL — so the same service on two rows means different scope sets. Status comes from `GET /auth/{module}` (accounts with a valid token covering all scopes), fetched per row with limited concurrency — doing it for all rows in one request took ~2 minutes. Connect = `POST /auth/ticket` → `GET /auth/{module}/auth-url/{ticket}` opened in a popup (vendor consent for OAuth, the instance's own form for key/password services; the redirect goes to the instance, so no extra redirect URI) → poll `GET /auth/status/{ticket}` → bind the new account to the deployed flows of the row's connectors.
 
 ### API Routes
 
@@ -119,6 +120,11 @@ Everything the page shows comes from a DB cache refreshed by an explicit **Scan*
 | `api/e2e-flows/delete` | POST | Delete flows from the instance (also updates cache) |
 | `api/e2e-flows/sync` | POST | Create a PR pushing modified/server-only flows to GitHub |
 | `api/e2e-flows/upload` | POST | Upload (import) GitHub flows to the instance — `appmixer e2e import` semantics via `src/lib/server/e2e/upload.js` (identity customFields, result stores, fail-fast errorHandling, account binding) |
+| `api/e2e-flows/accounts` | GET | Accounts dialog rows — one per (service, scope set) with the service's accounts; no token validation (`src/lib/server/e2e/accounts.js`) |
+| `api/e2e-flows/accounts/check` | GET | Live status of one row (`?authType=` module type) → `{status, validAccounts, error}`; the instance validates tokens, seconds per row, so the dialog calls it row by row |
+| `api/e2e-flows/accounts/connect` | POST | Start connecting an account (`{authType}` = module type) — instance auth ticket + URL to open in a popup |
+| `api/e2e-flows/accounts/status` | GET | Poll an auth ticket (`?ticket=`) → `{finished, error, accountId}` |
+| `api/e2e-flows/accounts/bind` | POST | Bind an account to the deployed flows of connectors (`{accountId, connectors}`) |
 | `api/public/e2e-runner/tick` | GET | **Cron entrypoint** (no session; `CRON_SECRET` auth, env credentials). Params: `scan=1`, `prs=1` (refresh the PR cache), `schedule=1` (enqueue flows without a result in 20h), `loop=1` (tick until budget ~250s runs out) |
 
 `vercel.json` schedules the cron daily (`scan=1&prs=1&schedule=1&loop=1`). Vercel Cron sends `Authorization: Bearer <CRON_SECRET>` automatically when the env var is set; for more frequent processing point any external cron at the same URL.
