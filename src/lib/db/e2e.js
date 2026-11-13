@@ -378,3 +378,19 @@ export async function clearRunHistory(instanceUrl) {
   });
   return result.rowsAffected;
 }
+
+/**
+ * Mark the flows of the given connectors as having an account — keeps the page's
+ * Account badge current after an account is connected, without a full scan.
+ * @param {string} instanceUrl
+ * @param {Array<string>} connectors
+ */
+export async function markAccountAvailable(instanceUrl, connectors) {
+  if (connectors.length === 0) return;
+  const db = getDb();
+  await db.execute({
+    sql: `UPDATE e2e_flows SET account_available = 1
+      WHERE instance_url = ? AND connector IN (${connectors.map(() => '?').join(', ')})`,
+    args: [instanceUrl, ...connectors]
+  });
+}

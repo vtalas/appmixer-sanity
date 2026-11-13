@@ -6,9 +6,12 @@
   import { Checkbox } from '$lib/components/ui/checkbox';
   import { invalidateAll, goto } from '$app/navigation';
   import { page } from '$app/stores';
-  import { ExternalLink, Github, Trash2, FileDiff, FileText, Play, Square, RefreshCw, ListX, PlayCircle, Clipboard, Check } from 'lucide-svelte';
+  import { ExternalLink, Github, Trash2, FileDiff, FileText, Play, Square, RefreshCw, ListX, PlayCircle, Clipboard, Check, KeyRound } from 'lucide-svelte';
+  import AccountsDialog from '$lib/components/e2e/AccountsDialog.svelte';
 
   let { data } = $props();
+
+  let showAccountsDialog = $state(false);
 
   // Initialize filters from URL params
   const params = $page.url.searchParams;
@@ -832,6 +835,15 @@
           Copy Report
         {/if}
       </Button>
+      <Button
+        variant="outline"
+        onclick={() => (showAccountsDialog = true)}
+        disabled={flows.length === 0}
+        title="Accounts the test flows need — connect them here instead of in a flow"
+      >
+        <KeyRound size={15} class="mr-2" />
+        Accounts
+      </Button>
       <Button variant="outline" onclick={runScan} disabled={isScanning}>
         <RefreshCw size={15} class="mr-2 {isScanning ? 'animate-spin' : ''}" />
         {isScanning ? 'Scanning...' : 'Scan'}
@@ -1397,6 +1409,9 @@
     {/if}
   {/if}
 </div>
+
+<!-- Accounts Dialog -->
+<AccountsDialog bind:open={showAccountsDialog} onchanged={() => invalidateAll()} />
 
 <!-- Upload to Instance Dialog -->
 <Dialog bind:open={showUploadDialog}>
