@@ -43,12 +43,16 @@
       return;
     }
 
-    const url = new URL($page.url);
+    // Read the address from the window, not from `$page`: the effect must depend only
+    // on the filters. Depending on `$page` made every navigation re-run it and navigate
+    // again — an endless loop that froze the page and took the focus from the search box.
+    const url = new URL(window.location.href);
     const sp = url.searchParams;
     q ? sp.set('q', q) : sp.delete('q');
     connector ? sp.set('connector', connector) : sp.delete('connector');
     sync ? sp.set('sync', sync) : sp.delete('sync');
     result ? sp.set('result', result) : sp.delete('result');
+    if (url.search === window.location.search) return;
 
     goto(url.pathname + (sp.toString() ? '?' + sp.toString() : ''), {
       replaceState: true,
