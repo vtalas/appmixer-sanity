@@ -4,7 +4,7 @@
   import { Badge } from '$lib/components/ui/badge';
   import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '$lib/components/ui/dialog';
   import { Checkbox } from '$lib/components/ui/checkbox';
-  import { invalidateAll, goto } from '$app/navigation';
+  import { invalidateAll, replaceState } from '$app/navigation';
   import { page } from '$app/stores';
   import { ExternalLink, Github, Trash2, FileDiff, FileText, Play, Square, RefreshCw, ListX, PlayCircle, Clipboard, Check, KeyRound } from 'lucide-svelte';
   import AccountsDialog from '$lib/components/e2e/AccountsDialog.svelte';
@@ -44,8 +44,7 @@
     }
 
     // Read the address from the window, not from `$page`: the effect must depend only
-    // on the filters. Depending on `$page` made every navigation re-run it and navigate
-    // again — an endless loop that froze the page and took the focus from the search box.
+    // on the filters, or every URL change re-runs it.
     const url = new URL(window.location.href);
     const sp = url.searchParams;
     q ? sp.set('q', q) : sp.delete('q');
@@ -54,11 +53,10 @@
     result ? sp.set('result', result) : sp.delete('result');
     if (url.search === window.location.search) return;
 
-    goto(url.pathname + (sp.toString() ? '?' + sp.toString() : ''), {
-      replaceState: true,
-      keepFocus: true,
-      noScroll: true
-    });
+    // Shallow routing, not goto(): a navigation sets `$navigating`, and the root layout
+    // swaps the page for its "Loading…" bar while that is set — the page is unmounted and
+    // mounted again, and the search box loses the focus after every typed character.
+    replaceState(url.pathname + url.search, {});
   });
 
   const flows = $derived(data.flows || []);
