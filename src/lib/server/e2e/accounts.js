@@ -65,31 +65,90 @@ export function groupConnectorsByAuth(connectors, manifests) {
   /** @type {Map<string, {key: string, service: string, scopes: Array<string>, connectors: Array<string>, authType: string}>} */
   const groups = new Map();
 
+  const prefixes = connectors.map((c) => connectorToAuthType(c) + '.');
+
   for (const connector of [...connectors].sort()) {
     const prefix = connectorToAuthType(connector) + '.';
-    const own = manifests.filter((m) => String(m?.name || '').startsWith(prefix) && m.auth);
+    // A component belongs to the nearest connector of the list: "microsoft/mail"
+    // components are not counted for "microsoft" when both have flows.
+    const nested = prefixes.filter((p) => p !== prefix && p.startsWith(prefix));
+    const own = manifests.filter((m) => {
+      const name = String(m?.name || '');
+      return m.auth && name.startsWith(prefix) && !nested.some((p) => name.startsWith(p));
+    });
     if (own.length === 0) continue; // nothing in this connector authenticates
 
-    const service = own.find((m) => m.auth.service)?.auth.service;
-    if (!service) continue;
-    const scopes = [...new Set(own.flatMap((m) => m.auth.scope || []))].sort();
+    // A connector directory can hold modules that authenticate against different
+    // services ("ai" → openai, claude, …) — each service is its own row.
+    /** @type {Map<string, Array<any>>} */
+    const byService = new Map();
+    for (const manifest of own) {
+      if (!manifest.auth.service) continue;
+      const list = byService.get(manifest.auth.service) || [];
+      list.push(manifest);
+      byService.set(manifest.auth.service, list);
+    }
 
-    const key = `${service}|${scopes.join(' ')}`;
-    const group = groups.get(key);
-    if (group) {
-      group.connectors.push(connector);
-    } else {
-      groups.set(key, {
-        key,
-        service,
-        scopes,
-        connectors: [connector],
-        authType: connectorToAuthType(connector)
-      });
+    for (const [service, list] of byService) {
+      const scopes = [...new Set(list.flatMap((m) => m.auth.scope || []))].sort();
+      // With one service the connector module itself is the auth type; with several,
+      // the module of the service's own components ("appmixer.ai.openai") — unless
+      // the service is the connector's own ("appmixer:microsoft" for "microsoft").
+      const ownService = service === ['appmixer', ...connector.split('/')].join(':');
+      const authType =
+        byService.size === 1 || ownService
+          ? connectorToAuthType(connector)
+          : String(list[0].name).split('.').slice(0, 3).join('.');
+
+      const key = `${service}|${scopes.join(' ')}`;
+      const group = groups.get(key);
+      if (group) {
+        if (!group.connectors.includes(connector)) group.connectors.push(connector);
+      } else {
+        groups.set(key, { key, service, scopes, connectors: [connector], authType });
+      }
     }
   }
 
   return [...groups.values()].sort((a, b) => a.key.localeCompare(b.key));
+}
+
+const GROUPS_TTL_MS = 10 * 60 * 1000;
+/** @type {Map<string, {at: number, value: Promise<{groups: Array<any>, authTypes: Map<string, string|null>}>}>} */
+const groupsCache = new Map();
+
+/**
+ * Auth groups of the connectors plus the auth mechanism of each service. Built from
+ * megabytes of component manifests (seconds, sometimes tens of seconds), and only
+ * changes when a connector is installed — so it is kept in memory for a few minutes
+ * per instance and connector set. Accounts are never cached.
+ * @param {string} userId
+ * @param {string} instanceUrl
+ * @param {Array<string>} connectors
+ */
+function loadAuthGroups(userId, instanceUrl, connectors) {
+  const cacheKey = `${instanceUrl}|${[...connectors].sort().join(',')}`;
+  const cached = groupsCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < GROUPS_TTL_MS) return cached.value;
+
+  const value = (async () => {
+    const manifests = await fetchComponentManifests(userId, connectors.map(connectorToAuthType));
+    const groups = groupConnectorsByAuth(connectors, manifests);
+    const services = [...new Set(groups.map((g) => g.service))];
+    const authTypes = new Map(
+      await mapLimit(services, LOOKUP_CONCURRENCY, async (service) => {
+        return /** @type {[string, string|null]} */ ([
+          service,
+          await getServiceAuthType(userId, service).catch(() => null)
+        ]);
+      })
+    );
+    return { groups, authTypes };
+  })();
+  groupsCache.set(cacheKey, { at: Date.now(), value });
+  // A failed load must not be served from the cache
+  value.catch(() => groupsCache.delete(cacheKey));
+  return value;
 }
 
 /**
@@ -121,25 +180,13 @@ export async function getAccountsOverview(userId) {
 
   /** @type {Array<string>} */
   const errors = [];
-  const [manifests, accounts] = await Promise.all([
-    fetchComponentManifests(userId, connectors.map(connectorToAuthType)),
+  const [{ groups, authTypes }, accounts] = await Promise.all([
+    loadAuthGroups(userId, instanceUrl, connectors),
     listAccounts(userId).catch((e) => {
       errors.push(`Failed to list accounts: ${e.message}`);
       return [];
     })
   ]);
-
-  const groups = groupConnectorsByAuth(connectors, manifests);
-
-  const services = [...new Set(groups.map((g) => g.service))];
-  const authTypes = new Map(
-    await mapLimit(services, LOOKUP_CONCURRENCY, async (service) => {
-      return /** @type {[string, string|null]} */ ([
-        service,
-        await getServiceAuthType(userId, service).catch(() => null)
-      ]);
-    })
-  );
 
   const rows = groups.map((group) => {
     const serviceAccounts = accounts

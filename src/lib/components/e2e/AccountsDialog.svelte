@@ -16,9 +16,11 @@
   /**
    * Accounts the E2E flows need, one row per (service, scope set), each connectable
    * from here — no need to open a flow in the designer.
-   * @type {{ open: boolean, onchanged?: () => void }}
+   * `connector` narrows the list to one connector group of the page ("ai" also
+   * shows "ai/openai"); the chip in the dialog clears it.
+   * @type {{ open: boolean, connector?: string, onchanged?: () => void }}
    */
-  let { open = $bindable(false), onchanged } = $props();
+  let { open = $bindable(false), connector = $bindable(''), onchanged } = $props();
 
   const POLL_INTERVAL_MS = 2000;
   const CHECK_CONCURRENCY = 5;
@@ -55,6 +57,14 @@
   const visibleRows = $derived(
     rows
       .filter((r) => !attentionOnly || r.status !== 'connected')
+      .filter(
+        (r) =>
+          !connector ||
+          r.connectors.some(
+            (/** @type {string} */ c) =>
+              c === connector || c.startsWith(connector + '/') || connector.startsWith(c + '/')
+          )
+      )
       .filter((r) => {
         const q = search.trim().toLowerCase();
         if (!q) return true;
@@ -297,6 +307,17 @@
     </DialogHeader>
 
     <div class="flex items-center gap-3">
+      {#if connector}
+        <button
+          type="button"
+          class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border bg-muted hover:bg-muted/70 shrink-0"
+          onclick={() => (connector = '')}
+          title="Show the accounts of all connectors"
+        >
+          {connector}
+          <span aria-hidden="true">✕</span>
+        </button>
+      {/if}
       <Input class="max-w-xs" placeholder="Filter by service or connector…" bind:value={search} />
       <div class="flex items-center gap-2 text-sm">
         <Checkbox

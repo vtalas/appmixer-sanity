@@ -12,6 +12,14 @@
   let { data } = $props();
 
   let showAccountsDialog = $state(false);
+  // Connector group the accounts dialog is narrowed to ('' = all)
+  let accountsConnector = $state('');
+
+  /** @param {string} [connector] */
+  function openAccounts(connector = '') {
+    accountsConnector = connector;
+    showAccountsDialog = true;
+  }
 
   // Initialize filters from URL params
   const params = $page.url.searchParams;
@@ -837,7 +845,7 @@
       </Button>
       <Button
         variant="outline"
-        onclick={() => (showAccountsDialog = true)}
+        onclick={() => openAccounts()}
         disabled={flows.length === 0}
         title="Accounts the test flows need — connect them here instead of in a flow"
       >
@@ -1199,19 +1207,24 @@
                   <span class="text-xs text-red-600 font-medium">✗ {group.failed}</span>
                 {/if}
                 {#if group.accountAvailable === true}
-                  <span
-                    class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border bg-emerald-50 text-emerald-700 border-emerald-200"
-                    title="A service account for this connector exists on the instance"
+                  <button
+                    type="button"
+                    class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100 cursor-pointer"
+                    title="A service account for this connector exists on the instance — click to check or connect its accounts"
+                    onclick={() => openAccounts(group.connector)}
                   >
                     Account
-                  </span>
+                  </button>
                 {:else if group.accountAvailable === false}
-                  <span
-                    class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border bg-amber-50 text-amber-800 border-amber-200"
-                    title="No service account for this connector on the instance — flows will not run until one is connected"
+                  <button
+                    type="button"
+                    class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100 cursor-pointer"
+                    title="No service account for this connector on the instance — click to connect one"
+                    onclick={() => openAccounts(group.connector)}
                   >
                     No account
-                  </span>
+                    <span class="underline">Connect</span>
+                  </button>
                 {/if}
               </div>
               {#if group.deployed > 0}
@@ -1411,7 +1424,11 @@
 </div>
 
 <!-- Accounts Dialog -->
-<AccountsDialog bind:open={showAccountsDialog} onchanged={() => invalidateAll()} />
+<AccountsDialog
+  bind:open={showAccountsDialog}
+  bind:connector={accountsConnector}
+  onchanged={() => invalidateAll()}
+/>
 
 <!-- Upload to Instance Dialog -->
 <Dialog bind:open={showUploadDialog}>
