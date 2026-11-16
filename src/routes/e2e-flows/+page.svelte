@@ -8,6 +8,7 @@
   import { page } from '$app/stores';
   import { ExternalLink, Github, Trash2, FileDiff, FileText, Play, Square, RefreshCw, ListX, PlayCircle, Clipboard, Check, KeyRound } from 'lucide-svelte';
   import AccountsDialog from '$lib/components/e2e/AccountsDialog.svelte';
+  import ConnectorSearch from '$lib/components/e2e/ConnectorSearch.svelte';
 
   let { data } = $props();
 
@@ -23,7 +24,8 @@
 
   // Initialize filters from URL params
   const params = $page.url.searchParams;
-  let searchQuery = $state(params.get('q') || '');
+  // A link with only ?connector= (older links, the PRs page) still shows the name in the box
+  let searchQuery = $state(params.get('q') || params.get('connector') || '');
   let connectorFilter = $state(params.get('connector') || '');
   let syncFilter = $state(params.get('sync') || '');
   let resultFilter = $state(params.get('result') || '');
@@ -77,16 +79,27 @@
   });
 
   // Filtering
-  const connectors = $derived(
-    [...new Set(flows.map((f) => f.connector).filter(Boolean))].sort()
-  );
+  // Connectors with their flow counts — the suggestions of the connector search
+  const connectorOptions = $derived.by(() => {
+    /** @type {Map<string, number>} */
+    const counts = new Map();
+    for (const flow of flows) {
+      if (!flow.connector) continue;
+      counts.set(flow.connector, (counts.get(flow.connector) || 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  });
 
   const filteredFlows = $derived(
     flows.filter((flow) => {
+      // The search is by connector: free text matches a part of the name, a picked
+      // suggestion (connectorFilter) pins exactly one connector.
       const matchesSearch =
-        !searchQuery ||
-        flow.flowName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        flow.connector?.toLowerCase().includes(searchQuery.toLowerCase());
+        !!connectorFilter ||
+        !searchQuery.trim() ||
+        flow.connector?.toLowerCase().includes(searchQuery.trim().toLowerCase());
 
       const matchesConnector = !connectorFilter || flow.connector === connectorFilter;
       const matchesSync = !syncFilter || flow.syncStatus === syncFilter;
@@ -1110,21 +1123,12 @@
 
     <!-- Filters -->
     <div class="flex flex-wrap gap-4">
-      <Input
-        type="text"
-        placeholder="Search flows..."
-        bind:value={searchQuery}
-        class="max-w-sm"
+      <ConnectorSearch
+        connectors={connectorOptions}
+        bind:query={searchQuery}
+        bind:selected={connectorFilter}
+        class="w-full max-w-sm"
       />
-      <select
-        bind:value={connectorFilter}
-        class="px-3 py-2 border rounded-md bg-background text-sm"
-      >
-        <option value="">All Connectors</option>
-        {#each connectors as connector}
-          <option value={connector}>{connector}</option>
-        {/each}
-      </select>
       <select
         bind:value={syncFilter}
         class="px-3 py-2 border rounded-md bg-background text-sm"
