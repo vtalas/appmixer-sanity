@@ -1485,6 +1485,136 @@ export async function pipelineRunTrace(userId, dir) {
   return { dir, itemNodeId: run.itemNodeId || null, events };
 }
 
+/** Data Store "Connector research" of the Connector research flow (appmixer-components #3022) */
+const RESEARCH_STORE_ID = '6af2e01aebd4d452e1825df9';
+/** Issues the flow files per weekend; candidates ranked below are substitutes */
+const RESEARCH_BATCH_SIZE = 5;
+
+/**
+ * The weekend batch of the Connector research flow, read from its Data Store with one listing:
+ * the newest ranking (`queue:<batch>:<rank>` records) with each candidate's state, what the
+ * research of that batch cost (`run:` records) and how the daily signal collection stands
+ * (`sig:<date>` records). `dry` reads the copies a dry test flow keeps behind the key prefix
+ * `dry:` instead.
+ * @param {string} userId - caller's email
+ * @param {boolean} [dry]
+ */
+export async function collectConnectorResearch(userId, dry = false) {
+  const { baseUrl, token } = await getAppmixerSession(userId);
+  /** @type {any[]} */
+  const records = [];
+  try {
+    for (let offset = 0; offset < 2000; offset += 100) {
+      const page = await appmixerGet(baseUrl, token, '/store', {
+        storeId: RESEARCH_STORE_ID,
+        limit: '100',
+        offset: String(offset)
+      });
+      if (!Array.isArray(page)) break;
+      records.push(...page);
+      if (page.length < 100) break;
+    }
+  } catch (err) {
+    const status = /HTTP (\d+)/.exec(message(err))?.[1];
+    throw new Error(
+      status === '401' || status === '403' || status === '404'
+        ? `The Data Store "Connector research" (${RESEARCH_STORE_ID}) is not readable with the configured Appmixer account on ${baseUrl} (HTTP ${status}). It belongs to the owner of the Connector research flow.`
+        : message(err)
+    );
+  }
+  const prefix = dry ? 'dry:' : '';
+  /** @type {any[]} */
+  const queue = [];
+  /** @type {any[]} */
+  const runs = [];
+  /** @type {any[]} */
+  const days = [];
+  for (const record of records) {
+    const key = String(record?.key || '');
+    if (!key.startsWith(prefix) || (!dry && key.startsWith('dry:'))) continue;
+    const kind = key.slice(prefix.length).split(':')[0];
+    if (kind !== 'queue' && kind !== 'run' && kind !== 'sig') continue;
+    let value = record.value;
+    if (typeof value === 'string') {
+      try {
+        value = JSON.parse(value);
+      } catch {
+        continue;
+      }
+    }
+    if (!value || typeof value !== 'object') continue;
+    if (kind === 'queue' && value.batch) queue.push(value);
+    if (kind === 'run' && value.at) runs.push(value);
+    if (kind === 'sig' && value.at) days.push({ ...value, day: key.slice(prefix.length + 4) });
+  }
+  const batchId =
+    queue
+      .map((q) => String(q.batch))
+      .sort()
+      .pop() || null;
+  const items = queue
+    .filter((q) => q.batch === batchId)
+    .sort((a, b) => (a.rank || 0) - (b.rank || 0));
+  const rankedAt =
+    items
+      .map((q) => q.rankedAt)
+      .filter(Boolean)
+      .sort()[0] || '';
+  const link = (/** @type {unknown} */ url) =>
+    /^https?:\/\//.test(String(url || '')) ? String(url) : '';
+  const cost = runs
+    .filter((r) => (r.batch ? r.batch === batchId : rankedAt && r.at >= rankedAt))
+    .reduce((sum, r) => sum + (Number(r.cost) || 0), 0);
+  days.sort((a, b) => (a.day < b.day ? 1 : -1));
+  const latest = days[0];
+  return {
+    instanceUrl: baseUrl,
+    dry,
+    size: RESEARCH_BATCH_SIZE,
+    batch: batchId
+      ? {
+          id: batchId,
+          rankedAt,
+          filed: items.filter((q) => q.status === 'filed').length,
+          rejected: items.filter((q) => q.status === 'rejected').length,
+          pending: items.filter((q) => q.status === 'pending').length,
+          cost: Math.round(cost * 100) / 100,
+          candidates: items.map((q) => ({
+            rank: q.rank,
+            reserve: !!q.reserve,
+            status: q.status || 'pending',
+            name: String(q.name || ''),
+            category: String(q.category || ''),
+            auth: String(q.auth || ''),
+            website: link(q.website),
+            apiDocsUrl: link(q.apiDocsUrl),
+            whatItDoes: String(q.whatItDoes || ''),
+            whyNow: String(q.whyNow || ''),
+            account: String(q.account || ''),
+            score: q.finalScore ?? q.score ?? null,
+            rankScore: q.score ?? null,
+            confidence: q.finalConfidence ?? q.confidence ?? null,
+            reason: String(q.reason || ''),
+            researchedAt: q.researchedAt || null,
+            issue: q.issue || null,
+            issueUrl: link(q.issueUrl)
+          }))
+        }
+      : null,
+    signals: {
+      days: days.length,
+      latest: latest
+        ? {
+            day: latest.day,
+            count: Array.isArray(latest.items) ? latest.items.length : 0,
+            feedsOk: latest.feedsOk ?? null,
+            feedsTotal: latest.feedsTotal ?? null
+          }
+        : null
+    }
+  };
+}
+
 /**
  * @template T
  * @param {() => Promise<T>} fn
@@ -1498,18 +1628,30 @@ async function settle(fn) {
   }
 }
 
-/** @param {string} userId - caller's email, or '' for the env configuration */
-export async function buildOpsOverview(userId) {
-  const [appmixer, watched, workflows, openclaw] = await Promise.all([
+/**
+ * @param {string} userId - caller's email, or '' for the env configuration
+ * @param {{ researchDry?: boolean }} [options] - researchDry: show the dry copy of the research batch
+ */
+export async function buildOpsOverview(userId, { researchDry = false } = {}) {
+  const [appmixer, watched, research, workflows, openclaw] = await Promise.all([
     settle(() => collectAppmixer(userId)),
     settle(() => collectWatchedFlows(userId)),
+    settle(() => collectConnectorResearch(userId, researchDry)),
     settle(() => collectWorkflows(userId)),
     settle(() => collectOpenClaw())
   ]);
   linkHooksToCallers(openclaw.data, appmixer.data);
   // The board cards the pipeline runs worked on, for the runs grouped by card
   const cards = await settle(() => collectBoardCards(userId, openclaw.data));
-  return { generatedAt: new Date().toISOString(), appmixer, watched, workflows, openclaw, cards };
+  return {
+    generatedAt: new Date().toISOString(),
+    appmixer,
+    watched,
+    research,
+    workflows,
+    openclaw,
+    cards
+  };
 }
 
 /**

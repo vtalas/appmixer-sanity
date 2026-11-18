@@ -24,6 +24,10 @@
   const workflows = $derived(data.workflows?.data);
   const openclaw = $derived(data.openclaw?.data);
   const watched = $derived(data.watched?.data);
+  const research = $derived(data.research?.data);
+  // Candidates of the research batch whose details (why now, test account) are open
+  /** @type {Record<number, boolean>} */
+  let researchOpen = $state({});
 
   const instances = $derived((appmixer?.templates || []).flatMap((t) => t.instances));
 
@@ -1696,6 +1700,121 @@
     {:else}
       <div class="text-sm text-muted-foreground">
         No watched flows. Add any flow by its id to see its errors and runs here.
+      </div>
+    {/if}
+  </section>
+
+  <!-- Connector research: the weekend batch of candidates -->
+  <section id="research" class="space-y-3">
+    <div class="flex items-baseline justify-between gap-4">
+      <div class="flex items-baseline gap-3">
+        <h2 class="text-xl font-semibold">Connector research</h2>
+        {#if research?.dry}
+          <Badge variant="outline">dry run copy</Badge>
+        {/if}
+      </div>
+      <span class="text-xs text-muted-foreground">
+        ranking Friday 12:00 · one candidate researched every 5 hours · a batch stays active 72 h
+      </span>
+    </div>
+    {#if data.research?.error}
+      <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+        {data.research.error}
+      </div>
+    {:else if research?.batch}
+      {@const batch = research.batch}
+      <div class="text-sm">
+        Batch <span class="font-medium">{batch.id}</span> ·
+        <span class="font-medium">{batch.filed} of {research.size} issues</span>
+        {#if batch.rejected}· {batch.rejected} turned down{/if}
+        {#if batch.pending}· {batch.pending} waiting{/if}
+        · research ${batch.cost.toFixed(2)}
+      </div>
+      <div class="border rounded-lg divide-y">
+        {#each batch.candidates as c (c.rank)}
+          <div class="p-3 space-y-1">
+            <div class="flex items-center gap-3">
+              <button
+                type="button"
+                class="text-muted-foreground hover:text-foreground"
+                aria-label="Details of {c.name}"
+                aria-expanded={!!researchOpen[c.rank]}
+                onclick={() => (researchOpen[c.rank] = !researchOpen[c.rank])}
+              >
+                {@render chevron(!!researchOpen[c.rank])}
+              </button>
+              <span class="w-5 text-right text-xs tabular-nums text-muted-foreground">{c.rank}</span
+              >
+              {#if c.website}
+                <a
+                  class="font-medium hover:underline"
+                  href={c.website}
+                  target="_blank"
+                  rel="noreferrer">{c.name}</a
+                >
+              {:else}
+                <span class="font-medium">{c.name}</span>
+              {/if}
+              <span class="text-xs text-muted-foreground">{c.category} · {c.auth}</span>
+              <span class="text-xs tabular-nums text-muted-foreground" title="Score out of 100"
+                >score {c.score ?? '–'}</span
+              >
+              <span class="ml-auto flex items-center gap-2 text-xs">
+                {#if c.status === 'filed'}
+                  {#if c.issueUrl}
+                    <a
+                      class="px-2 py-0.5 rounded bg-green-100 text-green-800 hover:underline"
+                      href={c.issueUrl}
+                      target="_blank"
+                      rel="noreferrer">issue #{c.issue}</a
+                    >
+                  {:else}
+                    <span class="px-2 py-0.5 rounded bg-green-100 text-green-800">passed</span>
+                  {/if}
+                {:else if c.status === 'rejected'}
+                  <span class="px-2 py-0.5 rounded bg-red-100 text-red-800">turned down</span>
+                {:else if c.reserve}
+                  <span class="px-2 py-0.5 rounded bg-muted text-muted-foreground">substitute</span>
+                {:else}
+                  <span class="px-2 py-0.5 rounded bg-amber-100 text-amber-800">waiting</span>
+                {/if}
+              </span>
+            </div>
+            {#if c.status === 'rejected' && c.reason}
+              <div class="pl-14 text-xs text-red-700">{c.reason}</div>
+            {/if}
+            {#if researchOpen[c.rank]}
+              <div class="pl-14 space-y-1 text-sm text-muted-foreground">
+                {#if c.whatItDoes}<p>{c.whatItDoes}</p>{/if}
+                {#if c.whyNow}<p><span class="text-foreground">Why now:</span> {c.whyNow}</p>{/if}
+                {#if c.account}
+                  <p><span class="text-foreground">Test account:</span> {c.account}</p>
+                {/if}
+                <p class="text-xs">
+                  {#if c.apiDocsUrl}
+                    <a class="underline" href={c.apiDocsUrl} target="_blank" rel="noreferrer"
+                      >API docs</a
+                    > ·
+                  {/if}
+                  ranked with score {c.rankScore ?? '–'}, confidence {c.confidence ?? '–'}
+                  {#if c.researchedAt}· researched {ago(c.researchedAt)}{/if}
+                </p>
+              </div>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {:else}
+      <div class="text-sm text-muted-foreground">
+        No batch yet. The first ranking is created on Friday at 12:00; its candidates show up here.
+      </div>
+    {/if}
+    {#if research?.signals}
+      <div class="text-xs text-muted-foreground">
+        Signal collection (daily 3:00): {research.signals.days}
+        {research.signals.days === 1 ? 'day' : 'days'} stored{#if research.signals.latest}, latest
+          {research.signals.latest.day} with {research.signals.latest.count} signals from
+          {research.signals.latest.feedsOk ?? '?'}/{research.signals.latest.feedsTotal ?? '?'} feeds{/if}
       </div>
     {/if}
   </section>
