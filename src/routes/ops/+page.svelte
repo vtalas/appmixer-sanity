@@ -1714,7 +1714,7 @@
         {/if}
       </div>
       <span class="text-xs text-muted-foreground">
-        ranking Saturday 6:00 · one candidate researched every 5 hours · a batch stays active 72 h
+        ranking Friday 12:00 · one candidate researched every 5 hours · a batch stays active 72 h
       </span>
     </div>
     {#if data.research?.error}
@@ -1806,7 +1806,7 @@
       </div>
     {:else}
       <div class="text-sm text-muted-foreground">
-        No batch yet. The first ranking is created on Saturday at 6:00; its candidates show up here.
+        No batch yet. The first ranking is created on Friday at 12:00; its candidates show up here.
       </div>
     {/if}
     {#if research?.signals}
