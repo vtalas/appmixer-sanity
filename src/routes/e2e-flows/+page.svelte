@@ -4,15 +4,28 @@
   import { Badge } from '$lib/components/ui/badge';
   import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '$lib/components/ui/dialog';
   import { Checkbox } from '$lib/components/ui/checkbox';
-  import { invalidateAll, goto } from '$app/navigation';
+  import { invalidateAll, replaceState } from '$app/navigation';
   import { page } from '$app/stores';
-  import { ExternalLink, Github, Trash2, FileDiff, FileText, Play, Square, RefreshCw, ListX, PlayCircle, Clipboard, Check } from 'lucide-svelte';
+  import { ExternalLink, Github, Trash2, FileDiff, FileText, Play, Square, RefreshCw, ListX, PlayCircle, Clipboard, Check, KeyRound } from 'lucide-svelte';
+  import AccountsDialog from '$lib/components/e2e/AccountsDialog.svelte';
+  import ConnectorSearch from '$lib/components/e2e/ConnectorSearch.svelte';
 
   let { data } = $props();
 
+  let showAccountsDialog = $state(false);
+  // Connector group the accounts dialog is narrowed to ('' = all)
+  let accountsConnector = $state('');
+
+  /** @param {string} [connector] */
+  function openAccounts(connector = '') {
+    accountsConnector = connector;
+    showAccountsDialog = true;
+  }
+
   // Initialize filters from URL params
   const params = $page.url.searchParams;
-  let searchQuery = $state(params.get('q') || '');
+  // A link with only ?connector= (older links, the PRs page) still shows the name in the box
+  let searchQuery = $state(params.get('q') || params.get('connector') || '');
   let connectorFilter = $state(params.get('connector') || '');
   let syncFilter = $state(params.get('sync') || '');
   let resultFilter = $state(params.get('result') || '');
@@ -30,18 +43,20 @@
       return;
     }
 
-    const url = new URL($page.url);
+    // Read the address from the window, not from `$page`: the effect must depend only
+    // on the filters, or every URL change re-runs it.
+    const url = new URL(window.location.href);
     const sp = url.searchParams;
     q ? sp.set('q', q) : sp.delete('q');
     connector ? sp.set('connector', connector) : sp.delete('connector');
     sync ? sp.set('sync', sync) : sp.delete('sync');
     result ? sp.set('result', result) : sp.delete('result');
+    if (url.search === window.location.search) return;
 
-    goto(url.pathname + (sp.toString() ? '?' + sp.toString() : ''), {
-      replaceState: true,
-      keepFocus: true,
-      noScroll: true
-    });
+    // Shallow routing, not goto(): a navigation sets `$navigating`, and the root layout
+    // swaps the page for its "Loading…" bar while that is set — the page is unmounted and
+    // mounted again, and the search box loses the focus after every typed character.
+    replaceState(url.pathname + url.search, {});
   });
 
   const flows = $derived(data.flows || []);
@@ -66,16 +81,27 @@
   });
 
   // Filtering
-  const connectors = $derived(
-    [...new Set(flows.map((f) => f.connector).filter(Boolean))].sort()
-  );
+  // Connectors with their flow counts — the suggestions of the connector search
+  const connectorOptions = $derived.by(() => {
+    /** @type {Map<string, number>} */
+    const counts = new Map();
+    for (const flow of flows) {
+      if (!flow.connector) continue;
+      counts.set(flow.connector, (counts.get(flow.connector) || 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  });
 
   const filteredFlows = $derived(
     flows.filter((flow) => {
+      // The search is by connector: free text matches a part of the name, a picked
+      // suggestion (connectorFilter) pins exactly one connector.
       const matchesSearch =
-        !searchQuery ||
-        flow.flowName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        flow.connector?.toLowerCase().includes(searchQuery.toLowerCase());
+        !!connectorFilter ||
+        !searchQuery.trim() ||
+        flow.connector?.toLowerCase().includes(searchQuery.trim().toLowerCase());
 
       const matchesConnector = !connectorFilter || flow.connector === connectorFilter;
       const matchesSync = !syncFilter || flow.syncStatus === syncFilter;
@@ -832,6 +858,15 @@
           Copy Report
         {/if}
       </Button>
+      <Button
+        variant="outline"
+        onclick={() => openAccounts()}
+        disabled={flows.length === 0}
+        title="Accounts the test flows need — connect them here instead of in a flow"
+      >
+        <KeyRound size={15} class="mr-2" />
+        Accounts
+      </Button>
       <Button variant="outline" onclick={runScan} disabled={isScanning}>
         <RefreshCw size={15} class="mr-2 {isScanning ? 'animate-spin' : ''}" />
         {isScanning ? 'Scanning...' : 'Scan'}
@@ -1090,21 +1125,12 @@
 
     <!-- Filters -->
     <div class="flex flex-wrap gap-4">
-      <Input
-        type="text"
-        placeholder="Search flows..."
-        bind:value={searchQuery}
-        class="max-w-sm"
+      <ConnectorSearch
+        connectors={connectorOptions}
+        bind:query={searchQuery}
+        bind:selected={connectorFilter}
+        class="w-full max-w-sm"
       />
-      <select
-        bind:value={connectorFilter}
-        class="px-3 py-2 border rounded-md bg-background text-sm"
-      >
-        <option value="">All Connectors</option>
-        {#each connectors as connector}
-          <option value={connector}>{connector}</option>
-        {/each}
-      </select>
       <select
         bind:value={syncFilter}
         class="px-3 py-2 border rounded-md bg-background text-sm"
@@ -1187,19 +1213,24 @@
                   <span class="text-xs text-red-600 font-medium">✗ {group.failed}</span>
                 {/if}
                 {#if group.accountAvailable === true}
-                  <span
-                    class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border bg-emerald-50 text-emerald-700 border-emerald-200"
-                    title="A service account for this connector exists on the instance"
+                  <button
+                    type="button"
+                    class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100 cursor-pointer"
+                    title="A service account for this connector exists on the instance — click to check or connect its accounts"
+                    onclick={() => openAccounts(group.connector)}
                   >
                     Account
-                  </span>
+                  </button>
                 {:else if group.accountAvailable === false}
-                  <span
-                    class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border bg-amber-50 text-amber-800 border-amber-200"
-                    title="No service account for this connector on the instance — flows will not run until one is connected"
+                  <button
+                    type="button"
+                    class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100 cursor-pointer"
+                    title="No service account for this connector on the instance — click to connect one"
+                    onclick={() => openAccounts(group.connector)}
                   >
                     No account
-                  </span>
+                    <span class="underline">Connect</span>
+                  </button>
                 {/if}
               </div>
               {#if group.deployed > 0}
@@ -1397,6 +1428,13 @@
     {/if}
   {/if}
 </div>
+
+<!-- Accounts Dialog -->
+<AccountsDialog
+  bind:open={showAccountsDialog}
+  bind:connector={accountsConnector}
+  onchanged={() => invalidateAll()}
+/>
 
 <!-- Upload to Instance Dialog -->
 <Dialog bind:open={showUploadDialog}>
