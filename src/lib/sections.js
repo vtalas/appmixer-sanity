@@ -16,19 +16,9 @@ export const SECTIONS = [
       'The E2E test flows from GitHub by connector, what is deployed on the instance and how the last runs went.'
   },
   {
-    href: '/prs',
-    label: 'PRs',
-    description: 'Open connector pull requests and the E2E state of every connector they touch.'
-  },
-  {
     href: '/releases',
     label: 'Release',
     description: 'What dev has that is not released yet, and the release PR to master.'
-  },
-  {
-    href: '/statistics',
-    label: 'Statistics',
-    description: 'What was released month by month: connectors, components and E2E test flows.'
   },
   {
     href: '/authub',

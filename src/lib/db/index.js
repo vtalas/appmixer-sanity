@@ -236,55 +236,6 @@ export async function initializeDatabase() {
     )
   `);
 
-  // Account service names present on an instance (snapshot taken during the
-  // e2e scan) — lets PR views compute account availability for connectors
-  // that have no cached flows (e.g. brand-new connectors added by a PR).
-  await client.execute(`
-    CREATE TABLE IF NOT EXISTS e2e_accounts (
-      instance_url TEXT NOT NULL,
-      service TEXT NOT NULL,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      PRIMARY KEY (instance_url, service)
-    )
-  `);
-
-  // Open PRs of the connectors repo (cache refreshed by the PR scan),
-  // scoped per repo — the instance join happens at read time.
-  await client.execute(`
-    CREATE TABLE IF NOT EXISTS e2e_prs (
-      repo TEXT NOT NULL,
-      number INTEGER NOT NULL,
-      title TEXT,
-      author TEXT,
-      url TEXT,
-      base_branch TEXT,
-      head_branch TEXT,
-      head_sha TEXT,
-      draft INTEGER DEFAULT 0,
-      pr_created_at TEXT,
-      pr_updated_at TEXT,
-      connectors TEXT,
-      test_flows TEXT,
-      files_count INTEGER,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      PRIMARY KEY (repo, number)
-    )
-  `);
-
-  // Migrations: merge-checklist data collected by the PR scan
-  // (linked issues, E2E report found on the issue, CI state, mergeability)
-  for (const column of [
-    'head_committed_at TEXT',
-    'mergeable INTEGER',
-    'ci_status TEXT',
-    'linked_issues TEXT',
-    'e2e_report TEXT'
-  ]) {
-    try {
-      await client.execute(`ALTER TABLE e2e_prs ADD COLUMN ${column}`);
-    } catch {}
-  }
-
   await client.execute(`CREATE INDEX IF NOT EXISTS idx_e2e_runs_state ON e2e_runs(state)`);
   await client.execute(
     `CREATE INDEX IF NOT EXISTS idx_e2e_runs_flow ON e2e_runs(flow_name, queued_at DESC)`
@@ -300,16 +251,6 @@ export async function initializeDatabase() {
     CREATE TABLE IF NOT EXISTS release_bundle_blobs (
       sha TEXT PRIMARY KEY,
       content TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-
-  // Connector / component / E2E flow counts of a git tree (/statistics).
-  // Keyed by tree sha, so entries never go stale.
-  await client.execute(`
-    CREATE TABLE IF NOT EXISTS statistics_tree_counts (
-      tree_sha TEXT PRIMARY KEY,
-      counts TEXT NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);

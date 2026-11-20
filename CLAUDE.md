@@ -125,40 +125,15 @@ Everything the page shows comes from a DB cache refreshed by an explicit **Scan*
 | `api/e2e-flows/accounts/connect` | POST | Start connecting an account (`{authType}` = module type) — instance auth ticket + URL to open in a popup |
 | `api/e2e-flows/accounts/status` | GET | Poll an auth ticket (`?ticket=`) → `{finished, error, accountId}` |
 | `api/e2e-flows/accounts/bind` | POST | Bind an account to the deployed flows of connectors (`{accountId, connectors}`) |
-| `api/public/e2e-runner/tick` | GET | **Cron entrypoint** (no session; `CRON_SECRET` auth, env credentials). Params: `scan=1`, `prs=1` (refresh the PR cache), `schedule=1` (enqueue flows without a result in 20h), `loop=1` (tick until budget ~250s runs out) |
+| `api/public/e2e-runner/tick` | GET | **Cron entrypoint** (no session; `CRON_SECRET` auth, env credentials). Params: `scan=1`, `schedule=1` (enqueue flows without a result in 20h), `loop=1` (tick until budget ~250s runs out) |
 
-`vercel.json` schedules the cron daily (`scan=1&prs=1&schedule=1&loop=1`). Vercel Cron sends `Authorization: Bearer <CRON_SECRET>` automatically when the env var is set; for more frequent processing point any external cron at the same URL.
+`vercel.json` schedules the cron daily (`scan=1&schedule=1&loop=1`). Vercel Cron sends `Authorization: Bearer <CRON_SECRET>` automatically when the env var is set; for more frequent processing point any external cron at the same URL.
 
 ### Environment Variables
 
 - `CRON_SECRET` — auth for the public cron endpoint (required for cron)
 - `E2E_MAX_CONCURRENT` — max flows running at once (default 1 — the instance must never run everything at once)
 - `E2E_RUN_TIMEOUT_SECONDS` — per-run completion timeout (default 480, same as `appmixer e2e run`)
-
-## Statistics (`/statistics`)
-
-Monthly report of what is released, from the **release repo** (`Appmixer-ai/appmixer-components` `master` — `RELEASE_TARGET_*`, the same repo `/releases` compares against). `?month=YYYY-MM` (UTC months, default the current one) picks the month:
-
-- **State at the end of the month** — counts of connectors (`bundle.json` files), components (`component.json` files) and E2E test flows (`test-flow*.json` files) in the tree of the last commit on master before the month ended, with the change against the end of the previous month. The counting rule is the one of appmixer-component-preview's Statistics panel (files by name anywhere under `src/appmixer/`), so the numbers match it on a checkout of the same commit. Every connector's `name`/`version` and the flow files of that commit are listed too (links pin the commit, not `master`).
-- **Released this month** — every commit on master in the month whose message is a release message, `<connector> <version> (new|major|minor|patch)` (the convention the release page writes), counted per type (the type tiles filter the list); the remaining commits are kept aside as "other".
-
-- **`src/lib/server/statistics.js`** — `loadMonthlyStatistics(userId, month)`: three GitHub commit queries (last commit before month end, last before month start, commits of the month) + `fetchTreeFiles` of the month-end tree (cached by tree sha in memory in `release/compare.js`), bundle.json blobs via `readBundles` (DB cache by blob sha). Components and flows are attributed to the nearest connector directory (`ownerOf`), so nested connectors (`microsoft/calendar`) count for themselves.
-- **`statistics_tree_counts`** table (`src/lib/db/statistics.js`) — the three counts plus the connector directories per tree sha, so the previous month's tree is never downloaded again (content-addressed, never invalidated). The directories give the connectors added and removed during the month, shown next to the net change (September 2026: 5 new, hubbi removed = +4).
-
-## Connector PRs (`/prs`)
-
-Open PRs of the connectors repo with the E2E flow state of every connector they touch — the same per-flow view as `/e2e-flows` (sync status, last result, account badge) but grouped by PR.
-
-- **`e2e_prs`** table — PR cache keyed by `(repo, number)` (**repo-scoped, not instance-scoped** — the join with `e2e_flows` happens at read time): title/author/url/branches/draft, `connectors` (JSON — derived per changed file via connector roots, i.e. dirs under `src/appmixer/` containing bundle.json/service.json/package.json, longest match wins for nested connectors), `test_flows` (JSON — test-flow files changed by the PR with the flow identity read from the PR head), `files_count`, plus merge-checklist data: `head_committed_at`, `mergeable`, `ci_status` (`success`|`failure`|`pending`|`none`), `linked_issues` (JSON — issues resolved from closing refs in the PR body, cross-repo aware: issues usually live in appmixer-components), `e2e_report` (JSON — newest E2E report comment found on a linked issue: `createdAt`, `url`, `allPassed`, `source` `marker`|`heuristic`; the marker is `<!-- e2e-report {...} -->`, written by the `/pr-finalize` workflow).
-- **`src/lib/server/e2e/prs.js`** — `scanPRs(userId)`: list open PRs + changed files, replace the cache; connector roots are extended per PR with manifests the PR itself adds (a brand-new connector maps to itself, not its parent). Also collects per PR: mergeability, CI state of the head commit (check runs + legacy statuses), head commit date, linked issues (closing refs) and the newest E2E report comment on them. `scanPR(userId, number)`: the same per-PR work for a single PR (a handful of GitHub calls instead of a few hundred — drives the per-card refresh button), upserting just that row and deleting it when the PR is no longer open. `buildPROverview(userId)`: joins the PR cache with the caller-instance `e2e_flows` cache — per PR → per connector → flows with `changedInPR`/`newInPR` flags (flows added by the PR that dev doesn't know yet appear as `not_deployed` + `newInPR`). Account availability comes from the **`e2e_accounts`** snapshot (instance account service names, refreshed during every e2e scan) so it also works for connectors with no cached flows.
-- **Merge checklist** — `buildChecklist(pr, connectors)` in `prs.js`, computed at read time (time-based rules stay correct without a rescan). Items (each `pass`|`fail`|`warn`; `readyToMerge` = all pass): **account** (service account on the instance for every touched connector), **issue** (PR body has a closing issue reference and the issue exists), **report** (linked issue carries a fully green E2E report ≤5 days old AND newer than the PR head commit), **ci** (checks green on the head commit), **mergeable** (not draft, no merge conflict), **flows** (flows changed by the PR deployed, all connector flows green on the instance). `readyForTesting` = the `account` and `ci` items pass (the PR can be E2E-tested — everything else is what the testing produces). Shown as pills on each PR card with "Needs Account" / "Ready for Testing" / "Ready to Merge" stat tiles/filters, and exposed in the public `api/public/prs` response (`readyToMerge`, `readyForTesting`, `checklist`, `linkedIssues`).
-- **`src/lib/db/prs.js`** — `getPRs(repo)` / `replacePRs(repo, prs)` / `upsertPR(repo, pr)` / `deletePR(repo, number)`. `lastScanAt` in the overview is the **oldest** cached row, so one refreshed card doesn't make the whole list look freshly scanned.
-
-| Route | Methods | Description |
-|---|---|---|
-| `api/prs/scan` | POST | Refresh the whole PR cache (session auth) |
-| `api/prs/[number]/scan` | POST | Refresh a single PR (session auth); returns `{removed: true}` when it is no longer open |
-| `api/public/prs` | GET | **Public** (no auth) PR status from the caches only — per PR: connectors with `accountAvailable` + flows (`syncStatus`, `deployed`, `lastResult`, `changedInPR`); optional `?connector=` filter |
 
 ## Release (`/releases`)
 
