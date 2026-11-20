@@ -830,3 +830,80 @@ export async function getAccountAuthStatus(userId, ticket) {
     accountId: data?.accountId ? String(data.accountId) : null
   };
 }
+
+/**
+ * Installed connector bundles of the instance: `{ "appmixer.asana": "2.2.2", … }`.
+ * @param {string} userId - User ID (email)
+ * @returns {Promise<Record<string, string>>}
+ */
+export async function listInstalledBundles(userId) {
+  const response = await appmixerFetch(userId, '/bundles');
+  if (!response.ok) {
+    throw new Error(`Failed to list installed bundles: ${await appmixerErrorMessage(response)}`);
+  }
+  const data = await response.json();
+  /** @type {Record<string, string>} */
+  const versions = {};
+  for (const [name, bundle] of Object.entries(data || {})) {
+    if (bundle?.version) versions[name] = String(bundle.version);
+  }
+  return versions;
+}
+
+/**
+ * What the configured account may do with connectors on the instance. The engine lets
+ * an admin upload anything and a user with vendors only packages of those vendors.
+ * @param {string} userId - User ID (email)
+ * @returns {Promise<{username: string, isAdmin: boolean, vendors: string[]}>}
+ */
+export async function getInstanceUser(userId) {
+  const response = await appmixerFetch(userId, '/user');
+  if (!response.ok) {
+    throw new Error(`Failed to read the instance user: ${await appmixerErrorMessage(response)}`);
+  }
+  const user = await response.json();
+  const list = (/** @type {unknown} */ v) => (Array.isArray(v) ? v.map(String) : v ? [String(v)] : []);
+  return {
+    username: user?.username || user?.email || '',
+    isAdmin: list(user?.scope).includes('admin'),
+    vendors: list(user?.vendor)
+  };
+}
+
+/**
+ * Start installing a connector package (POST /components). The instance unpacks,
+ * validates and installs it in the background — poll `getConnectorUploadStatus`.
+ * @param {string} userId - User ID (email)
+ * @param {Uint8Array} zip
+ * @returns {Promise<{ticket: string}>}
+ */
+export async function uploadConnectorPackage(userId, zip) {
+  const response = await appmixerFetch(userId, '/components', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: /** @type {BodyInit} */ (zip)
+  });
+  if (!response.ok) {
+    const error = new Error(await appmixerErrorMessage(response));
+    /** @type {any} */ (error).status = response.status;
+    throw error;
+  }
+  return response.json();
+}
+
+/**
+ * State of an upload: null until the instance has stored the ticket, `{ started }`
+ * while it runs, then `{ finished, … }` — with `err` when it failed (`finished` is
+ * set on failure too).
+ * @param {string} userId - User ID (email)
+ * @param {string} ticket
+ * @returns {Promise<any|null>}
+ */
+export async function getConnectorUploadStatus(userId, ticket) {
+  const response = await appmixerFetch(userId, `/components/uploader/${encodeURIComponent(ticket)}`);
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error(`Failed to read the upload status: ${await appmixerErrorMessage(response)}`);
+  }
+  return response.json();
+}

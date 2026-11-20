@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Appmixer Sanity Check - A SvelteKit application for tracking sanity checks of Appmixer connectors. It creates snapshots of connector versions, allows testing and documenting component status, and tracks progress with visual dashboards. It also runs the E2E test flows, shows the merge readiness of connector PRs, manages Auth Hub bundles, and releases connectors from appmixer-connectors `dev` to appmixer-components `master` (`/releases`).
+Appmixer Sanity Check - A SvelteKit application for tracking sanity checks of Appmixer connectors. It creates snapshots of connector versions, allows testing and documenting component status, and tracks progress with visual dashboards. It also runs the E2E test flows, shows the merge readiness of connector PRs, manages Auth Hub bundles, releases connectors from appmixer-connectors `dev` to appmixer-components `master` (`/releases`), and publishes connectors of the production marketplace to an Appmixer instance (`/marketplace`).
 
 ## Commands
 
@@ -300,6 +300,18 @@ Admin features (edit service config, whitelist keys, upload bundle, upload from 
 ### Testing locally
 
 A worktree with `node_modules` symlinked to the main checkout needs Vite's `server.fs.allow` to include the main checkout, otherwise the client entry is refused (403) and the page never hydrates. To exercise uploads without touching a real Auth Hub, point `AUTH_HUB_URL_QA` at a local mock of `/service-config`, `POST /components` and `/components/uploader/<ticket>` (shell variables win over `.env`).
+
+## Marketplace (`/marketplace`)
+
+Publishes connectors of the **production marketplace** to the Appmixer instance of the caller's Settings — what the Backoffice's "install from marketplace" does, for any connector and any version, one by one or in a batch.
+
+- **The marketplace** is a public, unauthenticated API (`MARKETPLACE_URL`, default the PRD API Gateway the release repo's "Marketplace PRD" workflow fills): `GET /modules?latest=1` (catalogue: `{name: {version: {label, description, icon, filename, changelog, engine?}}}`, ~3 MB because every icon is an inlined `data:` URL), `GET /modules/<name>` (every version), `GET /modules/download/<name>-<version>.zip` (answers `{url}` — a short-lived signed S3 link; it is signed for any file name, so a missing package only fails at the download). `src/lib/server/marketplace.js` caches the catalogue in memory for 5 minutes.
+- **The instance** is the one in Settings (per-user DB settings override env) — there is no instance list; switch it in Settings. `loadInstanceState(userId)` reads `GET /user` (scope `admin`, `vendor[]`) and `GET /bundles` (`{name: {version}}`). The engine lets an admin upload anything and a user with vendors only packages of those vendors (`verifyComponentCreatePerm` + per-file check in the Uploader); the page disables Publish otherwise and says why.
+- **Verdict** per row — marketplace version picked in the row (latest by default; the other versions load when the select is hovered or focused) against the installed one: **Not installed**, **Upgrade**, **Up to date**, **Downgrade** ("Instance is newer" tile — dev instances run unreleased versions). Shared rule: `publishVerdict()` in `src/lib/marketplace.js`. Bundles the instance has and the marketplace doesn't are only counted.
+- **Publishing** (app admins only, `ADMIN_EMAILS`) — `POST api/marketplace/publish` `{name, version, instanceUrl}` downloads the package server-side and sends it to the instance's `POST /components` (`application/octet-stream`), returning the uploader `ticket`; the page polls `GET api/marketplace/publish?ticket=&instanceUrl=` every 2 s for up to 10 minutes (same ticket format as Auth Hub — `err` is checked before `finished`). `instanceUrl` is the instance the dialog named: the server answers **409** when Settings point elsewhere by then. The dialog ticks new and upgrade rows; same-version and downgrade rows only by hand (a single-row publish is ticked as is). Uploads run one after another in the browser; **Stop** finishes the current one, **Retry failed** re-runs failures. Afterwards the page re-reads `GET api/marketplace/installed`.
+- **Icons** — `GET api/marketplace/icon?name=` serves the catalogue's data URL as an image with a `sandbox` CSP: they are third-party SVG on the app's origin.
+- Verified 2026-11-20 on dev-automated-00001: `appmixer.deepai` 1.0.1 → 1.0.2 installed in 7 s and `GET /bundles` reported 1.0.2 right after.
+- Installing replaces the connector's code on the instance at once. On instances with several API nodes the connector icon refreshes only on the node that handled the upload.
 
 ## Automation Hub (`/automation-hub`)
 

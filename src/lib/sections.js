@@ -37,6 +37,12 @@ export const SECTIONS = [
       'Connectors registered in the Auth Hub of each environment, their bundles and configuration.'
   },
   {
+    href: '/marketplace',
+    label: 'Marketplace',
+    description:
+      'Connectors of the production marketplace against the Appmixer instance: publish any version to it.'
+  },
+  {
     href: '/automation-hub',
     label: 'Automation Hub',
     description:
