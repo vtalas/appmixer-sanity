@@ -1,14 +1,12 @@
 <script>
-  import { FlaskConical, Workflow, GitPullRequest, Rocket, ChartColumn, KeyRound, LayoutGrid, Map, Cloud, Activity, Settings } from 'lucide-svelte';
+  import { FlaskConical, Workflow, Rocket, KeyRound, LayoutGrid, Map, Cloud, Activity, Settings } from 'lucide-svelte';
   import { SECTIONS } from '$lib/sections.js';
 
   /** @type {Record<string, any>} */
   const ICONS = {
     '/test-runs': FlaskConical,
     '/e2e-flows': Workflow,
-    '/prs': GitPullRequest,
     '/releases': Rocket,
-    '/statistics': ChartColumn,
     '/authub': KeyRound,
     '/automation-hub': LayoutGrid,
     '/automations': Map,

@@ -14,9 +14,7 @@ See `CLAUDE.md` for the full architecture documentation (data model, modules, in
 | `/test-runs/[runId]`               | Test run detail — connectors with status badges (pending / ok / fail / blocked)                                                                                                                                                                                                                                                                            |
 | `/test-runs/[runId]/[connectorId]` | Connector detail — per-component test results, GitHub issue links                                                                                                                                                                                                                                                                                          |
 | `/e2e-flows`                       | E2E test flows — GitHub (dev branch) merged with the Appmixer instance state and latest run results; diff, upload, revert, sync-to-PR, and a throttled test runner                                                                                                                                                                                         |
-| `/prs`                             | Connector PRs — open PRs of the connectors repo with the E2E flow state of every touched connector and a per-PR **merge checklist** (account, linked issue, fresh green E2E report, CI, mergeability, flows green)                                                                                                                                         |
 | `/releases`                        | Release — connector versions on appmixer-components `master` (production) against appmixer-connectors `dev`: what needs releasing (new / major / minor / patch), unbumped changes, and a **Release** button (admins) that commits each selected connector as `<connector> <version> (<type>)` to a release branch and opens a `[RELEASE]` PR into `master` |
-| `/statistics`                      | Statistics — monthly report of what is released on appmixer-components `master` (the production marketplace): connectors / components / E2E test flows at the end of the month with the change against the previous month, and the releases of the month (commits `<connector> <version> (new\|major\|minor\|patch)`) filterable by type; `?month=YYYY-MM` |
 | `/authub`                          | Auth Hub — browse and manage OAuth connector configs/bundles in the **production or QA** Auth Hub (switcher), verification status per environment, and upload bundles packed straight from GitHub (`appmixer pack` rules, from appmixer-connectors `dev` or appmixer-components `master`), one or many at once                                             |
 | `/automation-hub`                  | Automation Hub — Appmixer's own marketplace widget (`appmixer.ui.AutomationHub`) for the configured instance: activate, start/stop and inspect the `appmixer-sanity-hub` integrations (GitHub responders)                                                                                                                                                  |
 | `/settings`                        | Per-user overrides for Appmixer / GitHub credentials (take precedence over env values)                                                                                                                                                                                                                                                                     |
@@ -62,12 +60,11 @@ GET /api/public/e2e-runner/tick
 
 **Query parameters** (combine freely):
 
-| Param        | Effect                                                                                                       |
-| ------------ | ------------------------------------------------------------------------------------------------------------ |
-| `scan=1`     | Refresh the E2E flows cache (GitHub + instance + latest results)                                             |
-| `prs=1`      | Refresh the connector PR cache (open PRs, changed files, linked issues, E2E reports, CI state, mergeability) |
-| `schedule=1` | Enqueue every deployed flow with no result from the last 20 h                                                |
-| `loop=1`     | Tick the runner until the queue drains or the ~250 s time budget runs out                                    |
+| Param        | Effect                                                                    |
+| ------------ | ------------------------------------------------------------------------- |
+| `scan=1`     | Refresh the E2E flows cache (GitHub + instance + latest results)          |
+| `schedule=1` | Enqueue every deployed flow with no result from the last 20 h             |
+| `loop=1`     | Tick the runner until the queue drains or the ~250 s time budget runs out |
 
 `vercel.json` schedules the full combination daily at 03:00 UTC:
 
@@ -75,7 +72,7 @@ GET /api/public/e2e-runner/tick
 {
   "crons": [
     {
-      "path": "/api/public/e2e-runner/tick?scan=1&prs=1&schedule=1&loop=1",
+      "path": "/api/public/e2e-runner/tick?scan=1&schedule=1&loop=1",
       "schedule": "0 3 * * *"
     }
   ]
@@ -85,8 +82,8 @@ GET /api/public/e2e-runner/tick
 Vercel Cron sends the `Authorization: Bearer <CRON_SECRET>` header automatically when the `CRON_SECRET` env var is set on the project. For more frequent processing, point any external cron (or a manual `curl`) at the same URL:
 
 ```bash
-# refresh the PR cache on demand
-curl "https://<host>/api/public/e2e-runner/tick?prs=1" \
+# refresh the E2E flows cache on demand
+curl "https://<host>/api/public/e2e-runner/tick?scan=1" \
   -H "Authorization: Bearer $CRON_SECRET"
 ```
 
@@ -128,86 +125,6 @@ OAuth connectors registered in Auth Hub, with verification status.
 | `connector` | Connector service ID (e.g. `appmixer:airtable`)                        |
 | `status`    | `verified` \| `in_progress` \| `not_verified` (default when never set) |
 | `clientId`  | OAuth client ID registered in Auth Hub                                 |
-
-### `GET /api/public/prs`
-
-Open connector PRs with E2E state and the merge checklist. Data comes from the PR and E2E caches in the env-credential scope; refresh via the cron endpoint (`prs=1`).
-
-| Param       | Required | Description                                                            |
-| ----------- | -------- | ---------------------------------------------------------------------- |
-| `connector` | no       | Only PRs touching this connector (e.g. `airtop`, `microsoft/calendar`) |
-
-**Response** — `200 OK`:
-
-```json
-{
-  "repo": "Appmixer-ai/appmixer-connectors",
-  "lastScanAt": "2026-09-02 08:27:47",
-  "prs": [
-    {
-      "number": 1228,
-      "title": "Airtop connector (10 components, API key auth)",
-      "url": "https://github.com/Appmixer-ai/appmixer-connectors/pull/1228",
-      "author": "petrolivka",
-      "draft": false,
-      "baseBranch": "dev",
-      "updatedAt": "2026-08-31T19:46:55Z",
-      "readyToMerge": false,
-      "readyForTesting": false,
-      "checklist": [
-        {
-          "key": "account",
-          "label": "Account",
-          "status": "fail",
-          "detail": "No service account on the instance for: airtop"
-        }
-      ],
-      "linkedIssues": [
-        {
-          "repo": "Appmixer-ai/appmixer-components",
-          "number": 2824,
-          "state": "open",
-          "url": "https://github.com/Appmixer-ai/appmixer-components/issues/2824"
-        }
-      ],
-      "connectors": [
-        {
-          "name": "airtop",
-          "accountAvailable": false,
-          "flows": [
-            {
-              "name": "E2E Airtop - Browser Interaction",
-              "syncStatus": "not_deployed",
-              "deployed": false,
-              "lastResult": null,
-              "lastResultAt": null,
-              "changedInPR": true,
-              "newInPR": true
-            }
-          ]
-        }
-      ]
-    }
-  ]
-}
-```
-
-The **merge checklist** contains six items, each `pass` | `fail` | `warn` with a human-readable `detail`; `readyToMerge` is true only when all six pass:
-
-| Key         | Rule                                                                                                                 |
-| ----------- | -------------------------------------------------------------------------------------------------------------------- |
-| `account`   | A service account for every touched connector exists on the instance                                                 |
-| `issue`     | The PR body has a closing issue reference (e.g. `Closes Appmixer-ai/appmixer-components#123`) and the issue exists   |
-| `report`    | The linked issue carries a fully green E2E report comment that is **≤ 5 days old and newer than the PR head commit** |
-| `ci`        | CI checks on the head commit are green                                                                               |
-| `mergeable` | Not a draft, no merge conflict with the base branch                                                                  |
-| `flows`     | Flows changed by the PR are deployed and all of the connector's flows are green on the instance                      |
-
-`lastScanAt` is the **oldest** cached PR row — the freshness of the list as a whole, so refreshing a single PR card doesn't make it read as a full rescan.
-
-`readyForTesting` is the earlier gate — true when the `account` and `ci` items pass, i.e. the PR can actually be E2E-tested (a service account exists for every touched connector and CI is green). The remaining items are what the testing itself produces.
-
-Time-based rules are evaluated at read time, so a stale report flips to `fail` without a rescan.
 
 ## Developing
 
